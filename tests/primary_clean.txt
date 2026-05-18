@@ -1,0 +1,12 @@
+The Q3 2024 SEC 10-Q filing for Acme Corp, filed November 4, 2024, reports
+revenue of $1.2 billion, up 8% year-over-year. The methodology section in
+the supplementary appendix details the n=4892 customer cohort. Sample size
+and 95% confidence intervals are provided in Table 3 of the appendix.
+
+In a direct quote from the November 4 earnings call transcript, CFO Jane Doe
+stated: "We see headwinds in Q4 due to FX exposure and we expect margin
+compression of roughly 200 basis points." The transcript is on file with
+the SEC EDGAR system at https://www.sec.gov/edgar.
+
+A counterpoint from the limitations section: the cohort excluded customers
+who churned mid-quarter, which may bias retention metrics upward.

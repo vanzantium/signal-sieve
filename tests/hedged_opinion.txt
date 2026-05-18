@@ -1,0 +1,13 @@
+There is a reasonable case that AI development may proceed faster than
+current regulation can adapt. Some labs publish capabilities reports;
+others remain opaque, which limits external review.
+
+According to the Stanford AI Index 2024, training compute roughly doubles
+every six months, though the report's methodology section notes selection
+bias in which labs disclose figures. A counterpoint: economic gravity
+tends to slow disruptive technologies once liability and insurance markets
+catch up, so the curve may plateau.
+
+I think the tradeoff between speed and safety is real, but I am uncertain
+about the timing. The mechanism by which regulation lags innovation is
+plausible but not proven, and alternative explanations exist.
