@@ -171,19 +171,30 @@
           {% set es = result.evidence_shape %}
           <details open><summary>Evidence shape</summary>
             <table style="width:100%;font-size:.86rem;border-collapse:collapse;margin-top:10px">
-              {% set rows = [
-                ("Local numbers", es.local_numeric_anchors),
-                ("Named data source", ("yes — " + (es.named_sources|join(", ")) if es.named_sources else "none")),
-                ("Primary data linked", ("yes" if es.primary_links_present else "no")),
-                ("External receipts", es.external_receipts),
-                ("Caveats present", ("yes" if es.source_caveats_present else "no")),
-              ] %}
-              {% for label, val in rows %}
               <tr style="border-bottom:1px solid var(--line)">
-                <td style="padding:5px 8px;color:var(--muted);width:50%">{{ label }}</td>
-                <td style="padding:5px 8px;font-weight:700">{{ val }}</td>
+                <td style="padding:5px 8px;color:var(--muted);width:50%">Local numbers</td>
+                <td style="padding:5px 8px;font-weight:700">{{ es.local_numeric_anchors }}</td>
               </tr>
-              {% endfor %}
+              <tr style="border-bottom:1px solid var(--line)">
+                <td style="padding:5px 8px;color:var(--muted)">Named data providers</td>
+                <td style="padding:5px 8px;font-weight:700">{{ (es.named_data_providers|join(", ")) if es.named_data_providers else "none" }}</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--line)">
+                <td style="padding:5px 8px;color:var(--muted)">Markets / venues</td>
+                <td style="padding:5px 8px;font-weight:700">{{ (es.markets_venues_mentioned|join(", ")) if es.markets_venues_mentioned else "none" }}</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--line)">
+                <td style="padding:5px 8px;color:var(--muted)">Primary data linked</td>
+                <td style="padding:5px 8px;font-weight:700">{{ "yes" if es.primary_links_present else "no" }}</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--line)">
+                <td style="padding:5px 8px;color:var(--muted)">External receipts</td>
+                <td style="padding:5px 8px;font-weight:700">{{ es.external_receipts }}</td>
+              </tr>
+              <tr style="border-bottom:1px solid var(--line)">
+                <td style="padding:5px 8px;color:var(--muted)">Caveats present</td>
+                <td style="padding:5px 8px;font-weight:700">{{ "yes" if es.source_caveats_present else "no" }}</td>
+              </tr>
             </table>
           </details>{% endif %}
 
@@ -191,11 +202,34 @@
           {% set sb = result.signal_brief %}
           <details open><summary>Signal brief — {{ (result.source_genre or sb.genre or "").replace("_"," ").title() }}</summary>
             <div style="margin-top:10px">
-              {% if sb.primary_data_named %}
-              <p class="mini" style="margin-bottom:10px">
+
+              {% if sb.named_data_providers or sb.markets_venues_mentioned %}
+              <p style="font-size:.82rem;margin-bottom:10px;color:var(--muted)">
+                {% if sb.named_data_providers %}
+                  <span style="color:var(--text)">Data providers:</span>
+                  <strong>{{ sb.named_data_providers|join(", ") }}</strong>
+                  {% if not sb.primary_data_verified %}<em style="color:#f2cc60"> — named, not verified</em>{% endif %}
+                {% endif %}
+                {% if sb.markets_venues_mentioned %}
+                  {% if sb.named_data_providers %}&ensp;·&ensp;{% endif %}
+                  <span style="color:var(--text)">Markets / venues:</span>
+                  <strong>{{ sb.markets_venues_mentioned|join(", ") }}</strong>
+                {% endif %}
+              </p>
+              {% elif sb.primary_data_named %}
+              <p style="font-size:.82rem;margin-bottom:10px;color:var(--muted)">
                 Primary data: <strong>{{ sb.primary_data_named|join(", ") }}</strong> —
                 {% if sb.primary_data_verified %}verified{% else %}named, not verified by this run{% endif %}
               </p>
+              {% endif %}
+
+              {% if sb.top_movers %}
+              <div style="margin-bottom:12px">
+                <p style="font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:#e3b341;margin-bottom:6px">Top Movers</p>
+                <ul style="margin:0;padding-left:18px;font-family:ui-monospace,'Cascadia Code',monospace">
+                  {% for item in sb.top_movers %}<li style="font-size:.84rem;margin:3px 0">{{ item }}</li>{% endfor %}
+                </ul>
+              </div>
               {% endif %}
 
               {% for section_key, label, color in [
@@ -312,10 +346,12 @@
       const sb = r.signal_brief || {};
       const es = r.evidence_shape || {};
       if (es.local_numeric_anchors) {
-        const named = (es.named_sources||[]).join(', ') || 'none';
+        const providers = (es.named_data_providers||[]).join(', ') || 'none';
+        const venues    = (es.markets_venues_mentioned||[]).join(', ') || 'none';
         lines.push('', 'EVIDENCE SHAPE',
           `  Local numbers          : ${es.local_numeric_anchors}`,
-          `  Named data source      : ${named}`,
+          `  Named data providers   : ${providers}`,
+          `  Markets / venues       : ${venues}`,
           `  Primary data linked    : ${es.primary_links_present ? 'yes' : 'no'}`,
           `  External receipts      : ${es.external_receipts}`,
           `  Caveats present        : ${es.source_caveats_present ? 'yes' : 'no'}`,
@@ -326,8 +362,14 @@
           `Genre        : ${sb.genre.replace(/_/g,' ')}`,
           `Source type  : ${(sb.source_type||'').replace(/_/g,' ')}`,
         );
-        if ((sb.primary_data_named||[]).length)
-          lines.push(`Primary data : ${sb.primary_data_named.join(', ')} — ${sb.primary_data_verified ? 'verified' : 'named, not verified by this run'}`);
+        if ((sb.named_data_providers||[]).length)
+          lines.push(`Data providers : ${sb.named_data_providers.join(', ')} — ${sb.primary_data_verified ? 'verified' : 'named, not verified'}`);
+        if ((sb.markets_venues_mentioned||[]).length)
+          lines.push(`Markets/venues : ${sb.markets_venues_mentioned.join(', ')}`);
+        if ((sb.top_movers||[]).length) {
+          lines.push('', 'TOP MOVERS');
+          sb.top_movers.forEach(m => lines.push(`  ${m}`));
+        }
         const briefSections = [
           ['key_signals','KEY SIGNALS'],['source_caveats','SOURCE CAVEATS'],
           ['interpretation_or_framing','INTERPRETATION / FRAMING'],

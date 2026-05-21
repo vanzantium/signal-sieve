@@ -108,21 +108,37 @@ def detect_genre(text: str, url: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Named data source detection
+# Named source detection — split into data providers vs market venues
 # ---------------------------------------------------------------------------
 
-_DATA_SOURCES = re.compile(
+# Data providers / research services / government statistics agencies
+_DATA_PROVIDER_RE = re.compile(
     r"\b(Finnhub|Bloomberg|Reuters|FactSet|Refinitiv|S&P Global|S&P 500|"
-    r"Moody'?s|Fitch|EDGAR|SEC|SEDAR|NYSE|NASDAQ|TSX|CSE|OTC Markets|"
+    r"Moody'?s|Fitch|EDGAR|SEC|SEDAR|"
     r"Yahoo Finance|Google Finance|Morningstar|CapIQ|PitchBook|Crunchbase|"
     r"CoinMarketCap|CoinGecko|Glassnode|Dune Analytics|"
     r"Alpha Vantage|Quandl|FRED|World Bank|IMF|BLS|BEA|Census Bureau|"
-    r"Federal Reserve|Fed)\b",
+    r"Federal Reserve|The Fed)\b",
+)
+
+# Market venues / exchanges / trading platforms
+_MARKET_VENUE_RE = re.compile(
+    r"\b(NASDAQ|NYSE|TSX|CSE|OTC(?:\s+Markets)?|LSE|ASX|HKEX|SGX|Euronext|"
+    r"CBOE|CME|NYMEX|ICE|Cboe)\b",
+)
+
+# Combined — keeps backward-compat for code that calls _find_named_sources()
+_DATA_SOURCES = re.compile(
+    r"\b(Finnhub|Bloomberg|Reuters|FactSet|Refinitiv|S&P Global|S&P 500|"
+    r"Moody'?s|Fitch|EDGAR|SEC|SEDAR|NYSE|NASDAQ|TSX|CSE|OTC(?:\s+Markets)?|"
+    r"Yahoo Finance|Google Finance|Morningstar|CapIQ|PitchBook|Crunchbase|"
+    r"CoinMarketCap|CoinGecko|Glassnode|Dune Analytics|"
+    r"Alpha Vantage|Quandl|FRED|World Bank|IMF|BLS|BEA|Census Bureau|"
+    r"Federal Reserve|The Fed|LSE|ASX|HKEX|SGX|Euronext|CBOE|CME|NYMEX|ICE)\b",
 )
 
 
-def _find_named_sources(text: str) -> List[str]:
-    hits = _DATA_SOURCES.findall(text)
+def _unique_ordered(hits: List[str]) -> List[str]:
     seen: set = set()
     out: List[str] = []
     for h in hits:
@@ -130,6 +146,76 @@ def _find_named_sources(text: str) -> List[str]:
             seen.add(h.lower())
             out.append(h)
     return out
+
+
+def _find_named_sources(text: str) -> List[str]:
+    """All named data sources and market venues (combined)."""
+    return _unique_ordered(_DATA_SOURCES.findall(text))
+
+
+def _find_data_providers(text: str) -> List[str]:
+    """Data providers / research services / government agencies only."""
+    return _unique_ordered(_DATA_PROVIDER_RE.findall(text))
+
+
+def _find_market_venues(text: str) -> List[str]:
+    """Market exchanges and trading venues only."""
+    return _unique_ordered(_MARKET_VENUE_RE.findall(text))
+
+
+# ---------------------------------------------------------------------------
+# Bullet compression
+# ---------------------------------------------------------------------------
+
+def _compress(text: str, max_chars: int = 200) -> str:
+    """Truncate bullet text to max_chars at a word boundary."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    last_space = truncated.rfind(" ")
+    if last_space > max_chars // 2:
+        truncated = truncated[:last_space]
+    return truncated.rstrip(".,;:") + "…"
+
+
+# ---------------------------------------------------------------------------
+# TOP MOVERS parsing
+# ---------------------------------------------------------------------------
+
+_TOP_MOVER_ROW = re.compile(
+    r"\b([A-Z]{2,5})\b"           # ticker
+    r"(?:[^\n.!?]{0,40})"         # optional label / company name snippet
+    r"(?:C?\$\s*\d+(?:\.\d+)?)"   # price
+    r"[^\n.!?]{0,40}"             # gap
+    r"([-+]\d+(?:\.\d+)?%)",      # change
+)
+
+# Known words that look like tickers but aren't
+_FAKE_TICKERS = frozenset({
+    "OTC", "THE", "FOR", "AND", "NOT", "ARE", "HAS", "HAD", "WAS", "ITS",
+    "ALL", "BUT", "CAN", "DID", "GET", "GOT", "LET", "MAY", "NEW", "NOW",
+    "OUT", "OWN", "PUT", "RUN", "SAY", "SET", "USE", "WAY", "WHO", "WHY",
+    "YET", "YOU", "CMS", "SEC", "FDA", "TSX", "CSE", "ETF", "IPO", "CEO",
+    "CFO", "COO", "CBD", "THC", "CEO", "EBITDA",
+})
+
+
+def _parse_top_movers(text: str) -> List[Dict]:
+    """Extract ticker / price / change rows from market snapshot text.
+
+    Returns a list of compact strings like 'IPW  $2.10  -32.27%'.
+    """
+    results: List[Dict] = []
+    seen: set = set()
+    for m in _TOP_MOVER_ROW.finditer(text):
+        ticker = m.group(1)
+        if ticker in _FAKE_TICKERS or ticker in seen:
+            continue
+        seen.add(ticker)
+        snippet = m.group(0).strip()
+        results.append(_compress(snippet, 80))
+    return results[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +251,9 @@ def build_custody_breakdown(
     st_confidence: float,
 ) -> Dict:
     """Return layered custody breakdown."""
-    named_srcs = _find_named_sources(text)
+    data_providers = _find_data_providers(text)
+    market_venues  = _find_market_venues(text)
+    named_srcs     = _unique_ordered(data_providers + market_venues)
     primary_linked = bool(re.search(
         r"https?://(?:sec\.gov|sedarplus|sedar\.com|edgar|doi\.org|arxiv\.org|pubmed)",
         text.lower(),
@@ -175,17 +263,19 @@ def build_custody_breakdown(
         text, re.I,
     ))
     publisher_custody = _PUBLISHER_WEIGHTS.get(source_type, 0.40)
-    data_custody = 0.85 if primary_linked else (0.60 if named_srcs else 0.30)
+    data_custody = 0.85 if primary_linked else (0.60 if data_providers else 0.30)
     claim_custody = min(0.30 + attribution_hits * 0.07, 0.85)
     return {
-        "publisher_custody":    round(publisher_custody, 2),
-        "data_custody":         round(data_custody, 2),
-        "claim_custody":        round(claim_custody, 2),
+        "publisher_custody":      round(publisher_custody, 2),
+        "data_custody":           round(data_custody, 2),
+        "claim_custody":          round(claim_custody, 2),
         "source_type_confidence": round(st_confidence, 2),
         "primary_source_present": primary_linked,
         "primary_source_linked":  primary_linked,
-        "data_source_named":    bool(named_srcs),
-        "data_source_name":     named_srcs[0] if named_srcs else None,
+        "data_source_named":      bool(data_providers),
+        "data_source_name":       data_providers[0] if data_providers else None,
+        "named_data_providers":   data_providers,
+        "markets_venues_mentioned": market_venues,
     }
 
 
@@ -240,18 +330,22 @@ def build_evidence_shape(
         "none"
     )
 
-    named_srcs   = _find_named_sources(text)
-    interp_count = len(_INTERP_CUES.findall(text))
-    missing_count = len(_MISSING_CUES.findall(text))
+    data_providers = _find_data_providers(text)
+    market_venues  = _find_market_venues(text)
+    named_srcs     = _unique_ordered(data_providers + market_venues)
+    interp_count   = len(_INTERP_CUES.findall(text))
+    missing_count  = len(_MISSING_CUES.findall(text))
 
     return {
-        "local_numeric_anchors":     local_numeric,
-        "named_sources":             named_srcs,
-        "external_receipts":         external_receipts,
-        "primary_links_present":     primary_links,
-        "source_caveats_present":    bool(_CAVEAT_CUES.search(text)),
-        "unverified_claims_count":   missing_count,
-        "interpretive_claims_count": interp_count,
+        "local_numeric_anchors":      local_numeric,
+        "named_sources":              named_srcs,         # kept for backward compat
+        "named_data_providers":       data_providers,
+        "markets_venues_mentioned":   market_venues,
+        "external_receipts":          external_receipts,
+        "primary_links_present":      primary_links,
+        "source_caveats_present":     bool(_CAVEAT_CUES.search(text)),
+        "unverified_claims_count":    missing_count,
+        "interpretive_claims_count":  interp_count,
     }
 
 
@@ -292,11 +386,18 @@ def _is_key_signal_generic(sent: str) -> bool:
 
 
 def _extract_financial(text: str, source_type: str, source_url: str) -> Dict:
-    sentences   = _split_sentences(text)
-    named_srcs  = _find_named_sources(text)
+    sentences      = _split_sentences(text)
+    data_providers = _find_data_providers(text)
+    market_venues  = _find_market_venues(text)
+    named_srcs     = _unique_ordered(data_providers + market_venues)
     primary_linked = bool(re.search(
         r"https?://(?:sec\.gov|sedarplus|edgar|doi\.org|arxiv)", text.lower(),
     ))
+
+    # ── Extract TOP MOVERS table rows first ──────────────────────────────────
+    top_movers = _parse_top_movers(text)
+    # Build a set of ticker strings to skip during sentence classification
+    _mover_tickers = {m.split()[0] for m in top_movers if m}
 
     key_signals: List[str] = []
     source_caveats: List[str] = []
@@ -306,25 +407,28 @@ def _extract_financial(text: str, source_type: str, source_url: str) -> Dict:
     for sent in sentences:
         if not sent or len(sent.split()) < 4:
             continue
+        # Skip table-blob sentences (very long lines = extracted table rows already captured)
+        if len(sent) > 350:
+            continue
         # Priority: caveat > missing > key signal > interpretation
         if _CAVEAT_CUES.search(sent):
-            source_caveats.append(sent)
+            source_caveats.append(_compress(sent))
         elif _MISSING_CUES.search(sent):
-            missing_receipts.append(sent)
+            missing_receipts.append(_compress(sent))
         elif (
             _TICKER_PRICE_PAT.search(sent)
             or _BREADTH_PAT.search(sent)
             or _SESSION_PAT.search(sent)
             or _DATA_SOURCES.search(sent)
         ):
-            key_signals.append(sent)
+            key_signals.append(_compress(sent))
         elif _INTERP_CUES.search(sent):
-            interpretation.append(sent)
+            interpretation.append(_compress(sent))
 
-    # Auto-add: named source but not linked
-    if named_srcs and not primary_linked:
+    # Auto-add: named data provider but not linked
+    if data_providers and not primary_linked:
         missing_receipts.append(
-            f"{', '.join(named_srcs[:2])} data is named but not directly verified by this run."
+            f"{', '.join(data_providers[:2])} data is named but not directly verified by this run."
         )
     # Auto-add: secondary article → no primary endpoint checked
     if source_type in ("secondary", "secondary_market_article", "news_article"):
@@ -337,14 +441,17 @@ def _extract_financial(text: str, source_type: str, source_url: str) -> Dict:
     dnpf: List[str] = []
     if source_type in ("secondary", "secondary_market_article", "news_article"):
         dnpf.append("Primary financial data — this is a secondary article.")
-    has_otc_caveat = any(
-        "OTC" in s.upper() or "prior close" in s.lower() for s in source_caveats
+    has_otc_caveat = (
+        any("OTC" in s.upper() or "prior close" in s.lower() for s in source_caveats)
+        or "OTC" in " ".join(market_venues).upper()
     )
     if has_otc_caveat:
         dnpf.append("Live OTC market data (prices reflect prior close, not real-time).")
     # Unexplained large moves
     big_moves = re.findall(r"\b([A-Z]{2,5})\b[^.!?\n]{0,60}[-+]\d{2,}(?:\.\d+)?%", text)
     for ticker in list(dict.fromkeys(big_moves))[:2]:
+        if ticker in _FAKE_TICKERS:
+            continue
         if not re.search(
             rf"\b{re.escape(ticker)}\b.{{0,120}}"
             r"\b(because|due to|following|after|amid|on news|on volume)\b",
@@ -357,33 +464,38 @@ def _extract_financial(text: str, source_type: str, source_url: str) -> Dict:
 
     # Follow-up sources
     follow_ups: List[str] = []
-    if "OTC" in text.upper():
+    if market_venues and any(v.upper() in ("OTC", "OTC MARKETS") for v in market_venues):
         follow_ups.append("OTC Markets (otcmarkets.com) for real-time OTC quotes.")
-    if named_srcs:
+    if data_providers:
         follow_ups.append(
-            f"Direct {named_srcs[0]} API or dashboard for raw data verification."
+            f"Direct {data_providers[0]} API or dashboard for raw data verification."
         )
     follow_ups.append(
         "Company investor-relations pages or SEC/SEDAR filings for any named move drivers."
     )
 
     return {
-        "genre":                  "financial_market_snapshot",
-        "source_type":            source_type,
-        "primary_data_named":     named_srcs,
-        "primary_data_verified":  primary_linked,
-        "key_signals":            key_signals[:8],
-        "source_caveats":         source_caveats[:5],
-        "interpretation_or_framing": interpretation[:6],
-        "missing_receipts":       missing_receipts[:6],
-        "do_not_pass_forward_as": dnpf[:5],
-        "follow_up_sources":      follow_ups[:5],
+        "genre":                      "financial_market_snapshot",
+        "source_type":                source_type,
+        "primary_data_named":         named_srcs,
+        "named_data_providers":       data_providers,
+        "markets_venues_mentioned":   market_venues,
+        "primary_data_verified":      primary_linked,
+        "top_movers":                 top_movers,
+        "key_signals":                key_signals[:8],
+        "source_caveats":             source_caveats[:5],
+        "interpretation_or_framing":  interpretation[:6],
+        "missing_receipts":           missing_receipts[:6],
+        "do_not_pass_forward_as":     dnpf[:5],
+        "follow_up_sources":          follow_ups[:5],
     }
 
 
 def _extract_generic(text: str, genre: str, source_type: str, source_url: str) -> Dict:
-    sentences  = _split_sentences(text)
-    named_srcs = _find_named_sources(text)
+    sentences      = _split_sentences(text)
+    data_providers = _find_data_providers(text)
+    market_venues  = _find_market_venues(text)
+    named_srcs     = _unique_ordered(data_providers + market_venues)
     primary_linked = bool(re.search(
         r"https?://(?:sec\.gov|sedarplus|edgar|doi\.org|arxiv\.org|pubmed)",
         text.lower(),
@@ -398,20 +510,20 @@ def _extract_generic(text: str, genre: str, source_type: str, source_url: str) -
         if not sent or len(sent.split()) < 5:
             continue
         if _CAVEAT_CUES.search(sent):
-            source_caveats.append(sent)
+            source_caveats.append(_compress(sent))
         elif _MISSING_CUES.search(sent):
-            missing_receipts.append(sent)
+            missing_receipts.append(_compress(sent))
         elif _is_key_signal_generic(sent):
-            key_signals.append(sent)
+            key_signals.append(_compress(sent))
         elif _INTERP_CUES.search(sent):
-            interpretation.append(sent)
+            interpretation.append(_compress(sent))
 
     dnpf: List[str] = []
     if source_type in ("secondary", "news_article", "tertiary", "secondary_market_article"):
         dnpf.append("Primary source material — verify key claims at the original source.")
-    if named_srcs and not primary_linked:
+    if data_providers and not primary_linked:
         dnpf.append(
-            f"Direct output from {named_srcs[0]} — named but not linked or verified by this run."
+            f"Direct output from {data_providers[0]} — named but not linked or verified by this run."
         )
 
     follow_ups: List[str] = ["Primary source for each main claim."]
@@ -419,16 +531,18 @@ def _extract_generic(text: str, genre: str, source_type: str, source_url: str) -
         follow_ups.append(f"Direct source: {', '.join(named_srcs[:2])}.")
 
     return {
-        "genre":                  genre,
-        "source_type":            source_type,
-        "primary_data_named":     named_srcs,
-        "primary_data_verified":  primary_linked,
-        "key_signals":            key_signals[:8],
-        "source_caveats":         source_caveats[:5],
-        "interpretation_or_framing": interpretation[:6],
-        "missing_receipts":       missing_receipts[:4],
-        "do_not_pass_forward_as": dnpf[:4],
-        "follow_up_sources":      follow_ups[:4],
+        "genre":                      genre,
+        "source_type":                source_type,
+        "primary_data_named":         named_srcs,
+        "named_data_providers":       data_providers,
+        "markets_venues_mentioned":   market_venues,
+        "primary_data_verified":      primary_linked,
+        "key_signals":                key_signals[:8],
+        "source_caveats":             source_caveats[:5],
+        "interpretation_or_framing":  interpretation[:6],
+        "missing_receipts":           missing_receipts[:4],
+        "do_not_pass_forward_as":     dnpf[:4],
+        "follow_up_sources":          follow_ups[:4],
     }
 
 

@@ -30,10 +30,31 @@ SOURCE_TYPES = [
 
 # ── URL fetcher ───────────────────────────────────────────────────────────────
 
+# Obvious single-chunk nav/UI junk (exact-match, case-insensitive)
+_JUNK_CHUNK_RE = re.compile(
+    r"^(?:skip\s+to\s+(?:main\s+)?content|menu|search|home|subscribe|log\s?in|"
+    r"sign\s+in|share|tweet|facebook|linkedin|pinterest|email this|print|"
+    r"advertisement|sponsored|related articles?|you may also like|"
+    r"read more|see more|load more|comments?|reply|close|dismiss|"
+    r"toggle\s+\w+|back\s+to\s+top|cookie\s+\w+|accept\s+all|"
+    r"privacy\s+policy|terms\s+of\s+(?:use|service))$",
+    re.I,
+)
+
+
+def _is_junk_chunk(text: str) -> bool:
+    if _JUNK_CHUNK_RE.match(text):
+        return True
+    # Very short ALL-CAPS items (nav labels, e.g. "HOME", "ABOUT US")
+    if len(text.split()) <= 3 and text.upper() == text and not re.search(r"\d", text):
+        return True
+    return False
+
+
 class _TextExtractor(HTMLParser):
     """Strip HTML to plain text, skipping boilerplate/chrome tags."""
     _SKIP = {"script", "style", "nav", "footer", "head",
-             "noscript", "iframe", "aside", "svg", "form"}
+             "noscript", "iframe", "aside", "svg", "form", "header"}
 
     def __init__(self) -> None:
         super().__init__()
@@ -51,14 +72,49 @@ class _TextExtractor(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self._depth:
             t = data.strip()
-            if t:
+            if t and not _is_junk_chunk(t):
                 self.chunks.append(t)
+
+
+def _extract_article_html(raw: str) -> str:
+    """Attempt to isolate article/main body HTML before full-page parse.
+
+    Tries (in order): <article>, <main>, then a div with a known content class/id.
+    Returns original raw if no container found or extracted block is too short.
+    """
+    lower = raw.lower()
+
+    for tag in ("article", "main"):
+        m = re.search(rf"<{tag}(?:\s[^>]*)?>", lower)
+        if m:
+            end_marker = f"</{tag}>"
+            end_pos = lower.rfind(end_marker)
+            if end_pos > m.start() + 200:
+                block = raw[m.start(): end_pos + len(end_marker)]
+                # Only use if it has meaningful content
+                if len(block.split()) >= 80:
+                    return block
+
+    # Content-bearing div
+    m = re.search(
+        r'<div[^>]+(?:class|id)=["\'][^"\']*'
+        r"(?:article[-_]?body|entry[-_]?content|post[-_]?content|"
+        r"story[-_]?body|field[-_]?body|article__body|post__content|"
+        r"main[-_]?content|content[-_]?area)"
+        r'[^"\']*["\'][^>]*>',
+        raw, re.I,
+    )
+    if m:
+        # Can't reliably find end without full parse; take a generous slice
+        return raw[m.start(): m.start() + 60_000]
+
+    return raw
 
 
 def fetch_url_text(url: str) -> tuple[str, str]:
     """Fetch URL and return (plain_text, error_message).
 
-    Returns up to 10 000 characters of extracted text.
+    Returns up to 12 000 characters of extracted text.
     Limitation: JavaScript-rendered pages (React/SPA) may return little text.
     Works well on static pages, blogs, Wikipedia, press releases, arxiv, SEC.
     """
@@ -76,9 +132,16 @@ def fetch_url_text(url: str) -> tuple[str, str]:
         return "", f"Fetch error: {exc}"
 
     if "html" in ct or raw.lstrip().startswith("<"):
+        # Prefer article/main body extraction to avoid nav/header junk
+        html_to_parse = _extract_article_html(raw)
         parser = _TextExtractor()
-        parser.feed(raw)
+        parser.feed(html_to_parse)
         text = " ".join(parser.chunks)
+        # If we got very little from the article block, fall back to full page
+        if len(text.split()) < 80 and html_to_parse is not raw:
+            full_parser = _TextExtractor()
+            full_parser.feed(raw)
+            text = " ".join(full_parser.chunks)
     else:
         text = raw
 
@@ -87,7 +150,7 @@ def fetch_url_text(url: str) -> tuple[str, str]:
     if len(text) < 50:
         return "", "Too little text extracted — page may require JavaScript to render."
 
-    return text[:10_000], ""
+    return text[:12_000], ""
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

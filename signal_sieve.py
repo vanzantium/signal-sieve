@@ -719,7 +719,13 @@ def analyze(
     if word_count < 50:
         flags.append("Short text: limited context; confidence capped.")
     if internal_coherence < 0.30 and word_count >= 50:
-        flags.append("Low internal coherence: argument appears repetitive or logically unconnected.")
+        if source_genre == "financial_market_snapshot":
+            flags.append(
+                "Table-heavy market snapshot: argument coherence scoring is not the primary "
+                "signal mode for this genre — use evidence shape and signal brief instead."
+            )
+        else:
+            flags.append("Low internal coherence: argument appears repetitive or logically unconnected.")
     if language_note:
         flags.append(language_note)
     if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and not genre_mismatch:
