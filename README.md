@@ -27,7 +27,28 @@ It is a **receipt clerk, not an oracle**. It can flag a propaganda piece. It can
 
 ---
 
-## Quick start
+## Live web app
+
+Try it now — no install, no signup:
+
+👉 **[signal-sieve.onrender.com](https://signal-sieve.onrender.com)**  
+*(Render free tier — first load may take ~30 s while the service wakes up)*
+
+Or deploy your own copy in two clicks:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/vanzantium/signal-sieve)
+
+The web app also exposes a REST API:
+
+```bash
+curl -X POST https://signal-sieve.onrender.com/api/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text": "BREAKTHROUGH miracle cure!", "source_type": "social"}'
+```
+
+---
+
+## Quick start (CLI / library)
 
 **No install needed. Zero dependencies. Python 3.8+.**
 
