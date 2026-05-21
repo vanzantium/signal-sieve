@@ -57,6 +57,24 @@
     .share-bar span.lbl { color:var(--muted); font-size:.82rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em; }
     .copy-flash { font-size:.78rem; color:#7ee787; opacity:0; transition:opacity .25s; margin-left:4px; }
     .copy-flash.show { opacity:1; }
+    /* Phase 1.7 — state hygiene */
+    .btn-ghost { background:transparent; border:1px solid var(--line); color:var(--muted); border-radius:999px; padding:9px 18px; font-size:.84rem; font-weight:700; cursor:pointer; transition:background .15s,color .15s; }
+    .btn-ghost:hover { background:var(--soft); color:var(--text); filter:none; }
+    .btn-ghost.btn-new { border-color:rgba(88,166,255,.35); color:var(--accent); }
+    .btn-ghost.btn-danger { border-color:rgba(248,81,73,.35); color:#ff7b72; }
+    .form-actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+    .history-panel { margin-top:28px; }
+    .history-panel summary { cursor:pointer; color:var(--muted); font-size:.84rem; font-weight:800; text-transform:uppercase; letter-spacing:.07em; }
+    .history-panel summary:hover { color:var(--text); }
+    .h-toolbar { display:flex; gap:8px; margin:12px 0 10px; flex-wrap:wrap; }
+    .h-entry { background:var(--soft); border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin-bottom:8px; cursor:pointer; transition:border-color .15s; }
+    .h-entry:hover { border-color:var(--accent); }
+    .h-meta { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:4px; }
+    .h-time { font-size:.76rem; color:var(--muted); }
+    .h-source { font-size:.76rem; background:var(--bg); border:1px solid var(--line); border-radius:999px; padding:2px 8px; color:var(--text); max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .h-action { font-size:.78rem; font-weight:800; }
+    .h-conf { font-size:.76rem; color:var(--muted); }
+    .h-summary { font-size:.83rem; color:var(--muted); overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
   </style>
 </head>
 <body>
@@ -119,7 +137,15 @@
         </label>
         <input id="source_url" name="source_url" value="{{ source_url or '' }}" placeholder="https://…">
 
+        <div id="staleWarn" class="alert warn" style="display:none;margin-top:12px">
+          ⚠ Input changed since last run. <strong>Source name may be from a previous analysis</strong> — review before running.
+        </div>
+
         <button type="submit" class="btn-run">Run Sieve</button>
+        <div class="form-actions">
+          <button type="button" class="btn-ghost" onclick="clearAll()">Clear all</button>
+          <button type="button" class="btn-ghost btn-new" id="btnNewAnalysis" style="display:none" onclick="newAnalysis()">New Analysis</button>
+        </div>
         <p class="note">Receipt clerk, not oracle. For consequential claims, seek primary sources.</p>
       </form>
 
@@ -282,6 +308,16 @@
       </section>
 
     </div>
+
+    <!-- Phase 1.7 — local analysis history -->
+    <details class="history-panel" id="historyPanel" style="display:none">
+      <summary>Recent analyses <span id="historyCount" style="font-weight:400;color:var(--muted)"></span></summary>
+      <div class="h-toolbar">
+        <button type="button" class="btn-ghost" onclick="exportHistory()">Export JSON</button>
+        <button type="button" class="btn-ghost btn-danger" onclick="clearHistory()">Clear history</button>
+      </div>
+      <div id="historyList"></div>
+    </details>
   </div>
 
   {% if result %}
@@ -429,5 +465,214 @@
     }
   </script>
   {% endif %}
+
+  <!-- Phase 1.7 — state hygiene + local history management (runs on every page load) -->
+  <script>
+  (function () {
+    var LS_KEY = 'ss_history';
+    var MAX_ENTRIES = 20;
+    var _lastSubmit = null;  // snapshot of form values from the last completed analysis
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+    function safe(fn) { try { return fn(); } catch (_) { return null; } }
+    function getHistory() { return safe(function () { var r = localStorage.getItem(LS_KEY); return r ? JSON.parse(r) : []; }) || []; }
+    function saveHistory(h) { safe(function () { localStorage.setItem(LS_KEY, JSON.stringify(h)); }); }
+    function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function fmtTime(ts) {
+      var d = new Date(ts), now = new Date(), diff = now - d;
+      if (diff < 60000)    return 'just now';
+      if (diff < 3600000)  return Math.round(diff / 60000) + 'm ago';
+      if (diff < 86400000) return Math.round(diff / 3600000) + 'h ago';
+      return d.toLocaleDateString(undefined, {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+    }
+    var ACTION_COL = { verify_primary:'#7ee787', treat_as_lead:'#f2cc60', seek_receipts:'#ffa657', drop:'#ff7b72', reject:'#ff7b72' };
+
+    // ── form element refs ─────────────────────────────────────────────────────
+    function $id(id) { return document.getElementById(id); }
+
+    // ── capture current form state ────────────────────────────────────────────
+    function captureSubmit() {
+      _lastSubmit = {
+        text:        ($id('text') || {}).value || '',
+        fetch_url:   ($id('fetch_url') || {}).value || '',
+        source_url:  ($id('source_url') || {}).value || '',
+        source_name: ($id('source_name') || {}).value || '',
+        source_type: ($id('source_type') || {}).value || 'auto',
+      };
+    }
+
+    // ── stale metadata warning ────────────────────────────────────────────────
+    function checkStaleness() {
+      var warn = $id('staleWarn');
+      if (!warn || !_lastSubmit) return;
+      var textNow  = ($id('text') || {}).value || '';
+      var fetchNow = ($id('fetch_url') || {}).value || '';
+      var urlNow   = ($id('source_url') || {}).value || '';
+      var nameNow  = ($id('source_name') || {}).value || '';
+      var inputChanged = (textNow !== _lastSubmit.text)
+                      || (fetchNow !== _lastSubmit.fetch_url)
+                      || (urlNow  !== _lastSubmit.source_url);
+      var nameStale    = nameNow !== '' && nameNow === _lastSubmit.source_name;
+      warn.style.display = (inputChanged && nameStale) ? 'block' : 'none';
+    }
+
+    // ── URL fetch field: clear source_name + source_url on change ────────────
+    // Prevents stale "Claude" / previous-analysis metadata carrying over
+    // when the user pastes a new URL to fetch.
+    function bindFetchClear() {
+      var fi = $id('fetch_url');
+      if (!fi) return;
+      var prevFetch = fi.value;
+      fi.addEventListener('input', function () {
+        if (this.value.trim() && this.value.trim() !== prevFetch.trim()) {
+          var sn = $id('source_name');
+          var su = $id('source_url');
+          // Only auto-clear if source_name matches the last-submitted value
+          // (i.e., was auto-filled, not manually typed in this session)
+          if (sn && _lastSubmit && sn.value === _lastSubmit.source_name) sn.value = '';
+          if (su && _lastSubmit && su.value === _lastSubmit.source_url)   su.value = '';
+        }
+        prevFetch = this.value;
+      });
+    }
+
+    // ── public: clear all ─────────────────────────────────────────────────────
+    window.clearAll = function () {
+      ['text','fetch_url','source_url','source_name'].forEach(function (id) {
+        var el = $id(id); if (el) el.value = '';
+      });
+      var sel = $id('source_type'); if (sel) sel.value = 'auto';
+      var cc  = $id('charCount');
+      if (cc) { cc.textContent = '0 / 12,000'; cc.style.color = 'var(--muted)'; }
+      _lastSubmit = null;
+      window.location.href = '/';
+    };
+
+    // ── public: new analysis (save current result → clear form) ──────────────
+    window.newAnalysis = function () {
+      var R = (typeof RESULT !== 'undefined') ? RESULT : null;
+      if (R) _pushEntry(R);
+      window.location.href = '/';
+    };
+
+    // ── history helpers ───────────────────────────────────────────────────────
+    function _makeEntry(R) {
+      var domain = '';
+      safe(function () { if (R.source_url) domain = new URL(R.source_url).hostname.replace(/^www\./,''); });
+      if (!domain) domain = R.source_name || 'unknown';
+      return {
+        ts:            Date.now(),
+        source_name:   R.source_name || '',
+        domain:        domain,
+        action:        R.recommended_action,
+        confidence:    R.scores ? R.scores.overall_confidence : null,
+        triage_summary: R.triage_summary || '',
+        form: {
+          text:        ($id('text') || {}).value || '',
+          fetch_url:   ($id('fetch_url') || {}).value || '',
+          source_url:  ($id('source_url') || {}).value || '',
+          source_name: ($id('source_name') || {}).value || '',
+          source_type: ($id('source_type') || {}).value || 'auto',
+        },
+        result: R,
+      };
+    }
+
+    function _pushEntry(R) {
+      var entry = _makeEntry(R);
+      var h = getHistory();
+      // Dedup: skip if most-recent entry has same text + action
+      var isDup = h.length > 0 && h[0].form && h[0].form.text === entry.form.text && h[0].action === entry.action;
+      if (!isDup) {
+        h.unshift(entry);
+        if (h.length > MAX_ENTRIES) h = h.slice(0, MAX_ENTRIES);
+        saveHistory(h);
+      }
+    }
+
+    // ── public: clear / export history ───────────────────────────────────────
+    window.clearHistory = function () { saveHistory([]); renderHistory(); };
+    window.exportHistory = function () {
+      var h = getHistory();
+      if (!h.length) { alert('No history to export.'); return; }
+      safe(function () {
+        var blob = new Blob([JSON.stringify(h, null, 2)], {type:'application/json'});
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'signal-sieve-history.json';
+        a.click();
+      });
+    };
+
+    // ── public: restore history entry into form ───────────────────────────────
+    window.restoreHistory = function (i) {
+      var h = getHistory(), e = h[i];
+      if (!e) return;
+      var f = e.form || {};
+      if ($id('text'))        $id('text').value        = f.text        || '';
+      if ($id('fetch_url'))   $id('fetch_url').value   = f.fetch_url   || '';
+      if ($id('source_url'))  $id('source_url').value  = f.source_url  || '';
+      if ($id('source_name')) $id('source_name').value = f.source_name || '';
+      var sel = $id('source_type');
+      if (sel && f.source_type) sel.value = f.source_type;
+      // Trigger char counter update
+      var evt = document.createEvent('Event'); evt.initEvent('input', true, true);
+      var ta = $id('text'); if (ta) ta.dispatchEvent(evt);
+      // Scroll to form
+      var card = document.querySelector('.card');
+      if (card) card.scrollIntoView({behavior:'smooth', block:'start'});
+    };
+
+    // ── render history panel ──────────────────────────────────────────────────
+    function renderHistory() {
+      var panel = $id('historyPanel');
+      var list  = $id('historyList');
+      var count = $id('historyCount');
+      if (!panel || !list) return;
+      var h = getHistory();
+      if (!h.length) { panel.style.display = 'none'; return; }
+      panel.style.display = 'block';
+      if (count) count.textContent = '(' + h.length + ')';
+      list.innerHTML = h.map(function (e, i) {
+        var col  = ACTION_COL[e.action] || '#8b949e';
+        var conf = e.confidence != null ? Math.round(e.confidence * 100) + '%' : '';
+        return '<div class="h-entry" onclick="restoreHistory(' + i + ')" title="Click to restore this analysis into the form">'
+          + '<div class="h-meta">'
+          + '<span class="h-time">' + esc(fmtTime(e.ts)) + '</span>'
+          + '<span class="h-source">' + esc(e.domain || e.source_name || 'unknown') + '</span>'
+          + '<span class="h-action" style="color:' + col + '">' + esc(e.action) + '</span>'
+          + (conf ? '<span class="h-conf">' + conf + '</span>' : '')
+          + '</div>'
+          + '<div class="h-summary">' + esc(e.triage_summary || e.action) + '</div>'
+          + '</div>';
+      }).join('');
+    }
+
+    // ── init ──────────────────────────────────────────────────────────────────
+    document.addEventListener('DOMContentLoaded', function () {
+      var R = (typeof RESULT !== 'undefined') ? RESULT : null;
+
+      if (R) {
+        // Page loaded with a fresh result: capture form state + auto-save
+        captureSubmit();
+        _pushEntry(R);
+        var newBtn = $id('btnNewAnalysis');
+        if (newBtn) newBtn.style.display = '';
+      }
+
+      // Attach stale-check listeners
+      ['text', 'fetch_url', 'source_url'].forEach(function (id) {
+        var el = $id(id); if (el) el.addEventListener('input', checkStaleness);
+      });
+
+      // Attach fetch-URL isolator
+      bindFetchClear();
+
+      // Render history sidebar
+      renderHistory();
+    });
+
+  })();
+  </script>
 </body>
 </html>
