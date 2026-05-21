@@ -168,7 +168,11 @@ def _find_market_venues(text: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 def _compress(text: str, max_chars: int = 200) -> str:
-    """Truncate bullet text to max_chars at a word boundary."""
+    """Truncate bullet text to max_chars at a word boundary.
+
+    Strips dangling open punctuation (unclosed parentheses, brackets, etc.)
+    so cut-off items don't look like 'Company (TICK…'.
+    """
     text = text.strip()
     if len(text) <= max_chars:
         return text
@@ -176,7 +180,9 @@ def _compress(text: str, max_chars: int = 200) -> str:
     last_space = truncated.rfind(" ")
     if last_space > max_chars // 2:
         truncated = truncated[:last_space]
-    return truncated.rstrip(".,;:") + "…"
+    # Strip trailing noise: punctuation, open brackets, partial words
+    truncated = re.sub(r"[\s.,;:\-–—(\[{]+$", "", truncated)
+    return truncated + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -201,20 +207,52 @@ _FAKE_TICKERS = frozenset({
 })
 
 
-def _parse_top_movers(text: str) -> List[Dict]:
+_PRICE_RE   = re.compile(r"C?\$\s*\d+(?:\.\d+)?")
+_CHANGE_RE  = re.compile(r"[-+]\d+(?:\.\d+)?%")
+_COMPANY_BEFORE_RE = re.compile(
+    r"([A-Za-z][A-Za-z\s&',.\-]{2,35})\s*\(\s*$"
+)
+
+
+def _parse_top_movers(text: str) -> List[str]:
     """Extract ticker / price / change rows from market snapshot text.
 
-    Returns a list of compact strings like 'IPW  $2.10  -32.27%'.
+    Returns a list of compact display strings like:
+      'VFF  $2.53  +1.20%  (Village Farms International)'
+    Handles the common 'CompanyName (TICKER) at $price (±change%)' pattern
+    and strips stray closing parentheses that follow the ticker.
     """
-    results: List[Dict] = []
+    results: List[str] = []
     seen: set = set()
+
     for m in _TOP_MOVER_ROW.finditer(text):
         ticker = m.group(1)
         if ticker in _FAKE_TICKERS or ticker in seen:
             continue
         seen.add(ticker)
-        snippet = m.group(0).strip()
-        results.append(_compress(snippet, 80))
+
+        span = m.group(0)
+        price_m  = _PRICE_RE.search(span)
+        change_m = _CHANGE_RE.search(span)
+        if not price_m or not change_m:
+            continue
+
+        price  = price_m.group(0).replace(" ", "")
+        change = change_m.group(0)
+
+        # Look back up to 50 chars for a "CompanyName (" pattern
+        ctx_start = max(0, m.start() - 50)
+        ctx = text[ctx_start: m.start()]
+        comp_m = _COMPANY_BEFORE_RE.search(ctx)
+        company = comp_m.group(1).strip() if comp_m else ""
+
+        if company:
+            display = f"{ticker}  {price}  {change}  ({company})"
+        else:
+            display = f"{ticker}  {price}  {change}"
+
+        results.append(display)
+
     return results[:12]
 
 
