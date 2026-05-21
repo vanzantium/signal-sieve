@@ -34,10 +34,12 @@ _FIN_NUMERIC = re.compile(
     r"\d+(?:\.\d+)?\s*bps\b",                                    # 25 bps
 )
 _PRESS_RELEASE = re.compile(
-    r"\b(FOR IMMEDIATE RELEASE|press release|we are pleased to announce|"
+    r"\b(FOR IMMEDIATE RELEASE|press release|we are pleased to (?:announce|report|inform)|"
     r"the company (?:announces|is pleased)|(?:NASDAQ|NYSE|TSX|CSE):\s*[A-Z]+|"
     r"forward.?looking statements?|safe harbor|"
-    r"for more information.{0,40}(?:contact|visit)|investor relations)\b",
+    r"for more information.{0,40}(?:contact|visit))\b",
+    # NOTE: bare "investor relations" is intentionally excluded — too broad.
+    # URL-based IR page detection is handled in detect_genre() via _PRIMARY_URL_HINTS.
     re.I,
 )
 _OPINION_HINTS = re.compile(
@@ -87,7 +89,9 @@ def detect_genre(text: str, url: str = "") -> str:
     )):
         return "official_release"
 
-    if _PRESS_RELEASE.search(text):
+    # Require at least 2 distinct press-release signals to avoid false positives
+    # when text merely *mentions* a press release in passing.
+    if len(_PRESS_RELEASE.findall(text)) >= 2:
         return "official_release"
 
     fin_term_hits = len(_FIN_TERMS.findall(text))

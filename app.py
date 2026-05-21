@@ -385,7 +385,13 @@ _OPENAPI_SPEC: dict = {
                     },
                     "source_type": {
                         "type": "string", "enum": _SOURCE_TYPE_ENUM, "default": "auto",
-                        "description": "Declared source type. 'auto' infers from text and URL.",
+                        "description": (
+                            "Source-type hint. Use simple values: auto, primary, secondary, "
+                            "official, social, opinion, anonymous, etc. "
+                            "The system resolves this to a richer internal classification "
+                            "(e.g. secondary_market_article, official_release) based on "
+                            "text and URL signals. See resolved_source_type in the response."
+                        ),
                     },
                     "source_name": {
                         "type": "string", "maxLength": MAX_SOURCE_NAME_CHARS,
@@ -440,8 +446,35 @@ _OPENAPI_SPEC: dict = {
                             "genre mismatch, or missing source metadata."
                         ),
                     },
-                    "source_type":   {"type": "string", "enum": _SOURCE_TYPE_ENUM},
+                    "source_type": {
+                        "type": "string", "enum": _SOURCE_TYPE_ENUM,
+                        "description": "Alias for resolved_source_type. Kept for backward compat.",
+                    },
+                    "declared_source_type": {
+                        "type": "string",
+                        "description": "The source_type hint the caller provided (or 'auto').",
+                    },
+                    "resolved_source_type": {
+                        "type": "string",
+                        "description": (
+                            "The effective source type after genre-mismatch resolution. "
+                            "This is what scoring used. May differ from declared_source_type "
+                            "when the text pattern contradicts the caller's hint."
+                        ),
+                    },
+                    "inferred_source_type": {
+                        "type": "string",
+                        "description": "Source type inferred from text/URL signals alone, before hint is applied.",
+                    },
+                    "source_type_confidence": {
+                        "type": "number", "minimum": 0, "maximum": 1,
+                        "description": "Confidence that resolved_source_type is correct.",
+                    },
                     "source_genre":  {"type": "string", "enum": _GENRE_ENUM},
+                    "score_meaning": {
+                        "type": "string",
+                        "description": "Plain-language explanation of what overall_confidence measures.",
+                    },
                     "evidence_shape": {
                         "type": "object",
                         "description": "Structural inventory: numeric anchors, named sources, receipts.",
@@ -746,19 +779,32 @@ def api_v1_analyze():
     include_brief = payload.get("include_signal_brief", True)
     band = result.get("confidence_band", {})
 
+    oc = result["scores"]["overall_confidence"]
     response = {
         **_api_envelope(request_id),
+        # ── verdict ──────────────────────────────────────────────────────────
         "recommended_action":      result["recommended_action"],
-        "overall_confidence":      result["scores"]["overall_confidence"],
-        "receipt_readiness_score": result["scores"]["overall_confidence"],
+        "overall_confidence":      oc,
+        "receipt_readiness_score": oc,         # preferred alias — clearer name
+        "score_meaning": (
+            "Heuristic signal-quality score (0-1): counts markers found — "
+            "named sources, numeric anchors, attribution, caveats, low pressure. "
+            "NOT the probability that claims are true."
+        ),
         "confidence_band":         [band.get("low", 0), band.get("high", 0)],
         "custody_warning_level":   result["custody_warning_level"],
         "custody_label":           result.get("custody_label", ""),
         "triage_summary":          result["triage_summary"],
-        "source_type":             result["source_type"],
+        # ── source type — three-layer view ───────────────────────────────────
+        "declared_source_type":    result.get("declared_source_type", source_type),
+        "resolved_source_type":    result["source_type"],    # effective after resolution
+        "inferred_source_type":    result.get("inferred_source_type", ""),
+        "source_type_confidence":  result.get("source_type_confidence", 0.0),
+        "source_type":             result["source_type"],    # backward compat alias
         "source_genre":            result.get("source_genre", ""),
         "source_name":             result.get("source_name", ""),
         "source_url":              result.get("source_url", ""),
+        # ── details ──────────────────────────────────────────────────────────
         "scores":                  result["scores"],
         "flags":                   result["flags"],
         "evidence_breakdown":      result["evidence_breakdown"],

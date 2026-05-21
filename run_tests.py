@@ -123,6 +123,30 @@ EXPECTATIONS = {
             "score_at_most": {"certainty_bias": 0.70},
         },
     },
+
+    # ── Phase 1.4 fixtures ─────────────────────────────────────────────────
+    "first_hand_witness.txt": {
+        # First-person account of an undisclosed corporate announcement.
+        # Should score high on source_custody (first_hand weight), low pressure.
+        # st_confidence may be < 0.50 (text pattern reads partially official)
+        # → custody_warning_level may be mismatch/watch, which is acceptable.
+        "source_type": "first_hand",
+        "checks": {
+            "action_in":     ["verify_primary", "treat_as_lead", "seek_receipts"],
+            "warning_in":    ["clean", "watch", "mismatch"],
+            "score_at_least": {"source_custody": 0.60},
+            "score_at_most":  {"pressure": 0.15, "manipulation_risk": 0.30},
+        },
+    },
+    "tertiary_wiki.txt": {
+        # Wikipedia-style background summary — low specificity, no strong attribution chain.
+        # Should score low confidence, low pressure, no strong custody.
+        "source_type": "auto",
+        "checks": {
+            "action_in":    ["treat_as_lead", "seek_receipts"],
+            "score_at_most": {"overall_confidence": 0.35, "pressure": 0.05},
+        },
+    },
 }
 
 GREEN  = "\033[32m" if sys.stdout.isatty() else ""

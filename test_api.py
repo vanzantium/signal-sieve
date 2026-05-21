@@ -266,6 +266,118 @@ def _():
     assert r.status_code == 400
 
 
+# ── source type normalization ──────────────────────────────────────────────────
+
+@test("POST /api/v1/analyze has declared / resolved / inferred source type fields")
+def _():
+    r = client.post("/api/v1/analyze",
+                    json={"text": _SAMPLE_TEXT, "source_type": "secondary"})
+    d = r.get_json()
+    assert "declared_source_type" in d, "missing declared_source_type"
+    assert "resolved_source_type" in d, "missing resolved_source_type"
+    assert "inferred_source_type" in d, "missing inferred_source_type"
+    assert "source_type_confidence" in d, "missing source_type_confidence"
+    # declared should reflect what the caller sent
+    assert d["declared_source_type"] == "secondary", \
+        f"declared={d['declared_source_type']!r}, expected 'secondary'"
+    # source_type backward-compat alias should match resolved
+    assert d["source_type"] == d["resolved_source_type"], \
+        "source_type must be an alias for resolved_source_type"
+
+
+@test("POST /api/v1/analyze has score_meaning field")
+def _():
+    r = client.post("/api/v1/analyze", json={"text": _SAMPLE_TEXT})
+    d = r.get_json()
+    assert "score_meaning" in d
+    sm = d["score_meaning"]
+    assert len(sm) > 20, "score_meaning is too short"
+    # Should not claim truth probability
+    assert "truth" in sm.lower() or "true" in sm.lower() or "probability" in sm.lower()
+
+
+# ── additional edge cases ──────────────────────────────────────────────────────
+
+@test("POST /api/v1/analyze with malformed JSON -> 400")
+def _():
+    r = client.post("/api/v1/analyze",
+                    data="{ not json !!!",
+                    content_type="application/json")
+    # Flask returns 400 for malformed JSON when silent=True fallback returns {}
+    # which then fails the text validation
+    assert r.status_code == 400
+
+
+@test("POST /api/v1/analyze with whitespace-only text -> 400")
+def _():
+    r = client.post("/api/v1/analyze", json={"text": "   \n\t  "})
+    assert r.status_code == 400
+
+
+@test("POST /api/v1/analyze text too long returns max_chars in body")
+def _():
+    long_text = "word " * (MAX_TEXT_CHARS + 50)
+    r = client.post("/api/v1/analyze", json={"text": long_text})
+    assert r.status_code == 413
+    d = r.get_json()
+    assert d.get("max_chars") == MAX_TEXT_CHARS
+    assert d.get("request_id", "").startswith("req_")
+
+
+@test("Error response always includes request_id")
+def _():
+    for payload in [{}, {"text": "   "}, {"text": "w" * (MAX_TEXT_CHARS + 1)}]:
+        r = client.post("/api/v1/analyze", json=payload)
+        d = r.get_json()
+        assert "request_id" in d, f"no request_id in error for payload {payload!r}"
+        assert d["request_id"].startswith("req_")
+
+
+@test("POST /api/v1/analyze hype/spam text gets drop or reject action")
+def _():
+    hype = (
+        "BUY NOW!!! This stock is going TO THE MOON guaranteed 1000% returns!!! "
+        "Everyone who misses this will regret it forever. Act immediately before "
+        "the window closes. You are a loser if you don't buy. This changes EVERYTHING. "
+        "Insiders already made millions. Don't be left behind!!!"
+    )
+    r = client.post("/api/v1/analyze", json={"text": hype})
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d["recommended_action"] in ("drop", "reject", "seek_receipts"), \
+        f"hype text got {d['recommended_action']!r}"
+    assert d["scores"]["pressure"] > 0.5, \
+        f"pressure should be high for hype, got {d['scores']['pressure']}"
+
+
+@test("POST /api/v1/analyze first_hand source raises custody score")
+def _():
+    witness = (
+        "I was present at the meeting on November 3, 2024 when the CEO announced "
+        "a 12 percent workforce reduction effective Q1 2025. I personally received "
+        "written confirmation. The severance was four weeks per year of service."
+    )
+    r_anon  = client.post("/api/v1/analyze",
+                          json={"text": witness, "source_type": "anonymous"})
+    r_first = client.post("/api/v1/analyze",
+                          json={"text": witness, "source_type": "first_hand"})
+    anon_c  = r_anon.get_json()["scores"]["source_custody"]
+    first_c = r_first.get_json()["scores"]["source_custody"]
+    assert first_c > anon_c, \
+        f"first_hand custody {first_c:.3f} should exceed anonymous {anon_c:.3f}"
+
+
+@test("GET /openapi.json documents new source type normalization fields")
+def _():
+    r = client.get("/openapi.json")
+    spec = r.get_json()
+    props = spec["components"]["schemas"]["AnalyzeResponse"]["properties"]
+    assert "declared_source_type" in props
+    assert "resolved_source_type" in props
+    assert "inferred_source_type" in props
+    assert "score_meaning" in props
+
+
 # ── runner ─────────────────────────────────────────────────────────────────────
 
 def run() -> int:
