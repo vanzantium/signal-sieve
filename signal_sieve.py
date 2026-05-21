@@ -55,6 +55,18 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from urllib.parse import urlparse
 
+# signal_extract is optional (Phase 1.2); signal_sieve stays zero-dependency standalone
+try:
+    from signal_extract import (
+        detect_genre,
+        build_custody_breakdown,
+        build_evidence_shape,
+        extract_signal_brief,
+    )
+    _EXTRACT_AVAILABLE = True
+except ImportError:
+    _EXTRACT_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Regex patterns (English-only heuristics)
 # ---------------------------------------------------------------------------
@@ -155,26 +167,56 @@ NAME_PAT = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b")
 SOURCE_TYPE_WEIGHTS = {
     "first_hand": 0.90,
     "primary": 0.88,
+    "regulatory_filing": 0.92,
     "official": 0.78,
+    "official_release": 0.78,
     "expert": 0.72,
     "secondary": 0.62,
+    "secondary_market_article": 0.62,
+    "news_article": 0.62,
     "tertiary": 0.42,
     "anonymous": 0.30,
     "social": 0.28,
+    "social_post": 0.28,
     "opinion": 0.35,
+    "opinion_article": 0.35,
     "unknown": 0.25,
 }
 SOURCE_LABELS = {
     "first_hand": "FIRST-HAND / direct witness",
     "primary": "PRIMARY / raw record or research",
+    "regulatory_filing": "REGULATORY FILING / primary compliance record",
     "official": "OFFICIAL / institution statement, incentive-shaped",
+    "official_release": "OFFICIAL RELEASE / company or institutional statement",
     "expert": "EXPERT / named interpretation",
     "secondary": "SECONDARY / reporting or analysis",
+    "secondary_market_article": "SECONDARY MARKET ARTICLE / article-layer, not raw data",
+    "news_article": "NEWS ARTICLE / secondary reporting",
     "tertiary": "TERTIARY / summary of summaries",
     "anonymous": "ANONYMOUS / weak custody",
     "social": "SOCIAL / high drift risk",
+    "social_post": "SOCIAL POST / high drift risk",
     "opinion": "OPINION / argument, not evidence",
+    "opinion_article": "OPINION ARTICLE / argument, not evidence",
     "unknown": "UNKNOWN / custody not established",
+}
+
+# Genre → effective source type (used by genre-aware resolution)
+_GENRE_TO_SOURCE_TYPE = {
+    "financial_market_snapshot": "secondary_market_article",
+    "news_article": "secondary",
+    "official_release": "official",
+    "regulatory_filing": "primary",
+    "opinion_article": "opinion",
+    "social_post": "social",
+}
+_HIGH_TRUST_TYPES = {"first_hand", "primary", "official", "expert", "regulatory_filing"}
+_ARTICLE_GENRES = {
+    # Only genres that clearly contradict a declared high-trust type.
+    # "generic_article" is the fallback and does NOT trigger mismatch —
+    # a genuine SEC filing or research paper may not match any positive signal.
+    "financial_market_snapshot", "news_article",
+    "opinion_article", "social_post",
 }
 INSTITUTIONAL_DOMAINS = (".gov", ".edu", ".mil", ".int")
 ACADEMIC_HOSTS = (
@@ -235,6 +277,11 @@ class Assessment:
     pressure_clues: List[str] = field(default_factory=list)
     questions_to_ask: List[str] = field(default_factory=list)
     ai_instruction: str = ""
+    # Phase 1.2 additions (present when signal_extract.py is available)
+    source_genre: str = "generic_article"
+    custody_breakdown: Dict = field(default_factory=dict)
+    evidence_shape: Dict = field(default_factory=dict)
+    signal_brief: Dict = field(default_factory=dict)
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -323,6 +370,34 @@ def resolve_source_type(declared: str, text: str, source_url: str = "") -> Tuple
     if inferred == "unknown" or inferred == declared_norm:
         return declared_norm, declared_norm, inferred, 0.90
     return declared_norm, declared_norm, inferred, 0.40
+
+def resolve_source_type_v2(
+    declared: str, text: str, source_url: str, genre: str
+) -> Tuple[str, str, str, float, bool]:
+    """Genre-aware source resolution.
+
+    Returns (effective, declared_norm, inferred, confidence, genre_mismatch).
+    genre_mismatch is True when the caller declared a high-trust type but the
+    text/URL signals an article or secondary source.
+    """
+    effective, declared_norm, inferred, confidence = resolve_source_type(declared, text, source_url)
+    genre_st = _GENRE_TO_SOURCE_TYPE.get(genre)
+    genre_mismatch = False
+
+    # Declared high-trust but genre signals article/secondary → mismatch
+    if declared_norm in _HIGH_TRUST_TYPES and genre in _ARTICLE_GENRES:
+        confidence = min(confidence, 0.40)
+        genre_mismatch = True
+        if genre_st:
+            effective = genre_st
+
+    # Auto-inferred + genre gives a more specific type → use it
+    elif declared_norm in ("auto", "unknown", "") and genre_st:
+        effective = genre_st
+        confidence = max(confidence, 0.70)
+
+    return effective, declared_norm, inferred, confidence, genre_mismatch
+
 
 # ---------------------------------------------------------------------------
 # Sub-scorers
@@ -562,8 +637,20 @@ def analyze(
     filler_hits = count_matches(FILLER, raw)
     exclaims = raw.count("!")
 
-    # Custody
-    effective_st, declared_st, inferred_st, st_confidence = resolve_source_type(source_type, raw, source_url)
+    # Genre detection (Phase 1.2 — requires signal_extract.py)
+    source_genre = "generic_article"
+    if _EXTRACT_AVAILABLE:
+        source_genre = detect_genre(normalized, source_url)
+
+    # Custody — genre-aware resolution prevents article pages from being classed as primary
+    if _EXTRACT_AVAILABLE:
+        effective_st, declared_st, inferred_st, st_confidence, genre_mismatch = \
+            resolve_source_type_v2(source_type, raw, source_url, source_genre)
+    else:
+        effective_st, declared_st, inferred_st, st_confidence = \
+            resolve_source_type(source_type, raw, source_url)
+        genre_mismatch = False
+
     custody_raw, custody_label, custody_clues = source_custody_score(raw, effective_st, source_url)
     # st_confidence scales custody: prevents laundering weak text through a declared 'primary' label
     custody = custody_raw * (0.65 + 0.35 * st_confidence)
@@ -635,10 +722,16 @@ def analyze(
         flags.append("Low internal coherence: argument appears repetitive or logically unconnected.")
     if language_note:
         flags.append(language_note)
-    if st_confidence < 0.50 and declared_st not in ("auto", "unknown", ""):
+    if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and not genre_mismatch:
         flags.append(
             f"Declared source_type='{declared_st}' contradicts inferred='{inferred_st}'. "
             f"Custody base is being trusted at low confidence."
+        )
+    if genre_mismatch:
+        flags.append(
+            f"Declared high-trust source type ('{declared_st}') conflicts with "
+            f"article/secondary-source cues in text and URL. "
+            f"Effective type downgraded to '{effective_st}'."
         )
 
     # Verdict and recommended_action
@@ -654,6 +747,15 @@ def analyze(
         verdict, recommended_action = "claims outpace support — request receipts", "seek_receipts"
     else:
         verdict, recommended_action = "weak custody or noisy frame — useful as a lead, not evidence", "treat_as_lead"
+
+    # Cap for secondary market articles — cannot earn verify_primary
+    if (
+        source_genre == "financial_market_snapshot"
+        and effective_st in ("secondary", "secondary_market_article", "news_article")
+        and recommended_action == "verify_primary"
+    ):
+        recommended_action = "treat_as_lead"
+        verdict = "secondary market source — treat as lead, verify at primary data source"
 
     # Dynamic follow-up questions
     questions = [
@@ -704,6 +806,21 @@ def analyze(
         unanchored_n=unanchored_n,
         action=recommended_action,
     )
+    # Phase 1.2 enrichment (requires signal_extract.py)
+    custody_breakdown: Dict = {}
+    evidence_shape_data: Dict = {}
+    signal_brief: Dict = {}
+    if _EXTRACT_AVAILABLE:
+        custody_breakdown = build_custody_breakdown(
+            raw, source_genre, effective_st, source_url, st_confidence
+        )
+        evidence_shape_data = build_evidence_shape(
+            raw, sentences, anchored_n, unanchored_n
+        )
+        signal_brief = extract_signal_brief(
+            raw, source_genre, effective_st, source_url
+        )
+
     assessment = Assessment(
         source_name=source_name,
         source_type=effective_st,
@@ -731,6 +848,10 @@ def analyze(
             "from interpretation, preserve uncertainty labels, and prefer the "
             "confidence_band over the single overall_confidence value."
         ),
+        source_genre=source_genre,
+        custody_breakdown=custody_breakdown,
+        evidence_shape=evidence_shape_data,
+        signal_brief=signal_brief,
     )
     return asdict(assessment)
 
@@ -784,6 +905,45 @@ def pretty_report(result: Dict) -> str:
     lines.append("\nQuestions to ask:")
     for q in result["questions_to_ask"]:
         lines.append(f"  - {q}")
+
+    # Evidence shape (Phase 1.2)
+    es = result.get("evidence_shape", {})
+    if es:
+        lines.append("\nEvidence shape:")
+        named = es.get("named_sources", [])
+        lines.append(f"  {'Local numbers':22s}: {es.get('local_numeric_anchors', '?')}")
+        lines.append(f"  {'Named data source':22s}: {'yes — ' + ', '.join(named) if named else 'none'}")
+        lines.append(f"  {'Primary data linked':22s}: {'yes' if es.get('primary_links_present') else 'no'}")
+        lines.append(f"  {'External receipts':22s}: {es.get('external_receipts', '?')}")
+        lines.append(f"  {'Caveats present':22s}: {'yes' if es.get('source_caveats_present') else 'no'}")
+
+    # Signal brief (Phase 1.2)
+    sb = result.get("signal_brief", {})
+    if sb:
+        lines.append(f"\nSIGNAL BRIEF")
+        lines.append("-" * 50)
+        genre_label = (result.get("source_genre") or sb.get("genre", "?")).replace("_", " ").title()
+        st_label    = (sb.get("source_type") or result.get("source_type") or "?").replace("_", " ").title()
+        lines.append(f"Genre        : {genre_label}")
+        lines.append(f"Source type  : {st_label}")
+        pdn = sb.get("primary_data_named", [])
+        if pdn:
+            verified = "verified" if sb.get("primary_data_verified") else "named, not verified by this run"
+            lines.append(f"Primary data : {', '.join(pdn)} — {verified}")
+        for section_key, label in (
+            ("key_signals",              "KEY SIGNALS"),
+            ("source_caveats",           "SOURCE CAVEATS"),
+            ("interpretation_or_framing","INTERPRETATION / FRAMING"),
+            ("missing_receipts",         "MISSING RECEIPTS"),
+            ("do_not_pass_forward_as",   "DO NOT PASS FORWARD AS"),
+            ("follow_up_sources",        "FOLLOW-UP SOURCES TO CHECK"),
+        ):
+            items = sb.get(section_key, [])
+            if items:
+                lines.append(f"\n{label}")
+                for item in items:
+                    lines.append(f"  • {item}")
+
     lines.append("\n" + result["ai_instruction"])
     return "\n".join(lines)
 

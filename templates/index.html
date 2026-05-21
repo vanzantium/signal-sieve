@@ -167,6 +167,57 @@
             <ul>{% for c in result.pressure_clues[:8] %}<li>{{ c }}</li>{% endfor %}</ul>
           </details>{% endif %}
 
+          {% if result.evidence_shape %}
+          {% set es = result.evidence_shape %}
+          <details open><summary>Evidence shape</summary>
+            <table style="width:100%;font-size:.86rem;border-collapse:collapse;margin-top:10px">
+              {% set rows = [
+                ("Local numbers", es.local_numeric_anchors),
+                ("Named data source", ("yes — " + (es.named_sources|join(", ")) if es.named_sources else "none")),
+                ("Primary data linked", ("yes" if es.primary_links_present else "no")),
+                ("External receipts", es.external_receipts),
+                ("Caveats present", ("yes" if es.source_caveats_present else "no")),
+              ] %}
+              {% for label, val in rows %}
+              <tr style="border-bottom:1px solid var(--line)">
+                <td style="padding:5px 8px;color:var(--muted);width:50%">{{ label }}</td>
+                <td style="padding:5px 8px;font-weight:700">{{ val }}</td>
+              </tr>
+              {% endfor %}
+            </table>
+          </details>{% endif %}
+
+          {% if result.signal_brief %}
+          {% set sb = result.signal_brief %}
+          <details open><summary>Signal brief — {{ (result.source_genre or sb.genre or "").replace("_"," ").title() }}</summary>
+            <div style="margin-top:10px">
+              {% if sb.primary_data_named %}
+              <p class="mini" style="margin-bottom:10px">
+                Primary data: <strong>{{ sb.primary_data_named|join(", ") }}</strong> —
+                {% if sb.primary_data_verified %}verified{% else %}named, not verified by this run{% endif %}
+              </p>
+              {% endif %}
+
+              {% for section_key, label, color in [
+                ("key_signals",              "Key Signals",              "#7ee787"),
+                ("source_caveats",           "Source Caveats",           "#f2cc60"),
+                ("interpretation_or_framing","Interpretation / Framing", "#79c0ff"),
+                ("missing_receipts",         "Missing Receipts",         "#ffa657"),
+                ("do_not_pass_forward_as",   "Do Not Pass Forward As",   "#ff7b72"),
+                ("follow_up_sources",        "Follow-Up Sources",        "#d2a8ff"),
+              ] %}
+              {% if sb[section_key] %}
+              <div style="margin-bottom:12px">
+                <p style="font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.07em;color:{{ color }};margin-bottom:6px">{{ label }}</p>
+                <ul style="margin:0;padding-left:18px">
+                  {% for item in sb[section_key] %}<li style="font-size:.86rem;margin:4px 0">{{ item }}</li>{% endfor %}
+                </ul>
+              </div>
+              {% endif %}
+              {% endfor %}
+            </div>
+          </details>{% endif %}
+
           <details><summary>Raw JSON</summary><pre>{{ result_json }}</pre></details>
 
           <!-- SHARE BAR -->
@@ -199,11 +250,13 @@
       const con = Math.round(RESULT.scores.overall_confidence * 100);
       const coh = Math.round(RESULT.scores.internal_coherence * 100);
       const src = RESULT.source_type;
+      const genre = (RESULT.source_genre || '').replace(/_/g,' ');
       const em  = ACTION_EMOJI[a] || '⚪';
       const link = 'signal-sieve.onrender.com';
       let sum = RESULT.triage_summary;
 
-      let header = `${em} ${a.replace(/_/g,' ').toUpperCase()} | confidence: ${con}% | coherence: ${coh}% | source: ${src}`;
+      const srcLabel = genre || src;
+      let header = `${em} ${a.replace(/_/g,' ').toUpperCase()} | confidence: ${con}% | coherence: ${coh}% | ${srcLabel}`;
       let text   = `${header}\n"${sum}"\n${link} #SignalSieve`;
 
       if (text.length > 240) {
@@ -254,6 +307,38 @@
       if (r.questions_to_ask.length) {
         lines.push('', 'QUESTIONS TO ASK');
         r.questions_to_ask.forEach(q => lines.push(`  • ${q}`));
+      }
+
+      const sb = r.signal_brief || {};
+      const es = r.evidence_shape || {};
+      if (es.local_numeric_anchors) {
+        const named = (es.named_sources||[]).join(', ') || 'none';
+        lines.push('', 'EVIDENCE SHAPE',
+          `  Local numbers          : ${es.local_numeric_anchors}`,
+          `  Named data source      : ${named}`,
+          `  Primary data linked    : ${es.primary_links_present ? 'yes' : 'no'}`,
+          `  External receipts      : ${es.external_receipts}`,
+          `  Caveats present        : ${es.source_caveats_present ? 'yes' : 'no'}`,
+        );
+      }
+      if (sb.genre) {
+        lines.push('', 'SIGNAL BRIEF', hr,
+          `Genre        : ${sb.genre.replace(/_/g,' ')}`,
+          `Source type  : ${(sb.source_type||'').replace(/_/g,' ')}`,
+        );
+        if ((sb.primary_data_named||[]).length)
+          lines.push(`Primary data : ${sb.primary_data_named.join(', ')} — ${sb.primary_data_verified ? 'verified' : 'named, not verified by this run'}`);
+        const briefSections = [
+          ['key_signals','KEY SIGNALS'],['source_caveats','SOURCE CAVEATS'],
+          ['interpretation_or_framing','INTERPRETATION / FRAMING'],
+          ['missing_receipts','MISSING RECEIPTS'],
+          ['do_not_pass_forward_as','DO NOT PASS FORWARD AS'],
+          ['follow_up_sources','FOLLOW-UP SOURCES'],
+        ];
+        briefSections.forEach(([k, label]) => {
+          const items = sb[k] || [];
+          if (items.length) { lines.push('', label); items.forEach(i => lines.push(`  • ${i}`)); }
+        });
       }
 
       lines.push(
