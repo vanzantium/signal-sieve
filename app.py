@@ -19,10 +19,23 @@ app = Flask(__name__)
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
 ANALYSIS_VERSION  = "v1.3.0"
-MAX_TEXT_CHARS        = 10_000
+MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
+MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
 MAX_SOURCE_NAME_CHARS = 200
 _START_TIME = time.time()
+
+
+def _get_max_chars() -> int:
+    """Return the text character limit for the current request.
+
+    Returns the higher limit only when SIGNAL_SIEVE_API_KEY is configured
+    *and* the caller supplied the correct key.
+    """
+    required = os.environ.get("SIGNAL_SIEVE_API_KEY", "").strip()
+    if required and request.headers.get("X-API-Key", "") == required:
+        return MAX_TEXT_CHARS_KEYED
+    return MAX_TEXT_CHARS
 
 _ACTION_ENUM = [
     "verify_primary", "treat_as_lead", "treat_as_background",
@@ -322,11 +335,15 @@ def _check_api_key() -> "str | None":
     return None
 
 
-def _validate_analyze_payload(payload: dict, request_id: str):
+def _validate_analyze_payload(payload: dict, request_id: str, max_chars: int | None = None):
     """Return (text, source_type, source_name, source_url, error_response).
 
     error_response is non-None when validation fails.
+    max_chars defaults to MAX_TEXT_CHARS if not supplied.
     """
+    if max_chars is None:
+        max_chars = MAX_TEXT_CHARS
+
     text        = payload.get("text", "")
     source_url  = (payload.get("source_url",  "") or "")[:MAX_SOURCE_URL_CHARS]
     source_name = (payload.get("source_name", "") or "")[:MAX_SOURCE_NAME_CHARS]
@@ -336,10 +353,17 @@ def _validate_analyze_payload(payload: dict, request_id: str):
         return None, None, None, None, _api_error(
             400, "bad_request", "Missing required field: text", request_id
         )
-    if len(text) > MAX_TEXT_CHARS:
+    if len(text) > max_chars:
         return None, None, None, None, _api_error(
-            413, "text_too_long", "Text exceeds maximum length.",
-            request_id, max_chars=MAX_TEXT_CHARS,
+            413, "text_too_long",
+            "Text exceeds maximum input size.",
+            request_id,
+            max_chars=max_chars,
+            suggestion=(
+                "Analyze a shorter excerpt, article body only, or split into sections. "
+                f"Public mode limit: {MAX_TEXT_CHARS:,} chars. "
+                f"Authenticated mode limit: {MAX_TEXT_CHARS_KEYED:,} chars."
+            ),
         )
     return text, source_type, source_name or "unknown", source_url, None
 
@@ -374,8 +398,13 @@ _OPENAPI_SPEC: dict = {
                 "type": "object", "required": ["text"],
                 "properties": {
                     "text": {
-                        "type": "string", "maxLength": MAX_TEXT_CHARS,
-                        "description": "Text to analyze. Max 10 000 characters.",
+                        "type": "string", "maxLength": MAX_TEXT_CHARS_KEYED,
+                        "description": (
+                            f"Text to analyze. "
+                            f"Public mode: {MAX_TEXT_CHARS:,} chars max. "
+                            f"Authenticated (API-key) mode: {MAX_TEXT_CHARS_KEYED:,} chars max. "
+                            "Exceeding the limit returns 413 with a suggestion field."
+                        ),
                         "example": "Scientists at MIT confirmed a 40% reduction in...",
                     },
                     "source_url": {
@@ -517,7 +546,8 @@ _OPENAPI_SPEC: dict = {
                     },
                     "message":             {"type": "string"},
                     "request_id":          {"type": "string"},
-                    "max_chars":           {"type": "integer", "description": "Present on text_too_long."},
+                    "max_chars":           {"type": "integer", "description": "Present on text_too_long. The limit that was exceeded."},
+                    "suggestion":          {"type": "string",  "description": "Present on text_too_long. Actionable hint."},
                     "retry_after_seconds": {"type": "integer", "description": "Present on rate_limited."},
                 },
             },
@@ -760,7 +790,7 @@ def api_v1_analyze():
 
     payload = request.get_json(silent=True) or {}
     text, source_type, source_name, source_url, err = _validate_analyze_payload(
-        payload, request_id
+        payload, request_id, max_chars=_get_max_chars()
     )
     if err:
         return err
@@ -836,7 +866,7 @@ def api_v1_analyze_txt():
 
     payload = request.get_json(silent=True) or {}
     text, source_type, source_name, source_url, err = _validate_analyze_payload(
-        payload, request_id
+        payload, request_id, max_chars=_get_max_chars()
     )
     if err:
         return err

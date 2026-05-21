@@ -64,7 +64,7 @@
     <header>
       <h1>Signal Sieve</h1>
       <p class="tagline"><strong>Paste text or drop a link. Sieve it. Read the stink.</strong><br>Pre-belief filter for claims, posts, articles, and AI outputs. Not a fact-checker — audits source custody, pressure language, certainty inflation, evidence shape, and internal coherence.</p>
-      <p class="note">Hosted on Render free tier — first load may take ~30 s while the service wakes up.</p>
+      <p class="note">Receipt clerk, not oracle. Results are signal-quality triage — not determinations of truth. API available at <code>/api/v1/analyze</code>.</p>
     </header>
 
     <div class="grid">
@@ -84,9 +84,23 @@
 
         <label for="text">Text to analyze
           <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:.8rem"> — or leave blank if using URL above</span>
+          <span id="charCount" style="float:right;font-weight:400;text-transform:none;letter-spacing:0;font-size:.8rem;color:var(--muted)">0 / 12,000</span>
         </label>
         <textarea id="text" name="text"
                   placeholder="Paste a claim, post, article excerpt, press release, or AI output here…">{{ input_text or "" }}</textarea>
+        <script>
+          (function(){
+            var ta=document.getElementById('text'), cc=document.getElementById('charCount');
+            var MAX=12000;
+            function upd(){
+              var n=ta.value.length;
+              cc.textContent=n.toLocaleString()+' / '+MAX.toLocaleString();
+              cc.style.color=n>MAX?'var(--bad)':n>MAX*0.9?'var(--warn)':'var(--muted)';
+            }
+            ta.addEventListener('input',upd);
+            upd();
+          })();
+        </script>
 
         <div class="row two">
           <div>

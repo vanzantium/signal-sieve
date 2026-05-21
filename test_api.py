@@ -28,7 +28,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import app as app_module
 from app import (
-    API_VERSION, ANALYSIS_VERSION, MAX_TEXT_CHARS,
+    API_VERSION, ANALYSIS_VERSION, MAX_TEXT_CHARS, MAX_TEXT_CHARS_KEYED,
     _ACTION_ENUM, _SOURCE_TYPE_ENUM,
 )
 
@@ -322,6 +322,41 @@ def _():
     d = r.get_json()
     assert d.get("max_chars") == MAX_TEXT_CHARS
     assert d.get("request_id", "").startswith("req_")
+
+
+@test("POST /api/v1/analyze 413 response includes suggestion field")
+def _():
+    long_text = "word " * (MAX_TEXT_CHARS + 50)
+    r = client.post("/api/v1/analyze", json={"text": long_text})
+    assert r.status_code == 413
+    d = r.get_json()
+    assert "suggestion" in d, "413 response should include suggestion field"
+    assert len(d["suggestion"]) > 20, "suggestion field should be non-trivial"
+
+
+@test("POST /api/v1/analyze authenticated mode accepts up to MAX_TEXT_CHARS_KEYED")
+def _():
+    original = os.environ.pop("SIGNAL_SIEVE_API_KEY", None)
+    os.environ["SIGNAL_SIEVE_API_KEY"] = "test-secret-key"
+    try:
+        # Text just over public limit but well under keyed limit
+        # "word " is 5 chars, so (MAX_TEXT_CHARS // 5 + 500) reps = ~14,500 chars
+        reps = MAX_TEXT_CHARS // 5 + 500
+        mid_text = "word " * reps
+        assert len(mid_text) > MAX_TEXT_CHARS, \
+            f"mid_text ({len(mid_text)}) should exceed public limit ({MAX_TEXT_CHARS})"
+        assert len(mid_text) < MAX_TEXT_CHARS_KEYED, \
+            f"mid_text ({len(mid_text)}) should be under keyed limit ({MAX_TEXT_CHARS_KEYED})"
+        r = client.post("/api/v1/analyze",
+                        json={"text": mid_text},
+                        headers={"X-API-Key": "test-secret-key"})
+        assert r.status_code == 200, \
+            f"authenticated request over public limit should be 200, got {r.status_code}"
+    finally:
+        if original is not None:
+            os.environ["SIGNAL_SIEVE_API_KEY"] = original
+        else:
+            os.environ.pop("SIGNAL_SIEVE_API_KEY", None)
 
 
 @test("Error response always includes request_id")
