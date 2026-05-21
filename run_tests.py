@@ -124,6 +124,44 @@ EXPECTATIONS = {
         },
     },
 
+    # ── Phase 1.6 fixtures — financial genre splitting ─────────────────────
+    "financial_schwab_market_update.txt": {
+        # Brokerage daily snapshot: many tickers, numeric density, OTC caveats.
+        # Opening sentence says indexes "retreated early" but reported figures
+        # are positive — should trigger timeframe-mismatch in missing_receipts.
+        "source_type": "auto",
+        "checks": {
+            "action_in":      ["treat_as_lead", "seek_receipts"],
+            "genre_in":       ["financial_market_snapshot"],
+            "source_type_in": ["secondary_market_article", "secondary"],
+            "signal_brief_min": {"key_signals": 2, "missing_receipts": 2},
+            "evidence_shape":   {"local_numeric_anchors": "high"},
+        },
+    },
+    "financial_trowe_macro_update.txt": {
+        # Multi-region macro weekly: CPI/PPI/PMI + Europe/Japan/China/EM sections.
+        # Should classify as global_macro_market_update, not financial_market_snapshot.
+        "source_type": "auto",
+        "checks": {
+            "action_in":      ["treat_as_lead", "seek_receipts"],
+            "genre_in":       ["global_macro_market_update"],
+            "source_type_in": ["secondary_market_article", "secondary"],
+            "signal_brief_min": {"key_signals": 3, "missing_receipts": 2},
+        },
+    },
+    "financial_blackrock_strategy.txt": {
+        # Asset-manager allocation thesis: overweight/underweight language,
+        # tactical/strategic positioning, forward-looking projections.
+        # Should classify as investment_strategy_commentary and trigger house-view flag.
+        "source_type": "auto",
+        "checks": {
+            "action_in":    ["treat_as_lead", "seek_receipts"],
+            "genre_in":     ["investment_strategy_commentary"],
+            "flag_contains": ["house view"],
+            "score_at_most": {"pressure": 0.25},
+        },
+    },
+
     # ── Phase 1.4 fixtures ─────────────────────────────────────────────────
     "first_hand_witness.txt": {
         # First-person account of an undisclosed corporate announcement.

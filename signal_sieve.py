@@ -203,20 +203,28 @@ SOURCE_LABELS = {
 
 # Genre → effective source type (used by genre-aware resolution)
 _GENRE_TO_SOURCE_TYPE = {
-    "financial_market_snapshot": "secondary_market_article",
-    "news_article": "secondary",
-    "official_release": "official",
-    "regulatory_filing": "primary",
-    "opinion_article": "opinion",
-    "social_post": "social",
+    "financial_market_snapshot":      "secondary_market_article",
+    "global_macro_market_update":     "secondary_market_article",  # Phase 1.6
+    "investment_strategy_commentary": "secondary_market_article",  # Phase 1.6
+    "news_article":                   "secondary",
+    "official_release":               "official",
+    "regulatory_filing":              "primary",
+    "opinion_article":                "opinion",
+    "social_post":                    "social",
 }
 _HIGH_TRUST_TYPES = {"first_hand", "primary", "official", "expert", "regulatory_filing"}
 _ARTICLE_GENRES = {
     # Only genres that clearly contradict a declared high-trust type.
     # "generic_article" is the fallback and does NOT trigger mismatch —
     # a genuine SEC filing or research paper may not match any positive signal.
-    "financial_market_snapshot", "news_article",
-    "opinion_article", "social_post",
+    "financial_market_snapshot", "global_macro_market_update",  # Phase 1.6
+    "investment_strategy_commentary",                            # Phase 1.6
+    "news_article", "opinion_article", "social_post",
+}
+# All financial secondary genres — shared logic (coherence flag, verify cap)
+_FINANCIAL_SECONDARY_GENRES = {
+    "financial_market_snapshot", "global_macro_market_update",
+    "investment_strategy_commentary",
 }
 INSTITUTIONAL_DOMAINS = (".gov", ".edu", ".mil", ".int")
 ACADEMIC_HOSTS = (
@@ -719,13 +727,23 @@ def analyze(
     if word_count < 50:
         flags.append("Short text: limited context; confidence capped.")
     if internal_coherence < 0.30 and word_count >= 50:
-        if source_genre == "financial_market_snapshot":
+        if source_genre in ("financial_market_snapshot", "global_macro_market_update"):
             flags.append(
                 "Table-heavy market snapshot: argument coherence scoring is not the primary "
                 "signal mode for this genre — use evidence shape and signal brief instead."
             )
         else:
             flags.append("Low internal coherence: argument appears repetitive or logically unconnected.")
+    # Phase 1.6: house-view and forward-looking flags for investment strategy commentary
+    if source_genre == "investment_strategy_commentary":
+        flags.append(
+            "House view / institutional positioning: allocation claims reflect "
+            "an asset manager's strategic thesis — not independent primary financial data."
+        )
+        flags.append(
+            "Forward-looking allocation claims: overweight/underweight/tactical views "
+            "are expressions of conviction, not receipt-grade assertions."
+        )
     if language_note:
         flags.append(language_note)
     if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and not genre_mismatch:
@@ -756,7 +774,7 @@ def analyze(
 
     # Cap for secondary market articles — cannot earn verify_primary
     if (
-        source_genre == "financial_market_snapshot"
+        source_genre in _FINANCIAL_SECONDARY_GENRES
         and effective_st in ("secondary", "secondary_market_article", "news_article")
         and recommended_action == "verify_primary"
     ):

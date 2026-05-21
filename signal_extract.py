@@ -9,6 +9,12 @@ Phase 1.2 additions:
   build_custody_breakdown() -> layered custody dict
   build_evidence_shape()  -> evidence shape dict
   extract_signal_brief()  -> structured signal brief dict
+
+Phase 1.6 additions:
+  New genres: global_macro_market_update, investment_strategy_commentary
+  _extract_macro_update()        -> macro weekly / global markets brief
+  _extract_strategy_commentary() -> asset-manager allocation brief
+  _detect_timeframe_mismatch()   -> early-session vs reported-performance check
 """
 from __future__ import annotations
 
@@ -42,6 +48,55 @@ _PRESS_RELEASE = re.compile(
     # URL-based IR page detection is handled in detect_genre() via _PRIMARY_URL_HINTS.
     re.I,
 )
+# Phase 1.6 — financial genre sub-classification
+_MACRO_INDICATORS = re.compile(
+    r"\b(CPI|PPI|PCE|PMI|GDP|GNP|"
+    r"inflation|deflation|"
+    r"jobless claims|unemployment rate?|labor market|employment data|"
+    r"retail sales|consumer spending|consumer confidence|"
+    r"trade balance|trade surplus|trade deficit|current account|"
+    r"monetary policy|yield curve|"
+    r"fiscal policy|budget deficit|sovereign debt|"
+    r"industrial production|manufacturing output)\b",
+    re.I,
+)
+_MACRO_REGIONS = re.compile(
+    r"\b(Europe|European|Eurozone|euro\s*zone|ECB|"
+    r"Japan(?:ese)?|BoJ|Bank\s+of\s+Japan|Nikkei|"
+    r"China|Chinese|PBOC|"
+    r"emerging\s+markets?|EM\b|"
+    r"UK|Britain|British|Bank\s+of\s+England|BoE|FTSE|"
+    r"Canada|Bank\s+of\s+Canada|"
+    r"Asia(?:n)?|Asia[- ]Pacific|APAC|"
+    r"global\s+markets?|international\s+markets?)\b",
+    re.I,
+)
+_ALLOCATION_TERMS = re.compile(
+    r"\b(overweight|underweight|neutral\s+weight|"
+    r"upgrad(?:e|es|ed|ing)|downgrad(?:e|es|ed|ing)|"
+    r"tactical(?:ly)?|strategic(?:ally)?|"
+    r"allocat(?:e|ion|ions|ed|ing)|portfolio\s+weight|"
+    r"house\s+view|asset\s+class(?:es)?|"
+    r"risk[- ]on|risk[- ]off|conviction|"
+    r"rebalanc(?:e|ing)|positioning)\b",
+    re.I,
+)
+_FORWARD_LOOKING = re.compile(
+    r"\b(we\s+(?:expect|believe|project|forecast|anticipate|prefer)|"
+    r"our\s+(?:view|outlook|expectation|target|forecast)|"
+    r"projected?|forecastin?g?|expected?\s+to|"
+    r"in\s+our\s+(?:view|opinion|assessment)|"
+    r"we\s+(?:are\s+positioning|remain\s+(?:cautious|constructive|bullish|bearish))|"
+    r"medium[- ]term\s+(?:view|outlook)|"
+    r"12[- ]month\s+(?:view|target|return))\b",
+    re.I,
+)
+# Attribution verb for macro/strategy extractors
+_ATTRIB_VERB = re.compile(
+    r"\b(said|stated|noted|told|wrote|added|confirmed|indicated|announced|signaled)\b",
+    re.I,
+)
+
 _OPINION_HINTS = re.compile(
     r"\b(in my (?:view|opinion)|i (?:believe|think|argue|contend)|my take|"
     r"the (?:real|true|actual) (?:issue|problem|story)|"
@@ -75,7 +130,9 @@ def detect_genre(text: str, url: str = "") -> str:
     """Classify article genre.
 
     Returns one of:
-      regulatory_filing | official_release | financial_market_snapshot |
+      regulatory_filing | official_release |
+      investment_strategy_commentary | global_macro_market_update |
+      financial_market_snapshot |
       news_article | opinion_article | social_post | generic_article
     """
     lower_url = url.lower()
@@ -96,6 +153,21 @@ def detect_genre(text: str, url: str = "") -> str:
 
     fin_term_hits = len(_FIN_TERMS.findall(text))
     fin_num_hits  = len(_FIN_NUMERIC.findall(text))
+
+    # Phase 1.6: financial genre sub-classification
+    # Check allocation-heavy text first (investment strategy) — must come before
+    # the generic financial_market_snapshot fallback so BlackRock-style
+    # commentary isn't mis-classified as a brokerage snapshot.
+    if (fin_term_hits >= 2 or fin_num_hits >= 2):
+        alloc_hits  = len(_ALLOCATION_TERMS.findall(text))
+        if alloc_hits >= 3:
+            return "investment_strategy_commentary"
+
+        macro_hits  = len(_MACRO_INDICATORS.findall(text))
+        region_hits = len(_MACRO_REGIONS.findall(text))
+        if macro_hits >= 3 and region_hits >= 2:
+            return "global_macro_market_update"
+
     if fin_term_hits >= 4 and fin_num_hits >= 3:
         return "financial_market_snapshot"
 
@@ -273,6 +345,8 @@ _PUBLISHER_WEIGHTS: Dict[str, float] = {
     "first_hand": 0.84,
     "secondary": 0.65,
     "secondary_market_article": 0.65,
+    "global_macro_market_update": 0.65,   # Phase 1.6
+    "investment_strategy_commentary": 0.68,  # Phase 1.6 — institutional, slightly above secondary
     "news_article": 0.65,
     "tertiary": 0.42,
     "anonymous": 0.28,
@@ -478,6 +552,13 @@ def _extract_financial(text: str, source_type: str, source_url: str) -> Dict:
             "No linked filing, exchange quote, company release, or raw data endpoint "
             "was checked by this run."
         )
+    # Phase 1.6: timeframe mismatch flag
+    if _detect_timeframe_mismatch(text):
+        missing_receipts.append(
+            "Possible timeframe mismatch: opening summary uses directional-down language "
+            "but listed index performance figures are positive. May reflect intraday recovery "
+            "— verify against session-open vs. session-close data."
+        )
 
     # Do not pass forward as
     dnpf: List[str] = []
@@ -588,6 +669,219 @@ def _extract_generic(text: str, genre: str, source_type: str, source_url: str) -
     }
 
 
+# ---------------------------------------------------------------------------
+# Phase 1.6 helpers
+# ---------------------------------------------------------------------------
+
+def _detect_timeframe_mismatch(text: str) -> bool:
+    """Return True when early-session directional-down language conflicts with
+    positive index % changes reported later in the same document.
+
+    Classic case: "indexes retreated early Thursday" followed by
+    "S&P 500: +0.02%  |  Dow: +0.11%" — the early pullback resolved by
+    close, but the opening framing survives as a false impression.
+    """
+    # Look for directional-down cues in the first ~400 chars (opening summary)
+    early_text = text[:400]
+    has_early_down = bool(re.search(
+        r"\b(retreated?|fell|fallen|declined?|dropped?|pulled\s+back|"
+        r"moved?\s+lower|edged?\s+lower|sold\s+off|under\s+pressure|"
+        r"erased\s+gains?|gave?\s+back)\b",
+        early_text, re.I,
+    ))
+    if not has_early_down:
+        return False
+    # Look for a positive % change alongside a major index name anywhere in doc
+    has_positive_index = bool(re.search(
+        r"\b(?:S&P|S&P\s+500|Dow|Nasdaq|Russell|DJIA)\b[^.!?\n]{0,50}[+]\d",
+        text, re.I,
+    ))
+    return has_positive_index
+
+
+def _extract_macro_update(text: str, source_type: str, source_url: str) -> Dict:
+    """Signal brief extractor for global_macro_market_update genre.
+
+    Separates macro data points, attributed official statements, regional
+    sections, and auto-generates missing-receipt entries for each data domain.
+    """
+    sentences      = _split_sentences(text)
+    data_providers = _find_data_providers(text)
+    market_venues  = _find_market_venues(text)
+    named_srcs     = _unique_ordered(data_providers + market_venues)
+    primary_linked = bool(re.search(
+        r"https?://(?:sec\.gov|sedarplus|edgar|bls\.gov|eurostat\.ec|"
+        r"stat\.go\.jp|stats\.gov\.cn|doi\.org|arxiv)",
+        text.lower(),
+    ))
+
+    key_signals: List[str] = []
+    attributed_claims: List[str] = []
+    source_caveats: List[str] = []
+    missing_receipts: List[str] = []
+
+    for sent in sentences:
+        if not sent or len(sent.split()) < 4:
+            continue
+        if len(sent) > 400:
+            continue
+        if _CAVEAT_CUES.search(sent):
+            source_caveats.append(_compress(sent))
+        elif (
+            _is_key_signal_generic(sent)
+            and (_MACRO_INDICATORS.search(sent) or _MACRO_REGIONS.search(sent))
+        ):
+            key_signals.append(_compress(sent))
+        elif _ATTRIB_VERB.search(sent) and (
+            re.search(r'["“]', sent) or re.search(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b", sent)
+        ):
+            attributed_claims.append(_compress(sent))
+        elif _is_key_signal_generic(sent):
+            key_signals.append(_compress(sent))
+
+    # Auto-generate missing receipts by data domain
+    text_lower = text.lower()
+    if re.search(r"\bcpi\b|\bppi\b|\bjobless claims\b|\bretail sales\b", text_lower):
+        missing_receipts.append(
+            "U.S. Bureau of Labor Statistics (BLS) — primary source for CPI, PPI, and jobless claims data."
+        )
+    if re.search(r"\b(?:europe|eurozone|ecb|stoxx|ftse)\b", text_lower):
+        missing_receipts.append(
+            "Eurostat and ECB — primary sources for Eurozone GDP, inflation, and monetary policy data."
+        )
+    if re.search(r"\b(?:japan|nikkei|boj|bank of japan)\b", text_lower):
+        missing_receipts.append(
+            "Japan Statistics Bureau / Bank of Japan — primary sources for Japan CPI and rate decisions."
+        )
+    if re.search(r"\b(?:china|pboc|csi|caixin)\b", text_lower):
+        missing_receipts.append(
+            "China National Bureau of Statistics / PBOC — primary sources for China PMI and trade data."
+        )
+    if data_providers and not primary_linked:
+        missing_receipts.append(
+            f"{', '.join(data_providers[:2])} data cited but no direct primary endpoint was checked by this run."
+        )
+    if not missing_receipts:
+        missing_receipts.append(
+            "No linked primary data endpoints checked by this run — verify each indicator at its originating agency."
+        )
+
+    dnpf: List[str] = [
+        "Primary financial data — this is a secondary market update summarizing official releases.",
+    ]
+    follow_ups: List[str] = [
+        "BLS.gov (U.S. CPI, PPI, jobless claims, retail sales).",
+        "Central bank transcripts and press conferences for any quoted official statements.",
+    ]
+    if market_venues:
+        follow_ups.append(
+            f"Exchange data for index quotes: {', '.join(market_venues[:3])}."
+        )
+
+    return {
+        "genre":                      "global_macro_market_update",
+        "source_type":                source_type,
+        "primary_data_named":         named_srcs,
+        "named_data_providers":       data_providers,
+        "markets_venues_mentioned":   market_venues,
+        "primary_data_verified":      primary_linked,
+        "key_signals":                key_signals[:10],
+        "attributed_claims":          attributed_claims[:5],
+        "source_caveats":             source_caveats[:4],
+        "interpretation_or_framing":  [],
+        "missing_receipts":           missing_receipts[:6],
+        "do_not_pass_forward_as":     dnpf[:3],
+        "follow_up_sources":          follow_ups[:5],
+    }
+
+
+def _extract_strategy_commentary(text: str, source_type: str, source_url: str) -> Dict:
+    """Signal brief extractor for investment_strategy_commentary genre.
+
+    Extracts allocation views (overweight/underweight/neutral),
+    forward-looking projections, and the house-view disclaimer.
+    """
+    sentences      = _split_sentences(text)
+    data_providers = _find_data_providers(text)
+    market_venues  = _find_market_venues(text)
+    named_srcs     = _unique_ordered(data_providers + market_venues)
+    primary_linked = bool(re.search(
+        r"https?://(?:sec\.gov|sedarplus|edgar|doi\.org|arxiv)", text.lower()
+    ))
+
+    investment_views: List[str] = []
+    forward_looking: List[str] = []
+    source_caveats: List[str] = []
+    missing_receipts: List[str] = []
+
+    for sent in sentences:
+        if not sent or len(sent.split()) < 4:
+            continue
+        if len(sent) > 400:
+            continue
+        if _CAVEAT_CUES.search(sent):
+            source_caveats.append(_compress(sent))
+        elif _ALLOCATION_TERMS.search(sent) and (
+            re.search(r"\b(overweight|underweight|neutral|upgrade|downgrade)\b", sent, re.I)
+        ):
+            investment_views.append(_compress(sent))
+        elif _FORWARD_LOOKING.search(sent):
+            forward_looking.append(_compress(sent))
+        elif _is_key_signal_generic(sent):
+            investment_views.append(_compress(sent))
+
+    # Auto-generate missing receipts for underlying datasets cited
+    text_lower = text.lower()
+    if re.search(r"\bearnings\b|\beps\b|\brevenue\b", text_lower):
+        missing_receipts.append(
+            "Underlying earnings dataset — verify S&P 500 EPS projections at FactSet, Bloomberg, or LSEG."
+        )
+    if re.search(r"\bspreads?\b|\bdefault\b|\byield\b", text_lower):
+        missing_receipts.append(
+            "Credit spread source — verify high-yield / investment-grade spreads at ICE BofA or Bloomberg."
+        )
+    if re.search(r"\binflation\b|\btips\b|\blinkers\b", text_lower):
+        missing_receipts.append(
+            "Inflation data — verify CPI/PCE projections at BLS.gov or Federal Reserve."
+        )
+    missing_receipts.append(
+        "No independent primary data checked by this run — these are institutional allocation views, not raw data."
+    )
+
+    house_view_warning: List[str] = [
+        "This commentary represents the asset manager's house view — "
+        "allocation calls may reflect their own positioning and fee interests."
+    ]
+
+    dnpf: List[str] = [
+        "Primary financial data — this is institutional investment strategy commentary.",
+        "Independent research — verify tactical views against other asset managers or primary data.",
+    ]
+    follow_ups: List[str] = [
+        "Full BlackRock Investment Institute commentary for complete methodology and disclosures.",
+        "Primary data sources for each cited market statistic (earnings, spreads, yields).",
+        "Compare allocation views with other institutional outlooks for cross-source perspective.",
+    ]
+
+    return {
+        "genre":                      "investment_strategy_commentary",
+        "source_type":                source_type,
+        "primary_data_named":         named_srcs,
+        "named_data_providers":       data_providers,
+        "markets_venues_mentioned":   market_venues,
+        "primary_data_verified":      primary_linked,
+        "key_signals":                investment_views[:8],
+        "investment_views":           investment_views[:8],
+        "forward_looking_claims":     forward_looking[:6],
+        "house_view_warning":         house_view_warning,
+        "source_caveats":             source_caveats[:4],
+        "interpretation_or_framing":  forward_looking[:4],
+        "missing_receipts":           missing_receipts[:6],
+        "do_not_pass_forward_as":     dnpf[:3],
+        "follow_up_sources":          follow_ups[:4],
+    }
+
+
 def extract_signal_brief(
     text: str,
     genre: str,
@@ -597,4 +891,8 @@ def extract_signal_brief(
     """Return structured signal brief. Dispatches to genre-specific extractor."""
     if genre == "financial_market_snapshot":
         return _extract_financial(text, source_type, source_url)
+    if genre == "global_macro_market_update":
+        return _extract_macro_update(text, source_type, source_url)
+    if genre == "investment_strategy_commentary":
+        return _extract_strategy_commentary(text, source_type, source_url)
     return _extract_generic(text, genre, source_type, source_url)

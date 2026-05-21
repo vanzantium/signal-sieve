@@ -48,7 +48,9 @@ _SOURCE_TYPE_ENUM = [
     "anonymous", "unknown",
 ]
 _GENRE_ENUM = [
-    "financial_market_snapshot", "official_release", "regulatory_filing",
+    "financial_market_snapshot", "global_macro_market_update",
+    "investment_strategy_commentary",
+    "official_release", "regulatory_filing",
     "news_article", "opinion_article", "social_post", "generic_article",
 ]
 
