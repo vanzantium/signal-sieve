@@ -17,14 +17,20 @@
     .card { background:rgba(22,27,34,.94); border:1px solid var(--line); border-radius:18px; padding:18px; box-shadow:0 18px 48px rgba(0,0,0,.28); }
     label { display:block; color:var(--muted); font-size:.82rem; font-weight:800; text-transform:uppercase; letter-spacing:.08em; margin:14px 0 6px; }
     textarea, input, select { width:100%; border:1px solid var(--line); border-radius:12px; background:#0b1118; color:var(--text); padding:12px 13px; font:inherit; outline:none; }
-    textarea { min-height:330px; resize:vertical; }
+    textarea { min-height:240px; resize:vertical; }
     textarea:focus, input:focus, select:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(88,166,255,.14); }
     .row { display:grid; grid-template-columns:1fr; gap:12px; }
     @media (min-width:620px) { .row.two { grid-template-columns:1fr 1fr; } }
-    button { width:100%; margin-top:16px; border:0; border-radius:999px; background:linear-gradient(135deg, #58a6ff, #a371f7); color:white; padding:13px 18px; font-size:1rem; font-weight:900; cursor:pointer; }
-    button:hover { filter:brightness(1.08); }
-    .note { color:var(--muted); font-size:.87rem; margin-top:12px; }
-    .error { background:rgba(248,81,73,.12); border:1px solid rgba(248,81,73,.45); color:#ffb4ad; padding:12px; border-radius:12px; margin-bottom:14px; }
+    button { border:0; border-radius:999px; background:linear-gradient(135deg,#58a6ff,#a371f7); color:white; padding:12px 18px; font-size:.95rem; font-weight:900; cursor:pointer; transition:filter .15s; }
+    button:hover { filter:brightness(1.1); }
+    .btn-run { width:100%; margin-top:16px; font-size:1rem; }
+    .btn-share { padding:9px 18px; font-size:.82rem; }
+    .btn-share.x-btn   { background:linear-gradient(135deg,#1d9bf0,#4d9fff); }
+    .btn-share.full-btn{ background:linear-gradient(135deg,#3fb950,#68d280); }
+    .note { color:var(--muted); font-size:.87rem; margin-top:8px; }
+    .alert { padding:12px; border-radius:12px; margin-bottom:14px; font-size:.9rem; }
+    .alert.error { background:rgba(248,81,73,.12); border:1px solid rgba(248,81,73,.45); color:#ffb4ad; }
+    .alert.warn  { background:rgba(210,153,34,.10); border:1px solid rgba(210,153,34,.40); color:#f2cc60; }
     .empty { color:var(--muted); padding:36px 12px; text-align:center; border:1px dashed var(--line); border-radius:14px; }
     .triage { background:#0b1118; border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:14px; }
     .triage h2 { margin:0 0 8px; font-size:1.1rem; }
@@ -33,33 +39,55 @@
     .pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:var(--soft); border:1px solid var(--line); color:var(--text); font-size:.85rem; }
     .pill.good { border-color:rgba(63,185,80,.42); color:#7ee787; }
     .pill.warn { border-color:rgba(210,153,34,.52); color:#f2cc60; }
-    .pill.bad { border-color:rgba(248,81,73,.52); color:#ff7b72; }
+    .pill.bad  { border-color:rgba(248,81,73,.52); color:#ff7b72; }
     .scores { display:grid; grid-template-columns:1fr; gap:10px; margin:16px 0; }
     .score { background:#0b1118; border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
     .scoreline { display:flex; justify-content:space-between; gap:12px; font-size:.9rem; margin-bottom:6px; }
     .bar { width:100%; height:7px; background:#21262d; border-radius:999px; overflow:hidden; }
-    .fill { height:100%; background:var(--accent); border-radius:inherit; }
+    .fill       { height:100%; background:var(--accent); border-radius:inherit; }
+    .fill.coh   { background:linear-gradient(90deg,#a371f7,#58a6ff); }
+    .fill.risk  { background:linear-gradient(90deg,#f85149,#d29922); }
     details { border-top:1px solid var(--line); margin-top:14px; padding-top:14px; }
     summary { cursor:pointer; color:var(--accent); font-weight:900; }
     ul { margin:10px 0 0; padding-left:20px; }
     li { margin:6px 0; }
     pre { white-space:pre-wrap; word-wrap:break-word; background:#0b1118; border:1px solid var(--line); border-radius:12px; padding:12px; max-height:420px; overflow:auto; color:#d2a8ff; }
     .mini { color:var(--muted); font-size:.84rem; }
+    .share-bar { display:flex; gap:10px; flex-wrap:wrap; margin-top:16px; border-top:1px solid var(--line); padding-top:16px; align-items:center; }
+    .share-bar span.lbl { color:var(--muted); font-size:.82rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em; }
+    .copy-flash { font-size:.78rem; color:#7ee787; opacity:0; transition:opacity .25s; margin-left:4px; }
+    .copy-flash.show { opacity:1; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <h1>Signal Sieve</h1>
-      <p class="tagline"><strong>Paste claim. Sieve it. Read the stink.</strong><br>A pre-belief filter for claims, posts, articles, and AI outputs. It does not determine truth. It checks source custody, pressure language, certainty inflation, and evidence shape.</p>
-    <p class="note">If this is hosted on Render free tier, first load may take ~30 seconds while the service wakes up.</p>
-        </header>
+      <p class="tagline"><strong>Paste text or drop a link. Sieve it. Read the stink.</strong><br>Pre-belief filter for claims, posts, articles, and AI outputs. Not a fact-checker — audits source custody, pressure language, certainty inflation, evidence shape, and internal coherence.</p>
+      <p class="note">Hosted on Render free tier — first load may take ~30 s while the service wakes up.</p>
+    </header>
 
     <div class="grid">
+
+      <!-- INPUT CARD -->
       <form class="card" method="post">
-        {% if error %}<div class="error">{{ error }}</div>{% endif %}
-        <label for="text">Text to analyze</label>
-        <textarea id="text" name="text" placeholder="Paste a claim, post, article excerpt, PR release, or AI output here...">{{ input_text or "" }}</textarea>
+        {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+        {% if url_error %}<div class="alert warn">⚠ URL fetch warning: {{ url_error }} — analyzing extracted text instead.</div>{% endif %}
+
+        <label for="fetch_url">Fetch from URL
+          <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:.8rem"> — optional, paste a link to auto-extract text</span>
+        </label>
+        <input id="fetch_url" name="fetch_url" type="url"
+               value="{{ fetch_url or '' }}"
+               placeholder="https://… article, Wikipedia, press release, arXiv, SEC EDGAR…">
+        <p class="note">Works on static HTML pages. JS-rendered sites (most major news) may return limited text.</p>
+
+        <label for="text">Text to analyze
+          <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:.8rem"> — or leave blank if using URL above</span>
+        </label>
+        <textarea id="text" name="text"
+                  placeholder="Paste a claim, post, article excerpt, press release, or AI output here…">{{ input_text or "" }}</textarea>
+
         <div class="row two">
           <div>
             <label for="source_type">Source type</label>
@@ -69,20 +97,29 @@
           </div>
           <div>
             <label for="source_name">Source name</label>
-            <input id="source_name" name="source_name" value="{{ source_name or "" }}" placeholder="unknown, Reuters, SEC filing...">
+            <input id="source_name" name="source_name" value="{{ source_name or '' }}" placeholder="unknown, Reuters, SEC filing…">
           </div>
         </div>
-        <label for="source_url">Source URL</label>
-        <input id="source_url" name="source_url" value="{{ source_url or "" }}" placeholder="https://...">
-        <button type="submit">Run Sieve</button>
+        <label for="source_url">Source URL
+          <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:.8rem"> — for attribution (auto-filled from fetch URL if blank)</span>
+        </label>
+        <input id="source_url" name="source_url" value="{{ source_url or '' }}" placeholder="https://…">
+
+        <button type="submit" class="btn-run">Run Sieve</button>
         <p class="note">Receipt clerk, not oracle. For consequential claims, seek primary sources.</p>
       </form>
 
+      <!-- RESULTS CARD -->
       <section class="card">
         {% if result %}
           {% set action = result.recommended_action %}
-          {% set warn = result.custody_warning_level %}
-          <div class="triage"><h2>Triage</h2><p class="summary">{{ result.triage_summary }}</p></div>
+          {% set warn   = result.custody_warning_level %}
+
+          <div class="triage">
+            <h2>Triage</h2>
+            <p class="summary">{{ result.triage_summary }}</p>
+          </div>
+
           <div class="pillbar">
             <span class="pill {% if action in ['drop','reject'] %}bad{% elif action == 'seek_receipts' %}warn{% else %}good{% endif %}">action: {{ action }}</span>
             <span class="pill {% if warn in ['weak','mismatch'] %}bad{% elif warn == 'watch' %}warn{% else %}good{% endif %}">custody: {{ warn }}</span>
@@ -90,22 +127,166 @@
             <span class="pill">words: {{ result.word_count }}</span>
           </div>
           <p class="mini">Confidence band: {{ "%.2f"|format(result.confidence_band.low) }} — {{ "%.2f"|format(result.confidence_band.high) }}</p>
+
           <div class="scores">
-            {% for key in ["overall_confidence", "signal", "noise", "pressure", "source_custody", "certainty_bias", "evidence", "manipulation_risk"] %}
+            {% for key in ["overall_confidence","signal","noise","pressure","source_custody","certainty_bias","evidence","internal_coherence","manipulation_risk"] %}
               {% set val = result.scores[key] %}
-              <div class="score"><div class="scoreline"><strong>{{ key.replace("_", " ") }}</strong><span>{{ "%.3f"|format(val) }}</span></div><div class="bar"><div class="fill" style="width: {{ (val * 100)|round(0, 'floor') }}%"></div></div></div>
+              <div class="score">
+                <div class="scoreline">
+                  <strong>
+                    {{ key.replace("_"," ") }}
+                    {% if key == "internal_coherence" %}<span style="color:var(--muted);font-weight:400;font-size:.76rem"> — argument structure &amp; flow</span>{% endif %}
+                  </strong>
+                  <span>{{ "%.3f"|format(val) }}</span>
+                </div>
+                <div class="bar">
+                  <div class="fill{% if key=='internal_coherence' %} coh{% elif key=='manipulation_risk' %} risk{% endif %}"
+                       style="width:{{ (val*100)|round(0,'floor') }}%"></div>
+                </div>
+              </div>
             {% endfor %}
           </div>
-          {% if result.flags %}<details open><summary>Flags</summary><ul>{% for flag in result.flags %}<li>{{ flag }}</li>{% endfor %}</ul></details>{% endif %}
-          {% if result.questions_to_ask %}<details open><summary>Questions to ask</summary><ul>{% for q in result.questions_to_ask %}<li>{{ q }}</li>{% endfor %}</ul></details>{% endif %}
-          {% if result.evidence_clues %}<details><summary>Evidence / source clues</summary><ul>{% for clue in result.evidence_clues[:8] %}<li>{{ clue }}</li>{% endfor %}</ul></details>{% endif %}
-          {% if result.pressure_clues %}<details><summary>Pressure / certainty clues</summary><ul>{% for clue in result.pressure_clues[:8] %}<li>{{ clue }}</li>{% endfor %}</ul></details>{% endif %}
+
+          {% if result.flags %}
+          <details open><summary>Flags</summary>
+            <ul>{% for f in result.flags %}<li>{{ f }}</li>{% endfor %}</ul>
+          </details>{% endif %}
+
+          {% if result.questions_to_ask %}
+          <details open><summary>Questions to ask</summary>
+            <ul>{% for q in result.questions_to_ask %}<li>{{ q }}</li>{% endfor %}</ul>
+          </details>{% endif %}
+
+          {% if result.evidence_clues %}
+          <details><summary>Evidence / source clues</summary>
+            <ul>{% for c in result.evidence_clues[:8] %}<li>{{ c }}</li>{% endfor %}</ul>
+          </details>{% endif %}
+
+          {% if result.pressure_clues %}
+          <details><summary>Pressure / certainty clues</summary>
+            <ul>{% for c in result.pressure_clues[:8] %}<li>{{ c }}</li>{% endfor %}</ul>
+          </details>{% endif %}
+
           <details><summary>Raw JSON</summary><pre>{{ result_json }}</pre></details>
+
+          <!-- SHARE BAR -->
+          <div class="share-bar">
+            <span class="lbl">Share</span>
+            <button class="btn-share x-btn"   type="button" id="btnX"    onclick="copyShare('x')">Copy for X</button>
+            <button class="btn-share full-btn" type="button" id="btnFull" onclick="copyShare('full')">Copy full analysis</button>
+            <span class="copy-flash" id="copyFlash">Copied!</span>
+          </div>
+
         {% else %}
-          <div class="empty">Paste text and run the sieve. The result will appear here.</div>
+          <div class="empty">Paste text or enter a URL and run the sieve. Results appear here.</div>
         {% endif %}
       </section>
+
     </div>
   </div>
+
+  {% if result %}
+  <script>
+    const RESULT = {{ result_json | safe }};
+
+    const ACTION_EMOJI = {
+      verify_primary: '🟢', treat_as_lead: '🟡',
+      seek_receipts: '🟠', drop: '🔴', reject: '🚫'
+    };
+
+    function makeXText() {
+      const a   = RESULT.recommended_action;
+      const con = Math.round(RESULT.scores.overall_confidence * 100);
+      const coh = Math.round(RESULT.scores.internal_coherence * 100);
+      const src = RESULT.source_type;
+      const em  = ACTION_EMOJI[a] || '⚪';
+      const link = 'signal-sieve.onrender.com';
+      let sum = RESULT.triage_summary;
+
+      let header = `${em} ${a.replace(/_/g,' ').toUpperCase()} | confidence: ${con}% | coherence: ${coh}% | source: ${src}`;
+      let text   = `${header}\n"${sum}"\n${link} #SignalSieve`;
+
+      if (text.length > 240) {
+        const budget = 240 - header.length - link.length - 18;
+        sum  = sum.slice(0, Math.max(budget, 20)) + '…';
+        text = `${header}\n"${sum}"\n${link} #SignalSieve`;
+      }
+      if (text.length > 240) text = text.slice(0, 237) + '…';
+      return text;
+    }
+
+    function makeFullText() {
+      const r  = RESULT;
+      const s  = r.scores;
+      const eb = r.evidence_breakdown;
+      const SKIP = new Set(['source_custody_raw','source_custody_adjusted']);
+      const hr = '─'.repeat(46);
+
+      const scoreLines = Object.entries(s)
+        .filter(([k]) => !SKIP.has(k))
+        .map(([k, v]) => `  ${k.replace(/_/g,' ').padEnd(30)} ${v.toFixed(3)}`);
+
+      const lines = [
+        'SIGNAL SIEVE ANALYSIS',
+        hr,
+        `Action         : ${r.recommended_action.replace(/_/g,' ').toUpperCase()}`,
+        `Confidence     : ${Math.round(s.overall_confidence*100)}%  (band ${Math.round(r.confidence_band.low*100)}–${Math.round(r.confidence_band.high*100)}%)`,
+        `Int. Coherence : ${Math.round(s.internal_coherence*100)}%  (argument structure & logical flow)`,
+        '',
+        r.triage_summary,
+        '',
+        'SCORES',
+        ...scoreLines,
+        '',
+        'SOURCE',
+        `  Type           : ${r.source_type}`,
+        `  Custody level  : ${r.custody_warning_level}  |  ${r.custody_label}`,
+        `  Name           : ${r.source_name}`,
+        ...(r.source_url ? [`  URL            : ${r.source_url}`] : []),
+        `  Evidence       : ${eb.anchored} anchored  /  ${eb.unanchored} unanchored`,
+      ];
+
+      if (r.flags.length) {
+        lines.push('', 'FLAGS');
+        r.flags.forEach(f => lines.push(`  • ${f}`));
+      }
+
+      if (r.questions_to_ask.length) {
+        lines.push('', 'QUESTIONS TO ASK');
+        r.questions_to_ask.forEach(q => lines.push(`  • ${q}`));
+      }
+
+      lines.push(
+        '',
+        hr,
+        'Analyzed by Signal Sieve — https://signal-sieve.onrender.com',
+        'Signal Sieve is a heuristic receipt clerk, not a fact-checker.',
+        '',
+        r.ai_instruction,
+      );
+      return lines.join('\n');
+    }
+
+    async function copyShare(mode) {
+      const text  = mode === 'x' ? makeXText() : makeFullText();
+      const btnId = mode === 'x' ? 'btnX' : 'btnFull';
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_) {
+        window.prompt('Copy this (Ctrl+C / Cmd+C):', text);
+        return;
+      }
+      const flash = document.getElementById('copyFlash');
+      const btn   = document.getElementById(btnId);
+      const orig  = btn.textContent;
+      btn.textContent = 'Copied!';
+      flash.classList.add('show');
+      setTimeout(() => {
+        btn.textContent = orig;
+        flash.classList.remove('show');
+      }, 2000);
+    }
+  </script>
+  {% endif %}
 </body>
 </html>

@@ -127,6 +127,13 @@ ATTACK_LANGUAGE = re.compile(
     r")\b",
     re.I,
 )
+CONNECTIVES = re.compile(
+    r"\b(therefore|because|however|although|despite|since|thus|"
+    r"consequently|furthermore|moreover|nevertheless|whereas|"
+    r"as a result|in contrast|for this reason|by contrast|given that|"
+    r"it follows that|on the other hand|in turn|this means|which means)\b",
+    re.I,
+)
 FILLER = re.compile(
     r"\b(very|really|basically|actually|literally|sort of|kind of|"
     r"at the end of the day|needless to say|it is important to note|"
@@ -199,6 +206,7 @@ class Scores:
     bias_risk: float
     manipulation_risk: float
     certainty_to_evidence_gap: float
+    internal_coherence: float
     overall_confidence: float
 
 
@@ -460,6 +468,56 @@ def build_triage_summary(
     return f"{' + '.join(parts)}. {ACTION_IMPERATIVES.get(action, '')}".strip()
 
 # ---------------------------------------------------------------------------
+# CFT-inspired internal coherence scorer
+# ---------------------------------------------------------------------------
+
+def _score_internal_coherence(words: list, sentences: list) -> float:
+    """Estimate internal logical coherence of the text (CFT-inspired).
+
+    Measures three signals:
+      1. Logical connective density — structured argument flow (therefore,
+         because, however, although, etc.)
+      2. Lexical diversity — repetitive text scores low; varied vocab scores high.
+      3. Sentence-length variance — natural prose varies; mechanical repetition
+         or copy-paste padding shows as very uniform sentence lengths.
+
+    High score (>0.65): well-structured, non-repetitive argument.
+    Mid score (0.35–0.65): typical web writing, mixed quality.
+    Low score (<0.35): repetitive, circular, or logically unconnected.
+
+    This does NOT assess truth — a coherent argument can still be wrong.
+    """
+    if len(words) < 10:
+        return 0.50
+
+    text_lower = " ".join(words).lower()
+
+    # 1. Logical connective density
+    connective_hits = len(CONNECTIVES.findall(text_lower))
+    # 0.25 connectives/sentence is a healthy rate for structured writing
+    connective_score = min(connective_hits / max(len(sentences), 1) / 0.25, 1.0)
+
+    # 2. Lexical diversity  (unique / total word tokens)
+    lex_div = len(set(w.lower() for w in words)) / len(words)
+    # <0.25 = very repetitive, 0.65+ = highly diverse
+    diversity_score = min(max((lex_div - 0.25) / 0.40, 0.0), 1.0)
+
+    # 3. Sentence length variance (coefficient of variation)
+    if len(sentences) >= 3:
+        lens = [len(s.split()) for s in sentences if s.strip()]
+        if len(lens) >= 3:
+            mean_l = sum(lens) / len(lens)
+            cv = (sum((l - mean_l) ** 2 for l in lens) / len(lens)) ** 0.5 / max(mean_l, 1)
+            variance_score = min(cv / 0.5, 1.0)
+        else:
+            variance_score = 0.5
+    else:
+        variance_score = 0.5
+
+    return round(clamp(0.45 * connective_score + 0.40 * diversity_score + 0.15 * variance_score), 3)
+
+
+# ---------------------------------------------------------------------------
 # Main analyze()
 # ---------------------------------------------------------------------------
 
@@ -549,6 +607,7 @@ def analyze(
     if word_count < 50:
         overall = min(overall, 0.55)
 
+    internal_coherence = _score_internal_coherence(words, sentences)
     certainty_to_evidence_gap = certainty_bias - evidence
     band_width = 0.10 + (manipulation_risk + certainty_bias) * 0.12
     confidence_low = clamp(overall - band_width)
@@ -572,6 +631,8 @@ def analyze(
         flags.append("Attack/dehumanizing language detected: may be identity bait, not analysis.")
     if word_count < 50:
         flags.append("Short text: limited context; confidence capped.")
+    if internal_coherence < 0.30 and word_count >= 50:
+        flags.append("Low internal coherence: argument appears repetitive or logically unconnected.")
     if language_note:
         flags.append(language_note)
     if st_confidence < 0.50 and declared_st not in ("auto", "unknown", ""):
@@ -630,6 +691,7 @@ def analyze(
         bias_risk=round(bias_risk, 3),
         manipulation_risk=round(manipulation_risk, 3),
         certainty_to_evidence_gap=round(certainty_to_evidence_gap, 3),
+        internal_coherence=internal_coherence,
         overall_confidence=round(overall, 3),
     )
     warning_level = custody_warning_level(custody, st_confidence)
@@ -703,7 +765,8 @@ def pretty_report(result: Dict) -> str:
     for k in [
         "signal", "noise", "pressure", "source_custody",
         "certainty_bias", "evidence", "attribution",
-        "manipulation_risk", "certainty_to_evidence_gap", "overall_confidence",
+        "internal_coherence", "manipulation_risk",
+        "certainty_to_evidence_gap", "overall_confidence",
     ]:
         lines.append(f"  {k:28s} {s[k]:.3f}")
     if result["flags"]:
