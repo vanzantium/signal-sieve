@@ -14,15 +14,23 @@ from flask import Flask, jsonify, render_template, request
 
 from signal_sieve import analyze
 
+# signal_compare is optional — Phase 2 cross-document comparison
+try:
+    from signal_compare import compare_documents as _compare_documents
+    _COMPARE_AVAILABLE = True
+except ImportError:
+    _COMPARE_AVAILABLE = False
+
 app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.3.0"
+ANALYSIS_VERSION  = "v1.4.0"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
 MAX_SOURCE_NAME_CHARS = 200
+MAX_COMPARE_DOCS      = 10       # max documents per /compare request
 _START_TIME = time.time()
 
 
@@ -534,6 +542,64 @@ _OPENAPI_SPEC: dict = {
                         "type": "array", "items": {"type": "string"},
                         "description": "Suggested verification questions.",
                     },
+                    "capsule": {
+                        "type": "string",
+                        "description": (
+                            "Compact ~150-token invariant-preserving summary for AI pipeline use. "
+                            "Contains ACTION, CUSTODY, GENRE, SOURCE, SCORES, FLAGS, MISSING, VERDICT. "
+                            "Feed this instead of full JSON to reduce downstream token overhead."
+                        ),
+                        "example": (
+                            "──────────────────────────────────────────────────────\n"
+                            "SIGNAL_SIEVE v1.4.0 | req_20260521_a1b2c3d4\n"
+                            "ACTION:    treat_as_lead\n"
+                            "CUSTODY:   watch  (43% confidence  [38–50%])\n"
+                            "GENRE:     global macro market update\n"
+                            "SOURCE:    secondary market article\n"
+                            "SCORES:    pressure=0.08  certainty bias=0.22  manipulation=0.15\n"
+                            "           evidence=0.31  custody=0.62\n"
+                            "VERDICT:   Mid custody.\n"
+                            "──────────────────────────────────────────────────────"
+                        ),
+                    },
+                },
+            },
+            "CompareRequest": {
+                "type": "object", "required": ["documents"],
+                "properties": {
+                    "documents": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": MAX_COMPARE_DOCS,
+                        "items": {
+                            "type": "object", "required": ["text"],
+                            "properties": {
+                                "text":        {"type": "string", "description": "Document text."},
+                                "source_name": {"type": "string", "description": "Publisher or label."},
+                                "source_type": {"type": "string", "default": "auto"},
+                                "source_url":  {"type": "string"},
+                            },
+                        },
+                        "description": f"2–{MAX_COMPARE_DOCS} documents to cross-reference.",
+                    }
+                },
+            },
+            "CompareResponse": {
+                "type": "object",
+                "properties": {
+                    "kind":            {"type": "string", "enum": ["cross_document_comparison"]},
+                    "verdict_type":    {"type": "string", "enum": ["numeric_claim_cross_reference"]},
+                    "doc_count":       {"type": "integer"},
+                    "shared_claims":   {"type": "array", "items": {"type": "object"}},
+                    "unique_claims":   {"type": "array", "items": {"type": "object"}},
+                    "conflicts":       {"type": "array", "items": {"type": "object"},
+                                        "description": "Claims where values differ beyond tolerance."},
+                    "alignment":       {"type": "array", "items": {"type": "object"},
+                                        "description": "Claims where values agree within tolerance."},
+                    "crude_note":      {"type": "string", "description": "WTI/Brent benchmark note if both found."},
+                    "follow_up_sources": {"type": "array", "items": {"type": "string"}},
+                    "triage_summary":  {"type": "string"},
+                    "capsule":         {"type": "string", "description": "Compact compare capsule for AI pipelines."},
                 },
             },
             "ErrorResponse": {
@@ -643,8 +709,198 @@ _OPENAPI_SPEC: dict = {
                 },
             }
         },
+        "/api/v1/analyze.capsule": {
+            "post": {
+                "summary": (
+                    "Analyze text — return ONLY the compact signal capsule as plain text. "
+                    "~150 tokens. Optimized for AI pipeline use."
+                ),
+                "operationId": "analyzeV1Capsule",
+                "security": [{"ApiKeyAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/AnalyzeRequest"}
+                    }},
+                },
+                "responses": {
+                    "200": {
+                        "description": "Compact capsule text",
+                        "headers": {"X-Request-Id": {"schema": {"type": "string"}}},
+                        "content": {"text/plain": {"schema": {"type": "string"}}},
+                    },
+                    "400": {"description": "Bad request"},
+                    "401": {"description": "Unauthorized"},
+                    "413": {"description": "Text too long"},
+                },
+            }
+        },
+        "/api/v1/compare": {
+            "post": {
+                "summary": "Cross-reference numeric claims across 2–10 documents",
+                "operationId": "compareV1",
+                "description": (
+                    "Extracts numeric claims (yields, indices, commodities, macro indicators) "
+                    "from each document, normalizes them to canonical entity keys, and identifies "
+                    "conflicts (values differ beyond tolerance) and alignment. "
+                    "Returns a compact compare capsule alongside the structured results."
+                ),
+                "security": [{"ApiKeyAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/CompareRequest"},
+                        "examples": {
+                            "schwab_vs_blackrock": {
+                                "summary": "Brokerage snapshot vs. strategy commentary",
+                                "value": {
+                                    "documents": [
+                                        {
+                                            "text": "10-Year Treasury Yield: 4.61%  WTI Crude: $68.43/bbl",
+                                            "source_name": "Schwab Market Update",
+                                        },
+                                        {
+                                            "text": "10-year Treasury yield: 4.56%. Brent crude: $72.10.",
+                                            "source_name": "BlackRock Investment Outlook",
+                                        },
+                                    ]
+                                },
+                            }
+                        },
+                    }},
+                },
+                "responses": {
+                    "200": {
+                        "description": "Comparison result with conflicts, alignment, and capsule",
+                        "headers": {"X-Request-Id": {"schema": {"type": "string"}}},
+                        "content": {"application/json": {
+                            "schema": {"$ref": "#/components/schemas/CompareResponse"}
+                        }},
+                    },
+                    "400": {"description": "Bad request (fewer than 2 documents, or missing text)"},
+                    "401": {"description": "Unauthorized"},
+                    "503": {"description": "signal_compare module not available"},
+                },
+            }
+        },
     },
 }
+
+
+# ── signal capsule builders ───────────────────────────────────────────────────
+_CAPSULE_SEP = "─" * 52
+
+
+def build_signal_capsule(result: dict, request_id: str = "") -> str:
+    """Build a ~150-token invariant-preserving compact representation.
+
+    Designed for AI pipeline consumption: all information needed to route
+    or act on this signal fits in ~10 lines / ~200 tokens.
+    """
+    scores = result.get("scores", {})
+    band   = result.get("confidence_band", {})
+    genre  = result.get("source_genre",  "")
+    stype  = result.get("source_type",   "")
+
+    oc = scores.get("overall_confidence", 0.0)
+    if isinstance(band, dict):
+        lo = band.get("low",  max(0.0, oc - 0.07))
+        hi = band.get("high", min(1.0, oc + 0.07))
+    else:
+        lo, hi = max(0.0, oc - 0.07), min(1.0, oc + 0.07)
+
+    genre_display = genre.replace("_", " ") if genre else ""
+    stype_display = stype.replace("_", " ")
+
+    # Word-count hint from triage_summary
+    wc_m   = re.search(r"(\d+)\s+word", result.get("triage_summary", ""))
+    wc_str = f"  ({wc_m.group(1)} words)" if wc_m else ""
+
+    # Primary scores line
+    score_parts: list[str] = []
+    for k in ("pressure", "certainty_bias", "manipulation_risk"):
+        v = scores.get(k)
+        if v is not None:
+            short = k.replace("_risk", "").replace("_", " ")
+            score_parts.append(f"{short}={v:.2f}")
+
+    ev_parts: list[str] = []
+    if scores.get("evidence")        is not None: ev_parts.append(f"evidence={scores['evidence']:.2f}")
+    if scores.get("source_custody")  is not None: ev_parts.append(f"custody={scores['source_custody']:.2f}")
+
+    lines: list[str] = [_CAPSULE_SEP]
+    tag = f"SIGNAL_SIEVE {ANALYSIS_VERSION}"
+    lines.append(f"{tag} | {request_id}" if request_id else tag)
+    lines.append(f"ACTION:    {result.get('recommended_action', '?')}")
+    lines.append(
+        f"CUSTODY:   {result.get('custody_warning_level', '?')}"
+        f"  ({oc * 100:.0f}% confidence  [{lo * 100:.0f}–{hi * 100:.0f}%])"
+    )
+    if genre_display:
+        lines.append(f"GENRE:     {genre_display}")
+    lines.append(f"SOURCE:    {stype_display}{wc_str}")
+
+    if score_parts:
+        lines.append(f"SCORES:    {'  '.join(score_parts)}")
+    if ev_parts:
+        lines.append(f"           {'  '.join(ev_parts)}")
+
+    flags = result.get("flags", [])
+    if flags:
+        flag_lines = [
+            "· " + f[:60] + ("…" if len(f) > 60 else "")
+            for f in flags[:4]
+        ]
+        lines.append("FLAGS:     " + "\n           ".join(flag_lines))
+
+    sb      = result.get("signal_brief", {})
+    missing = sb.get("missing_receipts", [])
+    if missing:
+        lines.append("MISSING:   · " + "  · ".join(str(m)[:40] for m in missing[:5]))
+
+    verdict = result.get("triage_summary", "")
+    if verdict:
+        first_sent = re.split(r"(?<=[.!?])\s", verdict)[0]
+        lines.append(f"VERDICT:   {first_sent}")
+
+    lines.append(_CAPSULE_SEP)
+    return "\n".join(lines)
+
+
+def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
+    """Build a compact capsule for cross-document comparison results."""
+    conflicts = cmp_result.get("conflicts", [])
+    alignment = cmp_result.get("alignment", [])
+    shared    = cmp_result.get("shared_claims", [])
+
+    lines: list[str] = [_CAPSULE_SEP]
+    tag = f"SIGNAL_SIEVE {ANALYSIS_VERSION} COMPARE"
+    lines.append(f"{tag} | {request_id}" if request_id else tag)
+    lines.append(f"DOCS:      {cmp_result.get('doc_count', '?')}")
+    lines.append(
+        f"SHARED:    {len(shared)}"
+        f"  CONFLICTS: {len(conflicts)}"
+        f"  ALIGNED: {len(alignment)}"
+    )
+
+    if conflicts:
+        lines.append("CONFLICTS:")
+        for c in conflicts[:5]:
+            val_str = "  vs  ".join(
+                f"{v['source']}: {v['raw']}"
+                for v in c.get("values", [])[:3]
+            )
+            lines.append(f"  · {c['entity_label']}: {val_str}")
+
+    if cmp_result.get("crude_note"):
+        lines.append("NOTE:      WTI ≠ Brent — different benchmarks, not comparable")
+
+    verdict = cmp_result.get("triage_summary", "")
+    if verdict:
+        lines.append(f"VERDICT:   {verdict[:140]}")
+
+    lines.append(_CAPSULE_SEP)
+    return "\n".join(lines)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -853,6 +1109,9 @@ def api_v1_analyze():
     else:
         response["missing_receipts"] = []
 
+    # Capsule: compact invariant-preserving representation for AI pipelines
+    response["capsule"] = build_signal_capsule(result, request_id)
+
     resp = jsonify(response)
     resp.headers["X-Request-Id"] = request_id
     return resp
@@ -950,6 +1209,126 @@ def api_v1_analyze_txt():
     resp = app.make_response(body)
     resp.headers["Content-Type"]  = "text/plain; charset=utf-8"
     resp.headers["X-Request-Id"]  = request_id
+    return resp
+
+
+@app.post("/api/v1/analyze.capsule")
+def api_v1_analyze_capsule():
+    """Return ONLY the compact signal capsule as plain text (~150 tokens).
+
+    Ideal for AI pipeline use: feed the capsule instead of the full JSON to
+    reduce token overhead while preserving all routing-relevant invariants.
+    """
+    request_id = _make_request_id()
+
+    auth_err = _check_api_key()
+    if auth_err:
+        return _api_error(401, "unauthorized", auth_err, request_id)
+
+    payload = request.get_json(silent=True) or {}
+    text, source_type, source_name, source_url, err = _validate_analyze_payload(
+        payload, request_id, max_chars=_get_max_chars()
+    )
+    if err:
+        return err
+
+    try:
+        result = analyze(
+            text,
+            source_type=source_type,
+            source_name=source_name,
+            source_url=source_url,
+        )
+    except Exception:
+        return _api_error(500, "internal_error",
+                          "Signal Sieve failed while processing this input.", request_id)
+
+    capsule = build_signal_capsule(result, request_id)
+    resp = app.make_response(capsule)
+    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
+    resp.headers["X-Request-Id"] = request_id
+    return resp
+
+
+@app.post("/api/v1/compare")
+def api_v1_compare():
+    """Cross-reference numeric claims across 2–10 documents.
+
+    Request body::
+
+        {
+          "documents": [
+            {"text": "...", "source_name": "Schwab", "source_type": "auto"},
+            {"text": "...", "source_name": "BlackRock"}
+          ]
+        }
+
+    Returns conflicts, alignment, shared claims, crude-benchmark notes, and a
+    compact compare capsule.
+    """
+    request_id = _make_request_id()
+
+    auth_err = _check_api_key()
+    if auth_err:
+        return _api_error(401, "unauthorized", auth_err, request_id)
+
+    if not _COMPARE_AVAILABLE:
+        return _api_error(
+            503, "not_available",
+            "signal_compare module not installed — cross-document comparison unavailable.",
+            request_id,
+        )
+
+    payload = request.get_json(silent=True) or {}
+    docs    = payload.get("documents", [])
+
+    if not isinstance(docs, list) or len(docs) < 2:
+        return _api_error(
+            400, "bad_request",
+            "Field 'documents' must be a list of at least 2 items.",
+            request_id,
+        )
+    if len(docs) > MAX_COMPARE_DOCS:
+        return _api_error(
+            400, "bad_request",
+            f"Maximum {MAX_COMPARE_DOCS} documents per compare request.",
+            request_id,
+        )
+
+    max_chars = _get_max_chars()
+
+    prepared: list[dict] = []
+    for i, doc in enumerate(docs):
+        if not isinstance(doc, dict):
+            return _api_error(400, "bad_request", f"Document {i} must be an object.", request_id)
+        text = doc.get("text", "")
+        if not isinstance(text, str) or not text.strip():
+            return _api_error(400, "bad_request",
+                              f"Document {i} missing required field: text", request_id)
+        prepared.append({
+            "text":        text[:max_chars],
+            "source_name": (doc.get("source_name") or f"doc_{i + 1}")[:MAX_SOURCE_NAME_CHARS],
+            "source_type": doc.get("source_type", "auto"),
+            "source_url":  (doc.get("source_url") or "")[:MAX_SOURCE_URL_CHARS],
+        })
+
+    try:
+        cmp_result = _compare_documents(prepared)
+    except Exception:
+        return _api_error(500, "internal_error",
+                          "Comparison failed while processing documents.", request_id)
+
+    capsule = build_compare_capsule(cmp_result, request_id)
+
+    response = {
+        **_api_envelope(request_id),
+        "kind":        "cross_document_comparison",
+        "verdict_type": "numeric_claim_cross_reference",
+        **cmp_result,
+        "capsule":     capsule,
+    }
+    resp = jsonify(response)
+    resp.headers["X-Request-Id"] = request_id
     return resp
 
 

@@ -413,6 +413,173 @@ def _():
     assert "score_meaning" in props
 
 
+# ── Phase 2: capsule ──────────────────────────────────────────────────────────
+
+@test("POST /api/v1/analyze includes capsule in response")
+def _():
+    r = client.post("/api/v1/analyze", json={"text": _SAMPLE_TEXT})
+    assert r.status_code == 200
+    d = r.get_json()
+    assert "capsule" in d, "response should include 'capsule' field"
+    cap = d["capsule"]
+    assert isinstance(cap, str) and len(cap) > 30
+    assert "SIGNAL_SIEVE" in cap
+    assert "ACTION:" in cap
+    assert ANALYSIS_VERSION in cap
+
+
+@test("POST /api/v1/analyze capsule contains key sections")
+def _():
+    r = client.post("/api/v1/analyze", json={"text": _SAMPLE_TEXT})
+    cap = r.get_json()["capsule"]
+    for section in ("CUSTODY:", "SCORES:", "VERDICT:"):
+        assert section in cap, f"capsule missing section: {section!r}"
+
+
+@test("POST /api/v1/analyze.capsule returns plain text capsule")
+def _():
+    r = client.post("/api/v1/analyze.capsule", json={"text": _SAMPLE_TEXT})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert "text/plain" in r.content_type
+    body = r.get_data(as_text=True)
+    assert "SIGNAL_SIEVE" in body
+    assert "ACTION:" in body
+    assert r.headers.get("X-Request-Id", "").startswith("req_")
+
+
+@test("POST /api/v1/analyze.capsule missing text -> 400")
+def _():
+    r = client.post("/api/v1/analyze.capsule", json={})
+    assert r.status_code == 400
+
+
+# ── Phase 2: compare ──────────────────────────────────────────────────────────
+
+_SCHWAB_SNIPPET = (
+    "Schwab Market Update — November 14, 2024\n"
+    "10-Year Treasury Yield: 4.61%  |  WTI Crude: $68.43/bbl\n"
+    "S&P 500: +0.02%  |  Nasdaq Composite: +0.06%\n"
+)
+
+_BLACKROCK_SNIPPET = (
+    "BlackRock Investment Outlook, November 2024\n"
+    "10-year Treasury yield: 4.56%.\n"
+    "Brent crude: $72.10 per barrel.\n"
+    "S&P 500 reached a record high of 5,894 on November 11, 2024.\n"
+)
+
+
+@test("POST /api/v1/compare returns 200 with comparison envelope")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": _SCHWAB_SNIPPET,    "source_name": "Schwab"},
+            {"text": _BLACKROCK_SNIPPET, "source_name": "BlackRock"},
+        ]
+    })
+    assert r.status_code == 200, r.get_data(as_text=True)
+    d = r.get_json()
+    assert d["kind"]          == "cross_document_comparison"
+    assert d["verdict_type"]  == "numeric_claim_cross_reference"
+    assert d["doc_count"]     == 2
+    assert "shared_claims"    in d
+    assert "conflicts"        in d
+    assert "alignment"        in d
+    assert "triage_summary"   in d
+    assert r.headers.get("X-Request-Id", "").startswith("req_")
+
+
+@test("POST /api/v1/compare requires 2+ documents")
+def _():
+    # Zero documents
+    r = client.post("/api/v1/compare", json={"documents": []})
+    assert r.status_code == 400
+    # One document
+    r = client.post("/api/v1/compare", json={
+        "documents": [{"text": _SCHWAB_SNIPPET}]
+    })
+    assert r.status_code == 400
+    d = r.get_json()
+    assert d["error"] == "bad_request"
+
+
+@test("POST /api/v1/compare finds 10yr Treasury yield discrepancy")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": _SCHWAB_SNIPPET,    "source_name": "Schwab"},
+            {"text": _BLACKROCK_SNIPPET, "source_name": "BlackRock"},
+        ]
+    })
+    d = r.get_json()
+    # 4.61 vs 4.56 = 0.05 spread — within 0.15 tolerance, so this aligns
+    # But we need to verify the entity was found in shared_claims at minimum
+    all_keys = (
+        [c["entity_key"] for c in d.get("shared_claims", [])] +
+        [c["entity_key"] for c in d.get("conflicts",     [])] +
+        [c["entity_key"] for c in d.get("alignment",     [])]
+    )
+    assert "10yr-treasury-yield" in all_keys, \
+        f"expected 10yr-treasury-yield in shared/conflict/alignment, got keys: {all_keys}"
+
+
+@test("POST /api/v1/compare detects WTI vs Brent as different benchmarks")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": _SCHWAB_SNIPPET,    "source_name": "Schwab"},
+            {"text": _BLACKROCK_SNIPPET, "source_name": "BlackRock"},
+        ]
+    })
+    d = r.get_json()
+    assert d.get("crude_note"), "expected crude_note when WTI and Brent both appear"
+    assert "WTI" in d["crude_note"] or "Brent" in d["crude_note"]
+
+
+@test("POST /api/v1/compare includes compare capsule")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": _SCHWAB_SNIPPET,    "source_name": "Schwab"},
+            {"text": _BLACKROCK_SNIPPET, "source_name": "BlackRock"},
+        ]
+    })
+    d = r.get_json()
+    assert "capsule" in d
+    cap = d["capsule"]
+    assert "SIGNAL_SIEVE" in cap
+    assert "COMPARE" in cap
+    assert "DOCS:" in cap
+
+
+@test("POST /api/v1/compare missing text in document -> 400")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": _SCHWAB_SNIPPET, "source_name": "Schwab"},
+            {"source_name": "BadDoc"},           # missing text
+        ]
+    })
+    assert r.status_code == 400
+    d = r.get_json()
+    assert d["error"] == "bad_request"
+
+
+@test("GET /openapi.json documents compare and capsule endpoints")
+def _():
+    r = client.get("/openapi.json")
+    spec = r.get_json()
+    paths = spec["paths"]
+    assert "/api/v1/compare"          in paths, "missing /api/v1/compare in OpenAPI spec"
+    assert "/api/v1/analyze.capsule"  in paths, "missing /api/v1/analyze.capsule in OpenAPI spec"
+    schemas = spec["components"]["schemas"]
+    assert "CompareRequest"  in schemas
+    assert "CompareResponse" in schemas
+    # AnalyzeResponse should document the capsule field
+    ar_props = schemas["AnalyzeResponse"]["properties"]
+    assert "capsule" in ar_props, "AnalyzeResponse missing capsule field in OpenAPI spec"
+
+
 # ── runner ─────────────────────────────────────────────────────────────────────
 
 def run() -> int:
