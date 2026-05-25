@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Signal Sieve — API Reference</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+  <style>
+    /* ── dark-mode shell ── */
+    :root { --bg:#0d1117; --panel:#161b22; --text:#e6edf3; --muted:#8b949e; --line:#30363d; --accent:#58a6ff; }
+    html, body { margin:0; background:var(--bg); color:var(--text);
+      font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    .ss-bar { background:var(--panel); border-bottom:1px solid var(--line);
+      padding:14px 24px; display:flex; align-items:center; gap:18px; flex-wrap:wrap; }
+    .ss-bar a.logo { color:var(--text); text-decoration:none; font-weight:900;
+      font-size:1.1rem; letter-spacing:-.03em; }
+    .ss-bar a.logo span { color:var(--accent); }
+    .ss-bar nav { display:flex; gap:16px; margin-left:auto; }
+    .ss-bar nav a { color:var(--muted); text-decoration:none; font-size:.88rem;
+      font-weight:700; transition:color .15s; }
+    .ss-bar nav a:hover { color:var(--text); }
+    .quick-ref { max-width:960px; margin:32px auto 0; padding:0 24px 40px; }
+    .quick-ref h2 { font-size:1rem; text-transform:uppercase; letter-spacing:.08em;
+      color:var(--muted); margin:0 0 16px; font-weight:800; }
+    .curl-card { background:var(--panel); border:1px solid var(--line); border-radius:14px;
+      padding:16px 18px; margin-bottom:14px; }
+    .curl-card h3 { margin:0 0 10px; font-size:.9rem; color:var(--accent); font-weight:800;
+      text-transform:uppercase; letter-spacing:.06em; }
+    pre.curl { background:#0b1118; border:1px solid var(--line); border-radius:10px;
+      padding:12px 14px; font-size:.82rem; line-height:1.55; color:#d2a8ff;
+      overflow-x:auto; white-space:pre; margin:0; }
+    .endpoint-tag { display:inline-block; background:rgba(88,166,255,.15);
+      color:var(--accent); border-radius:6px; padding:2px 8px; font-size:.78rem;
+      font-weight:800; font-family:monospace; margin-bottom:8px; }
+    .note-box { background:rgba(88,166,255,.08); border:1px solid rgba(88,166,255,.25);
+      border-radius:10px; padding:12px 14px; font-size:.87rem; color:var(--muted);
+      margin-bottom:24px; }
+    .note-box strong { color:var(--text); }
+    /* ── swagger-ui dark overrides ── */
+    #swagger-ui { max-width:1060px; margin:0 auto; padding:0 16px 64px; }
+    .swagger-ui { color:var(--text) !important; background:transparent !important; }
+    .swagger-ui .wrapper { background:transparent; padding:0; }
+    .swagger-ui .info { background:transparent; padding:0 0 24px; }
+    .swagger-ui .info .title { color:var(--text) !important; }
+    .swagger-ui .info .description { color:var(--muted) !important; }
+    .swagger-ui .info a { color:var(--accent) !important; }
+    .swagger-ui .scheme-container { background:var(--panel) !important;
+      border:1px solid var(--line) !important; border-radius:12px !important; padding:12px 18px; }
+    .swagger-ui .opblock { background:var(--panel) !important;
+      border:1px solid var(--line) !important; border-radius:12px !important;
+      margin-bottom:10px !important; }
+    .swagger-ui .opblock .opblock-summary { border-bottom:1px solid var(--line) !important; }
+    .swagger-ui .opblock .opblock-summary-method { border-radius:8px !important; }
+    .swagger-ui .opblock .opblock-body { background:transparent !important; }
+    .swagger-ui .opblock-section-header { background:rgba(255,255,255,.03) !important;
+      border-bottom:1px solid var(--line) !important; }
+    .swagger-ui textarea, .swagger-ui input[type=text], .swagger-ui select {
+      background:#0b1118 !important; color:var(--text) !important;
+      border-color:var(--line) !important; border-radius:8px !important; }
+    .swagger-ui .btn { border-radius:8px !important; font-weight:700 !important; }
+    .swagger-ui .btn.execute { background:var(--accent) !important; color:#000 !important; }
+    .swagger-ui .model-box { background:var(--soft, #21262d) !important; border-radius:8px !important; }
+    .swagger-ui .model { background:transparent !important; color:var(--text) !important; }
+    .swagger-ui section.models { background:var(--panel) !important;
+      border:1px solid var(--line) !important; border-radius:12px !important; }
+    .swagger-ui .responses-wrapper, .swagger-ui .response-col_status { color:var(--text) !important; }
+    .swagger-ui table thead tr td, .swagger-ui table thead tr th { color:var(--muted) !important;
+      border-bottom:1px solid var(--line) !important; }
+    .swagger-ui .parameter__name { color:var(--text) !important; }
+    .swagger-ui .parameter__type { color:#a371f7 !important; }
+    .swagger-ui .prop-type { color:#a371f7 !important; }
+    .swagger-ui .response-col_description .markdown p { color:var(--muted) !important; }
+    .swagger-ui .loading-container .loading:after { color:var(--muted) !important; }
+    .swagger-ui .topbar { display:none !important; }
+    .swagger-ui .info__contact a, .swagger-ui .info__license a { color:var(--accent) !important; }
+  </style>
+</head>
+<body>
+
+<div class="ss-bar">
+  <a class="logo" href="/">Signal <span>Sieve</span></a>
+  <nav>
+    <a href="/">← App</a>
+    <a href="/openapi.json">openapi.json</a>
+    <a href="https://github.com/vanzantium/signal-sieve" target="_blank" rel="noopener">GitHub</a>
+  </nav>
+</div>
+
+<div class="quick-ref">
+  <div class="note-box">
+    <strong>Receipt clerk, not oracle.</strong>
+    Signal Sieve is a heuristic pre-belief filter — it audits signal quality (source custody,
+    pressure language, certainty inflation, evidence shape), not factual accuracy.
+    <strong>overall_confidence counts signal markers, not truth probability.</strong>
+    Scroll down for the interactive spec, or copy a curl below to start immediately.
+  </div>
+
+  <h2>Quick start</h2>
+
+  <div class="curl-card">
+    <h3>Analyze text</h3>
+    <div class="endpoint-tag">POST /api/v1/analyze</div>
+    <pre class="curl">curl -s -X POST https://signal-sieve.onrender.com/api/v1/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text":"According to the BLS, CPI rose 2.4% in October 2024. The Fed held rates at 5.25–5.50%.", "source_type":"auto"}'</pre>
+  </div>
+
+  <div class="curl-card">
+    <h3>Capsule — minimal token response (~150 tokens, ideal for AI pipelines)</h3>
+    <div class="endpoint-tag">POST /api/v1/analyze.capsule</div>
+    <pre class="curl">curl -s -X POST https://signal-sieve.onrender.com/api/v1/analyze.capsule \
+  -H "Content-Type: application/json" \
+  -d '{"text":"...", "source_type":"auto"}'</pre>
+  </div>
+
+  <div class="curl-card">
+    <h3>Cross-document comparison — detect numeric conflicts across sources</h3>
+    <div class="endpoint-tag">POST /api/v1/compare</div>
+    <pre class="curl">curl -s -X POST https://signal-sieve.onrender.com/api/v1/compare \
+  -H "Content-Type: application/json" \
+  -d '{
+  "documents": [
+    {"text": "10-Year Treasury Yield: 4.61%  WTI Crude: $68.43", "source_name": "Schwab"},
+    {"text": "10-year Treasury yield: 4.56%.  Brent crude: $72.10.", "source_name": "BlackRock"}
+  ]
+}'</pre>
+  </div>
+
+  <div class="curl-card">
+    <h3>Plain-text report (stable section headers)</h3>
+    <div class="endpoint-tag">POST /api/v1/analyze.txt</div>
+    <pre class="curl">curl -s -X POST https://signal-sieve.onrender.com/api/v1/analyze.txt \
+  -H "Content-Type: application/json" \
+  -d '{"text":"..."}'</pre>
+  </div>
+
+</div>
+
+<div id="swagger-ui"></div>
+
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>
+  window.onload = function () {
+    SwaggerUIBundle({
+      url: "/openapi.json",
+      dom_id: "#swagger-ui",
+      deepLinking: true,
+      displayRequestDuration: true,
+      defaultModelsExpandDepth: 1,
+      defaultModelExpandDepth: 2,
+      docExpansion: "list",
+      tryItOutEnabled: true,
+      presets: [
+        SwaggerUIBundle.presets.apis,
+        SwaggerUIBundle.SwaggerUIStandalonePreset,
+      ],
+      layout: "BaseLayout",
+    });
+  };
+</script>
+</body>
+</html>

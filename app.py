@@ -389,7 +389,15 @@ _OPENAPI_SPEC: dict = {
             "Heuristic receipt clerk for signal/noise triage. "
             "Checks whether text has usable signal-quality markers: named sources, "
             "numeric anchors, source custody, attribution, caveats, pressure language. "
-            "NOT a fact-checker. overall_confidence measures signal markers, not truth."
+            "NOT a fact-checker. overall_confidence measures signal markers, not truth.\n\n"
+            "**Interactive docs:** `/docs` (Swagger UI)\n"
+            "**OpenAPI spec:** `/openapi.json` and `/.well-known/openapi.json`\n\n"
+            "**Endpoints:**\n"
+            "- `POST /api/v1/analyze` — full JSON analysis\n"
+            "- `POST /api/v1/analyze.capsule` — compact ~150-token capsule (AI pipeline use)\n"
+            "- `POST /api/v1/analyze.txt` — plain-text report with stable headers\n"
+            "- `POST /api/v1/compare` — cross-document numeric claim comparison\n"
+            "- `GET /health` — service health check"
         ),
         "contact": {"url": "https://github.com/vanzantium/signal-sieve"},
     },
@@ -1033,6 +1041,18 @@ def health():
 
 @app.get("/openapi.json")
 def openapi_spec():
+    return jsonify(_OPENAPI_SPEC)
+
+
+@app.get("/docs")
+def api_docs():
+    """Swagger UI — interactive API reference."""
+    return render_template("docs.html")
+
+
+@app.get("/.well-known/openapi.json")
+def openapi_spec_well_known():
+    """Standard OpenAPI discovery endpoint for agents and tools."""
     return jsonify(_OPENAPI_SPEC)
 
 
