@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=61"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta:__legacy__"
 
 [project]
 name = "signal-sieve"
@@ -29,3 +29,6 @@ signal-sieve = "signal_sieve:main"
 
 [tool.setuptools]
 py-modules = ["signal_sieve"]
+
+[tool.setuptools.packages.find]
+include = ["signal_sieve_i18n*"]

@@ -156,6 +156,34 @@ def _():
     assert isinstance(d.get("questions_to_ask"), list)
 
 
+@test("POST /api/v1/analyze exposes declared-language assessment")
+def _():
+    r = client.post(
+        "/api/v1/analyze",
+        json={
+            "text": "Fuentes anónimas dicen que está comprobado, pero no presentan datos.",
+            "language": "es",
+        },
+    )
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d["language"]["lexicon"] == "es"
+    assert d["language"]["calibration"] == "starter_partial"
+    assert d["language_assessment"]["scores"]["lexical_available"] == 1.0
+
+
+@test("POST /api/v1/analyze handles invalid language type without 500")
+def _():
+    r = client.post(
+        "/api/v1/analyze",
+        json={"text": _SAMPLE_TEXT, "language": 42},
+    )
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d["language"]["mode"] == "structural_only"
+    assert d["language"]["requested_language"] == "invalid"
+
+
 @test("POST /api/v1/analyze with include_signal_brief=true has signal_brief")
 def _():
     r = client.post("/api/v1/analyze",
@@ -578,6 +606,8 @@ def _():
     # AnalyzeResponse should document the capsule field
     ar_props = schemas["AnalyzeResponse"]["properties"]
     assert "capsule" in ar_props, "AnalyzeResponse missing capsule field in OpenAPI spec"
+    assert "language" in ar_props, "AnalyzeResponse missing language field"
+    assert "language_assessment" in ar_props, "AnalyzeResponse missing language assessment"
 
 
 # ── runner ─────────────────────────────────────────────────────────────────────

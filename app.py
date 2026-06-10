@@ -445,6 +445,15 @@ _OPENAPI_SPEC: dict = {
                         "description": "Publisher or author label.",
                         "example": "Rob Dale / Business of Cannabis",
                     },
+                    "language": {
+                        "type": "string", "default": "en",
+                        "description": (
+                            "Declared text language. 'en' uses the reference pack; "
+                            "'es' uses a starter Spanish pack. Other codes receive "
+                            "structural-only analysis with an explicit trust cap."
+                        ),
+                        "example": "en",
+                    },
                     "include_signal_brief": {
                         "type": "boolean", "default": True,
                         "description": "Include the signal_brief extraction in the response.",
@@ -516,6 +525,20 @@ _OPENAPI_SPEC: dict = {
                     "source_type_confidence": {
                         "type": "number", "minimum": 0, "maximum": 1,
                         "description": "Confidence that resolved_source_type is correct.",
+                    },
+                    "language": {
+                        "type": "object",
+                        "description": (
+                            "Declared-language routing, including script, lexicon, "
+                            "mode, calibration status, and fallback warnings."
+                        ),
+                    },
+                    "language_assessment": {
+                        "type": "object",
+                        "description": (
+                            "Language-aware lexical and paragraph-risk assessment. "
+                            "It may lower trust but never upgrades the custody-aware verdict."
+                        ),
                     },
                     "source_genre":  {"type": "string", "enum": _GENRE_ENUM},
                     "score_meaning": {
@@ -847,6 +870,12 @@ def build_signal_capsule(result: dict, request_id: str = "") -> str:
     if genre_display:
         lines.append(f"GENRE:     {genre_display}")
     lines.append(f"SOURCE:    {stype_display}{wc_str}")
+    language = result.get("language", {})
+    language_name = language.get("lexicon") or language.get("requested_language")
+    if language_name or language.get("mode") == "structural_only":
+        label = language_name or "undeclared"
+        calibration = language.get("calibration", language.get("mode", "unknown"))
+        lines.append(f"LANGUAGE:  {label} ({calibration})")
 
     if score_parts:
         lines.append(f"SCORES:    {'  '.join(score_parts)}")
@@ -921,13 +950,15 @@ def _score(result: dict, key: str, default: float = 0.0) -> float:
 
 
 def _render(*, result=None, input_text="", fetch_url="", selected_source_type="auto",
-            source_name="", source_url="", error=None, url_error=None):
+            selected_language="en", source_name="", source_url="", error=None,
+            url_error=None):
     kw = dict(
         source_types=SOURCE_TYPES,
         result=result,
         input_text=input_text,
         fetch_url=fetch_url,
         selected_source_type=selected_source_type,
+        selected_language=selected_language,
         source_name=source_name,
         source_url=source_url,
         error=error,
@@ -951,6 +982,7 @@ def run_sieve():
     fetch_url_val = request.form.get("fetch_url", "").strip()
     text          = request.form.get("text", "")
     source_type   = request.form.get("source_type", "auto")
+    language      = request.form.get("language", "en")
     source_name   = request.form.get("source_name", "unknown")
     source_url    = request.form.get("source_url", "")
     url_error     = None
@@ -975,6 +1007,7 @@ def run_sieve():
             input_text=text,
             fetch_url=fetch_url_val,
             selected_source_type=source_type,
+            selected_language=language,
             source_name=source_name,
             source_url=source_url,
             error=msg,
@@ -985,6 +1018,7 @@ def run_sieve():
         source_type=source_type,
         source_name=source_name or "unknown",
         source_url=source_url or "",
+        language=language,
     )
 
     return _render(
@@ -992,6 +1026,7 @@ def run_sieve():
         input_text=text,
         fetch_url=fetch_url_val,
         selected_source_type=source_type,
+        selected_language=language,
         source_name=source_name,
         source_url=source_url,
         url_error=url_error,  # show fetch warning even if analysis ran
@@ -1024,6 +1059,7 @@ def api_analyze():
         source_type=payload.get("source_type", "auto"),
         source_name=payload.get("source_name", "unknown"),
         source_url=payload.get("source_url", url or ""),
+        language=payload.get("language", "en"),
     )
     return jsonify(result)
 
@@ -1079,6 +1115,7 @@ def api_v1_analyze():
             source_type=source_type,
             source_name=source_name,
             source_url=source_url,
+            language=payload.get("language", "en"),
         )
     except Exception as exc:
         return _api_error(500, "internal_error",
@@ -1112,6 +1149,8 @@ def api_v1_analyze():
         "source_genre":            result.get("source_genre", ""),
         "source_name":             result.get("source_name", ""),
         "source_url":              result.get("source_url", ""),
+        "language":                result.get("language", {}),
+        "language_assessment":     result.get("language_assessment", {}),
         # ── details ──────────────────────────────────────────────────────────
         "scores":                  result["scores"],
         "flags":                   result["flags"],
@@ -1158,6 +1197,7 @@ def api_v1_analyze_txt():
             source_type=source_type,
             source_name=source_name,
             source_url=source_url,
+            language=payload.get("language", "en"),
         )
     except Exception as exc:
         return _api_error(500, "internal_error",
@@ -1179,6 +1219,7 @@ def api_v1_analyze_txt():
         "SOURCE",
         f"TYPE: {result['source_type']}",
         f"GENRE: {result.get('source_genre', 'unknown')}",
+        f"LANGUAGE: {result.get('language', {}).get('lexicon') or result.get('language', {}).get('requested_language') or 'structural-only'}",
         f"CUSTODY: {result['custody_warning_level']}",
         f"NAME: {result.get('source_name', 'unknown')}",
     ]
@@ -1258,6 +1299,7 @@ def api_v1_analyze_capsule():
             source_type=source_type,
             source_name=source_name,
             source_url=source_url,
+            language=payload.get("language", "en"),
         )
     except Exception:
         return _api_error(500, "internal_error",

@@ -52,7 +52,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 # signal_extract is optional (Phase 1.2); signal_sieve stays zero-dependency standalone
@@ -66,6 +66,12 @@ try:
     _EXTRACT_AVAILABLE = True
 except ImportError:
     _EXTRACT_AVAILABLE = False
+
+try:
+    from signal_sieve_i18n import analyze as analyze_language_layer
+    _I18N_AVAILABLE = True
+except ImportError:
+    _I18N_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Regex patterns (English-only heuristics)
@@ -272,6 +278,8 @@ class Assessment:
     source_url: str = ""
     word_count: int = 0
     language_note: str = ""
+    language: Dict = field(default_factory=dict)
+    language_assessment: Dict = field(default_factory=dict)
     verdict: str = ""
     recommended_action: str = ""
     triage_summary: str = ""
@@ -610,6 +618,7 @@ def analyze(
     source_type: str = "auto",
     source_name: str = "unknown",
     source_url: str = "",
+    language: Optional[str] = "en",
 ) -> Dict:
     """Analyze text and return a JSON-serializable assessment dict.
 
@@ -621,6 +630,9 @@ def analyze(
                   'auto' runs shallow inference from the text and URL.
     source_name : Publication, person, or system that produced the text.
     source_url  : URL of the source if available (improves custody inference).
+    language    : Declared language code. English is the backward-compatible
+                  default; use Spanish ("es") for the starter Spanish pack,
+                  or another code for honest structural-only fallback.
     """
     raw = text or ""
     normalized = re.sub(r"\s+", " ", raw).strip()
@@ -628,10 +640,30 @@ def analyze(
     word_count = len(words)
     sentences = sentence_split(raw)
     sent_count = max(len(sentences), 1)
-    language_note = (
-        "Text appears non-English. Heuristics are English-only; scores will be conservative."
-        if looks_non_english(raw) else ""
-    )
+    language_assessment: Dict = {}
+    language_routing: Dict = {}
+    if _I18N_AVAILABLE:
+        language_assessment = analyze_language_layer(raw, language=language)
+        language_routing = language_assessment.get("language", {})
+
+    if language_routing.get("mode") == "structural_only":
+        language_note = language_routing.get(
+            "note",
+            "Lexical risk is unavailable for this language; structural-only guardrails apply.",
+        )
+    elif language_routing.get("calibration") == "starter_partial":
+        language_note = (
+            "Spanish starter lexicon active. Results include language-aware risk checks, "
+            "but the pack is not yet corpus-calibrated to English parity."
+        )
+    elif language_routing.get("warning"):
+        language_note = language_routing["warning"]
+    else:
+        language_note = (
+            "Text appears non-English but no language-aware layer was available; "
+            "scores will be conservative."
+            if looks_non_english(raw) else ""
+        )
 
     # Raw hit counts
     cert_hits = count_matches(CERTAINTY, raw)
@@ -781,6 +813,31 @@ def analyze(
         recommended_action = "treat_as_lead"
         verdict = "secondary market source — treat as lead, verify at primary data source"
 
+    # The language layer is a conservative guardrail. It may lower trust when
+    # it sees lexical or paragraph-level risk, but it never upgrades the richer
+    # custody-aware verdict produced above.
+    language_guardrail_action = ""
+    if language_assessment:
+        action_rank = {
+            "verify_primary": 0,
+            "treat_as_lead": 1,
+            "seek_receipts": 2,
+            "drop": 3,
+            "reject": 4,
+        }
+        language_action = language_assessment.get("recommended_action", "treat_as_lead")
+        if action_rank.get(language_action, 1) > action_rank.get(recommended_action, 1):
+            language_guardrail_action = language_action
+            recommended_action = language_action
+            verdict = (
+                "language-aware guardrail lowered trust — inspect the language assessment "
+                "and seek receipts before passing this text forward"
+            )
+            flags.append(
+                f"Language-aware guardrail selected '{language_action}' based on "
+                "declared-language lexical or paragraph-level risk."
+            )
+
     # Dynamic follow-up questions
     questions = [
         "What is the closest primary source for the main claim?",
@@ -830,6 +887,12 @@ def analyze(
         unanchored_n=unanchored_n,
         action=recommended_action,
     )
+    if language_guardrail_action:
+        triage_summary = (
+            f"Language-aware guardrail selected "
+            f"{language_guardrail_action.replace('_', ' ')}; inspect lexical and "
+            "paragraph-level risk before passing this text forward."
+        )
     # Phase 1.2 enrichment (requires signal_extract.py)
     custody_breakdown: Dict = {}
     evidence_shape_data: Dict = {}
@@ -854,6 +917,8 @@ def analyze(
         source_url=source_url,
         word_count=word_count,
         language_note=language_note,
+        language=language_routing,
+        language_assessment=language_assessment,
         verdict=verdict,
         recommended_action=recommended_action,
         triage_summary=triage_summary,
@@ -871,6 +936,11 @@ def analyze(
             "For any consequential claim: seek primary sources, separate observation "
             "from interpretation, preserve uncertainty labels, and prefer the "
             "confidence_band over the single overall_confidence value."
+            + (
+                " Language layer: "
+                + language_assessment.get("ai_instruction", "")
+                if language_assessment else ""
+            )
         ),
         source_genre=source_genre,
         custody_breakdown=custody_breakdown,
@@ -1035,6 +1105,10 @@ def main() -> None:
     )
     ap.add_argument("--source-name", default="unknown", help="Name of source / publication / person")
     ap.add_argument("--source-url", default="", help="URL if available")
+    ap.add_argument(
+        "--language", default="en",
+        help="Declared language: en (reference), es (starter), or another code for structural-only mode",
+    )
     ap.add_argument("--pretty", action="store_true", help="Print human-readable report")
     ap.add_argument("--json", action="store_true", help="Print JSON (default if --pretty not used)")
     ap.add_argument("--demo", action="store_true", help="Run demo samples spanning the verdict range")
@@ -1065,6 +1139,7 @@ def main() -> None:
         source_type=args.source_type,
         source_name=args.source_name,
         source_url=args.source_url,
+        language=args.language,
     )
     if args.pretty:
         print(pretty_report(result))

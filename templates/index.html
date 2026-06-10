@@ -132,6 +132,13 @@
             <input id="source_name" name="source_name" value="{{ source_name or '' }}" placeholder="unknown, Reuters, SEC filing…">
           </div>
         </div>
+        <label for="language">Text language</label>
+        <select id="language" name="language">
+          <option value="en" {% if selected_language == "en" %}selected{% endif %}>English (reference pack)</option>
+          <option value="es" {% if selected_language == "es" %}selected{% endif %}>Spanish (starter pack)</option>
+          <option value="und" {% if selected_language == "und" %}selected{% endif %}>Other / unknown (structural only)</option>
+        </select>
+        <p class="note">Spanish is a starter lexicon. Other languages receive structural checks without lexical over-certification.</p>
         <label for="source_url">Source URL
           <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:.8rem"> — for attribution (auto-filled from fetch URL if blank)</span>
         </label>
@@ -164,6 +171,7 @@
             <span class="pill {% if action in ['drop','reject'] %}bad{% elif action == 'seek_receipts' %}warn{% else %}good{% endif %}">action: {{ action }}</span>
             <span class="pill {% if warn in ['weak','mismatch'] %}bad{% elif warn == 'watch' %}warn{% else %}good{% endif %}">custody: {{ warn }}</span>
             <span class="pill">source: {{ result.source_type }}</span>
+            <span class="pill">language: {{ result.language.lexicon or result.language.requested_language or "structural" }}</span>
             <span class="pill">words: {{ result.word_count }}</span>
           </div>
           <p class="mini">Confidence band: {{ "%.2f"|format(result.confidence_band.low) }} — {{ "%.2f"|format(result.confidence_band.high) }}</p>
@@ -498,6 +506,7 @@
         source_url:  ($id('source_url') || {}).value || '',
         source_name: ($id('source_name') || {}).value || '',
         source_type: ($id('source_type') || {}).value || 'auto',
+        language:    ($id('language') || {}).value || 'en',
       };
     }
 
@@ -542,6 +551,7 @@
         var el = $id(id); if (el) el.value = '';
       });
       var sel = $id('source_type'); if (sel) sel.value = 'auto';
+      var lang = $id('language'); if (lang) lang.value = 'en';
       var cc  = $id('charCount');
       if (cc) { cc.textContent = '0 / 12,000'; cc.style.color = 'var(--muted)'; }
       _lastSubmit = null;
@@ -573,6 +583,7 @@
           source_url:  ($id('source_url') || {}).value || '',
           source_name: ($id('source_name') || {}).value || '',
           source_type: ($id('source_type') || {}).value || 'auto',
+          language:    ($id('language') || {}).value || 'en',
         },
         result: R,
       };
@@ -615,6 +626,8 @@
       if ($id('source_name')) $id('source_name').value = f.source_name || '';
       var sel = $id('source_type');
       if (sel && f.source_type) sel.value = f.source_type;
+      var lang = $id('language');
+      if (lang && f.language) lang.value = f.language;
       // Trigger char counter update
       var evt = document.createEvent('Event'); evt.initEvent('input', true, true);
       var ta = $id('text'); if (ta) ta.dispatchEvent(evt);

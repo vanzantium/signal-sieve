@@ -85,6 +85,7 @@ result = analyze(
     source_type="auto",          # or: primary, secondary, social, opinion, ...
     source_name="Reuters",
     source_url="https://reuters.com/...",
+    language="en",               # en reference pack; es starter pack
 )
 
 if result["recommended_action"] in {"drop", "reject"}:
@@ -97,6 +98,28 @@ else:
 ```
 
 The full output is JSON-serializable and designed to be fed back into a model as a system note.
+
+---
+
+## Language-aware analysis
+
+Signal Sieve separates language-independent structure from declared-language
+lexical risk:
+
+- `language="en"` uses the reference English pack and remains the default.
+- `language="es"` uses a starter Spanish pack. It is useful but not yet
+  corpus-calibrated to English parity.
+- Other language codes run in explicit `structural_only` mode. They inspect
+  URLs, dates, identifiers, numbers, and custody shape, but cannot earn
+  `verify_primary` while lexical risk is unread.
+
+The language layer also checks the worst paragraph so a clean, well-anchored
+wrapper cannot hide a reject/drop-grade payload.
+
+```bash
+python signal_sieve.py --text "Fuentes dicen..." --language es --json
+python test_i18n.py
+```
 
 ---
 
@@ -160,7 +183,14 @@ A declared type that contradicts inferred signals (e.g. passing `source_type="pr
 python run_tests.py
 ```
 
-Seven fixture-based tests covering: clean primary source, evidence-word salad, hype/social, anonymous claim, attack language, hedged opinion, short text.
+The suite includes 15 source/genre fixtures, API contract checks, and the
+declared-language contract:
+
+```bash
+python run_tests.py
+python test_api.py
+python test_i18n.py
+```
 
 ---
 
@@ -171,8 +201,9 @@ These are **open questions**, not bugs. Contributions and field data welcome.
 1. **News articles** — longer articles with mixed sourcing get averaged scores; the worst paragraph can be buried.
 2. **Abstracts** — academic abstracts are dense with evidence markers and often score higher than the full paper warrants.
 3. **Forum / conversational text** — casual hedges ("I think", "maybe") suppress certainty_bias even in irresponsible claims.
-4. **Translated text** — non-English text gets a conservative penalty but heuristics remain English-only.
-5. **Adversarial salting** — a motivated actor can inflate scores by pasting evidence marker words near numbers. Signal Sieve is a filter, not a firewall.
+4. **Spanish calibration** — the starter pack needs multi-author corpus calibration before parity claims.
+5. **Additional languages** — unsupported languages are structural-only until a reviewed lexicon pack is added.
+6. **Adversarial salting** — a motivated actor can inflate scores by pasting evidence marker words near numbers. Signal Sieve is a filter, not a firewall.
 
 ---
 
