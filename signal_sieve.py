@@ -213,6 +213,7 @@ _GENRE_TO_SOURCE_TYPE = {
     "global_macro_market_update":     "secondary_market_article",  # Phase 1.6
     "investment_strategy_commentary": "secondary_market_article",  # Phase 1.6
     "news_article":                   "secondary",
+    "x_news_post":                    "social",
     "official_release":               "official",
     "regulatory_filing":              "primary",
     "opinion_article":                "opinion",
@@ -225,7 +226,7 @@ _ARTICLE_GENRES = {
     # a genuine SEC filing or research paper may not match any positive signal.
     "financial_market_snapshot", "global_macro_market_update",  # Phase 1.6
     "investment_strategy_commentary",                            # Phase 1.6
-    "news_article", "opinion_article", "social_post",
+    "news_article", "opinion_article", "social_post", "x_news_post",
 }
 # All financial secondary genres — shared logic (coherence flag, verify cap)
 _FINANCIAL_SECONDARY_GENRES = {
@@ -241,6 +242,28 @@ SOCIAL_HOSTS = (
     "x.com", "twitter.com", "reddit.com", "tiktok.com",
     "facebook.com", "youtube.com", "instagram.com", "t.me",
     "truthsocial.com", "bsky.app",
+)
+X_NEWS_RECEIPTS = re.compile(
+    r"\b(official\s+(?:statement|record|filing|release)|press\s+conference|"
+    r"court\s+record|police\s+statement|fire\s+department|agency\s+statement|"
+    r"Reuters|Associated\s+Press|AP|AFP|BBC|source\s+link|video|raw\s+video|"
+    r"transcript|document|filing|archive|full\s+clip|livestream)\b",
+    re.I,
+)
+X_NEWS_WEAK_CHAIN = re.compile(
+    r"\b(unconfirmed|rumou?r|alleged(?:ly)?|reportedly|sources?\s+say|"
+    r"people\s+are\s+saying|hearing|if\s+true|developing|early\s+reports?|"
+    r"screenshot|screen.?grab|viral\s+clip|no\s+source|trust\s+me)\b",
+    re.I,
+)
+X_ENGAGEMENT_BAIT = re.compile(
+    r"\b(share\s+this|retweet|repost|follow\s+for\s+updates|dm\s+me|"
+    r"turn\s+on\s+notifications|like\s+and\s+share|they\s+will\s+delete\s+this)\b",
+    re.I,
+)
+X_TIMESTAMP = re.compile(
+    r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}\s?(?:AM|PM|UTC|EST|EDT|CST|CDT|MST|MDT|PST|PDT)?)\b",
+    re.I,
 )
 
 # ---------------------------------------------------------------------------
@@ -298,6 +321,7 @@ class Assessment:
     custody_breakdown: Dict = field(default_factory=dict)
     evidence_shape: Dict = field(default_factory=dict)
     signal_brief: Dict = field(default_factory=dict)
+    x_post_assessment: Dict = field(default_factory=dict)
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -514,6 +538,45 @@ def attribution_score(text: str) -> float:
             bare += 1
     return 0.0 if attributed + bare == 0 else clamp(attributed / (attributed + bare))
 
+
+def assess_x_news_post(text: str, source_url: str = "") -> Dict:
+    """Return a receipt-focused assessment for X/Twitter breaking-news posts."""
+    urls = re.findall(r"https?://\S+", text)
+    hosts = [urlparse(u).netloc.lower() for u in urls]
+    non_social_links = [
+        u for u, host in zip(urls, hosts)
+        if not any(h in host for h in SOCIAL_HOSTS) and "t.co" not in host
+    ]
+    primary_links = [
+        u for u, host in zip(urls, hosts)
+        if any(host.endswith(d) for d in INSTITUTIONAL_DOMAINS)
+        or any(h in host for h in ACADEMIC_HOSTS)
+        or any(h in host for h in ("reuters.com", "apnews.com", "sec.gov", "courtlistener.com"))
+    ]
+    receipt_hits = count_matches(X_NEWS_RECEIPTS, text) + len(primary_links)
+    weak_hits = count_matches(X_NEWS_WEAK_CHAIN, text)
+    bait_hits = count_matches(X_ENGAGEMENT_BAIT, text)
+    has_timestamp = bool(X_TIMESTAMP.search(text))
+    has_non_social_link = bool(non_social_links or primary_links)
+    receipt_score = clamp(
+        receipt_hits * 0.22
+        + (0.20 if has_timestamp else 0.0)
+        + (0.22 if has_non_social_link else 0.0)
+        - weak_hits * 0.16
+        - bait_hits * 0.18
+    )
+    return {
+        "kind": "x_news_post",
+        "receipt_score": round(receipt_score, 3),
+        "receipt_markers": receipt_hits,
+        "weak_chain_markers": weak_hits,
+        "engagement_bait_markers": bait_hits,
+        "has_timestamp": has_timestamp,
+        "has_non_social_link": has_non_social_link,
+        "primary_links": primary_links[:3],
+        "non_social_links": non_social_links[:3],
+    }
+
 # ---------------------------------------------------------------------------
 # Summary helpers
 # ---------------------------------------------------------------------------
@@ -681,6 +744,9 @@ def analyze(
     source_genre = "generic_article"
     if _EXTRACT_AVAILABLE:
         source_genre = detect_genre(normalized, source_url)
+    x_post_assessment: Dict = {}
+    if source_genre == "x_news_post":
+        x_post_assessment = assess_x_news_post(raw, source_url)
 
     # Custody — genre-aware resolution prevents article pages from being classed as primary
     if _EXTRACT_AVAILABLE:
@@ -733,6 +799,16 @@ def analyze(
     # Short-text cap: a dense but tiny passage can't earn high confidence on its own
     if word_count < 50:
         overall = min(overall, 0.55)
+    if x_post_assessment:
+        receipt_score = x_post_assessment.get("receipt_score", 0.0)
+        weak_chain_hits = x_post_assessment.get("weak_chain_markers", 0)
+        bait_hits = x_post_assessment.get("engagement_bait_markers", 0)
+        # X news can be useful as a lead, but social custody is not receipt-grade
+        # without off-platform or primary confirmation.
+        overall = min(overall, 0.62 if receipt_score >= 0.55 else 0.42)
+        if weak_chain_hits or bait_hits:
+            manipulation_risk = clamp(manipulation_risk + weak_chain_hits * 0.04 + bait_hits * 0.06)
+            certainty_bias = clamp(certainty_bias + weak_chain_hits * 0.04)
 
     internal_coherence = _score_internal_coherence(words, sentences)
     certainty_to_evidence_gap = certainty_bias - evidence
@@ -776,6 +852,18 @@ def analyze(
             "Forward-looking allocation claims: overweight/underweight/tactical views "
             "are expressions of conviction, not receipt-grade assertions."
         )
+    if x_post_assessment:
+        flags.append(
+            "X news post: treat as a time-sensitive lead until primary/off-platform receipts are checked."
+        )
+        if not x_post_assessment.get("has_timestamp"):
+            flags.append("X news post lacks a clear timestamp/time zone for the reported event.")
+        if not x_post_assessment.get("has_non_social_link"):
+            flags.append("X news post lacks a non-social source link; watch for repost-chain drift.")
+        if x_post_assessment.get("weak_chain_markers", 0) > 0:
+            flags.append("X news post uses unconfirmed/rumor-chain language; seek independent receipts.")
+        if x_post_assessment.get("engagement_bait_markers", 0) > 0:
+            flags.append("X news post includes engagement-bait cues; separate reporting from spread incentives.")
     if language_note:
         flags.append(language_note)
     if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and not genre_mismatch:
@@ -812,6 +900,16 @@ def analyze(
     ):
         recommended_action = "treat_as_lead"
         verdict = "secondary market source — treat as lead, verify at primary data source"
+    if x_post_assessment:
+        receipt_score = x_post_assessment.get("receipt_score", 0.0)
+        weak_chain_hits = x_post_assessment.get("weak_chain_markers", 0)
+        bait_hits = x_post_assessment.get("engagement_bait_markers", 0)
+        if recommended_action == "verify_primary":
+            recommended_action = "treat_as_lead"
+            verdict = "X news post with some receipts - treat as lead, verify off-platform before repeating"
+        if receipt_score < 0.35 and (weak_chain_hits or bait_hits or certainty_bias >= 0.45):
+            recommended_action = "seek_receipts"
+            verdict = "X news post claims outpace receipts - verify before passing forward"
 
     # The language layer is a conservative guardrail. It may lower trust when
     # it sees lexical or paragraph-level risk, but it never upgrades the richer
@@ -859,6 +957,14 @@ def analyze(
         questions.append("Strip the attack language; does the underlying argument still stand?")
     if attribution < 0.5 and count_matches(QUOTE_PAT, raw) >= 1:
         questions.append("The quotes here — who actually said them, when, and on what record?")
+    if x_post_assessment:
+        questions.extend([
+            "Can I find the same claim in an official statement, named wire report, court record, or raw recording?",
+            "Is this the original post/source, or a repost/screenshot/quote-post chain?",
+            "What exact time and time zone does the claimed event or confirmation refer to?",
+        ])
+        if not x_post_assessment.get("has_non_social_link"):
+            questions.append("What non-social link would confirm this without relying on X engagement signals?")
 
     scores = Scores(
         signal=round(signal, 3),
@@ -946,6 +1052,7 @@ def analyze(
         custody_breakdown=custody_breakdown,
         evidence_shape=evidence_shape_data,
         signal_brief=signal_brief,
+        x_post_assessment=x_post_assessment,
     )
     return asdict(assessment)
 

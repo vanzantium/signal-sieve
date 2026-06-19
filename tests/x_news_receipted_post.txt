@@ -1,0 +1,5 @@
+BREAKING: City officials confirm the downtown bridge is closed after a fire.
+The fire department posted a 2026-06-19 09:42 PDT statement and Reuters is
+matching the closure report. Official update:
+https://city.example.gov/bridge-fire-update Full press conference video is
+expected at 11:00 PDT.

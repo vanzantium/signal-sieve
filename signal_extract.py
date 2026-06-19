@@ -15,6 +15,10 @@ Phase 1.6 additions:
   _extract_macro_update()        -> macro weekly / global markets brief
   _extract_strategy_commentary() -> asset-manager allocation brief
   _detect_timeframe_mismatch()   -> early-session vs reported-performance check
+
+Phase 1.7 additions:
+  x_news_post                    -> breaking-news social post handling
+  _extract_x_news_post()         -> receipt ladder for X/Twitter news posts
 """
 from __future__ import annotations
 
@@ -108,6 +112,13 @@ _SOCIAL_HINTS = re.compile(
     r"(?:^|\s)(?:RT\s+@|#[A-Za-z]\w{1,}|@[A-Za-z]\w{1,}|\bthread\b|\bdm me\b|\bfollow\b)",
     re.I | re.MULTILINE,
 )
+_X_NEWS_CUES = re.compile(
+    r"\b(breaking|developing|just\s+in|update|confirmed|unconfirmed|"
+    r"reports?|sources?|eyewitness|scanner|statement|press\s+conference|"
+    r"police|fire|officials?|agency|Reuters|AP|AFP|BBC|CNN|local\s+media)\b",
+    re.I,
+)
+_X_HOST_RE = re.compile(r"\b(?:x\.com|twitter\.com|mobile\.twitter\.com)\b", re.I)
 _REGULATORY_URL = re.compile(
     r"\b(sec\.gov|sedarplus\.ca|sedar\.com|cftc\.gov|finra\.org|edgar)\b",
     re.I,
@@ -133,9 +144,14 @@ def detect_genre(text: str, url: str = "") -> str:
       regulatory_filing | official_release |
       investment_strategy_commentary | global_macro_market_update |
       financial_market_snapshot |
+      x_news_post |
       news_article | opinion_article | social_post | generic_article
     """
     lower_url = url.lower()
+
+    is_x_url = bool(_X_HOST_RE.search(lower_url))
+    if is_x_url and (_X_NEWS_CUES.search(text) or "/status/" in lower_url):
+        return "x_news_post"
 
     if _REGULATORY_URL.search(lower_url):
         return "regulatory_filing"
@@ -175,6 +191,8 @@ def detect_genre(text: str, url: str = "") -> str:
         return "news_article"
 
     if _SOCIAL_HINTS.search(text):
+        if _X_NEWS_CUES.search(text):
+            return "x_news_post"
         return "social_post"
 
     if _OPINION_HINTS.search(text):
@@ -669,6 +687,77 @@ def _extract_generic(text: str, genre: str, source_type: str, source_url: str) -
     }
 
 
+def _extract_x_news_post(text: str, source_type: str, source_url: str) -> Dict:
+    """Extract a cautious receipt ladder for X/Twitter breaking-news posts."""
+    sentences = _split_sentences(text)
+    urls = re.findall(r"https?://\S+", text)
+    non_social_urls = [
+        u for u in urls
+        if not re.search(r"\b(?:x\.com|twitter\.com|t\.co)\b", u, re.I)
+    ]
+    official_links = [
+        u for u in urls
+        if re.search(r"\b(?:\.gov|police|fire|city|county|state|reuters|apnews|sec\.gov)\b", u, re.I)
+    ]
+    named_sources = _unique_ordered(
+        re.findall(
+            r"\b(Reuters|AP|Associated Press|AFP|BBC|CNN|NBC|ABC|CBS|"
+            r"police|fire department|mayor|governor|officials?|local media|"
+            r"court records?|filing|statement|press conference)\b",
+            text,
+            re.I,
+        )
+    )
+
+    key_signals: List[str] = []
+    source_caveats: List[str] = []
+    interpretation: List[str] = []
+    missing_receipts: List[str] = []
+
+    for sent in sentences:
+        if not sent or len(sent.split()) < 4:
+            continue
+        if re.search(r"\b(unconfirmed|rumou?r|alleged|reportedly|sources?|if true|developing)\b", sent, re.I):
+            source_caveats.append(_compress(sent))
+        elif re.search(r"\b(link|statement|video|photo|filing|document|transcript|official|Reuters|AP)\b", sent, re.I):
+            key_signals.append(_compress(sent))
+        elif _INTERP_CUES.search(sent):
+            interpretation.append(_compress(sent))
+        elif re.search(r"\b(breaking|just in|update|confirmed|reports?)\b", sent, re.I):
+            key_signals.append(_compress(sent))
+
+    if not official_links:
+        missing_receipts.append("Official statement, primary document, raw video, or named wire/source link.")
+    if not named_sources:
+        missing_receipts.append("Named source for the claim, not just an account or repost chain.")
+    if not re.search(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b|\b(?:AM|PM|UTC|EST|PST|EDT|PDT)\b", text, re.I):
+        missing_receipts.append("Timestamp/time zone for when the event was observed or confirmed.")
+    if re.search(r"\b(screenshot|screen.?grab|image says|viral clip)\b", text, re.I):
+        missing_receipts.append("Original media URL or archive, not a screenshot-only claim.")
+
+    return {
+        "genre": "x_news_post",
+        "source_type": source_type,
+        "primary_data_named": named_sources,
+        "named_data_providers": named_sources,
+        "markets_venues_mentioned": [],
+        "primary_data_verified": bool(official_links),
+        "key_signals": key_signals[:6],
+        "source_caveats": source_caveats[:5],
+        "interpretation_or_framing": interpretation[:5],
+        "missing_receipts": missing_receipts[:6],
+        "do_not_pass_forward_as": [
+            "Confirmed fact unless matched to an official/source document or named wire report.",
+            "Consensus report until at least one independent non-social receipt is checked.",
+        ],
+        "follow_up_sources": (
+            ["Official/source link from the post.", "Independent non-social confirmation."]
+            + ([f"Check linked source: {official_links[0]}"] if official_links else [])
+            + ([f"Inspect non-social link: {non_social_urls[0]}"] if non_social_urls else [])
+        )[:5],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Phase 1.6 helpers
 # ---------------------------------------------------------------------------
@@ -895,4 +984,6 @@ def extract_signal_brief(
         return _extract_macro_update(text, source_type, source_url)
     if genre == "investment_strategy_commentary":
         return _extract_strategy_commentary(text, source_type, source_url)
+    if genre == "x_news_post":
+        return _extract_x_news_post(text, source_type, source_url)
     return _extract_generic(text, genre, source_type, source_url)

@@ -185,6 +185,31 @@ EXPECTATIONS = {
             "score_at_most": {"overall_confidence": 0.35, "pressure": 0.05},
         },
     },
+    "x_news_receipted_post.txt": {
+        # X/Twitter breaking-news style post with timestamp and off-platform receipt.
+        # Should be useful as a lead, but not upgraded to verify_primary.
+        "source_type": "auto",
+        "source_url": "https://x.com/example/status/1234567890",
+        "checks": {
+            "action_in": ["treat_as_lead"],
+            "genre_in": ["x_news_post"],
+            "source_type_in": ["social"],
+            "score_at_most": {"overall_confidence": 0.62},
+            "flag_contains": ["X news post"],
+        },
+    },
+    "x_news_rumor_post.txt": {
+        # Rumor-chain + engagement-bait post should demand receipts.
+        "source_type": "auto",
+        "source_url": "https://x.com/example/status/9999999999",
+        "checks": {
+            "action_in": ["seek_receipts", "drop", "reject"],
+            "genre_in": ["x_news_post"],
+            "source_type_in": ["social"],
+            "score_at_most": {"overall_confidence": 0.42},
+            "flag_contains": ["X news post"],
+        },
+    },
 }
 
 GREEN  = "\033[32m" if sys.stdout.isatty() else ""
@@ -302,6 +327,7 @@ def run() -> int:
             path.read_text(encoding="utf-8"),
             source_type=spec["source_type"],
             source_name=f"fixture: {fname}",
+            source_url=spec.get("source_url", ""),
         )
         fails = check_one(result, spec)
         color  = GREEN if not fails else RED

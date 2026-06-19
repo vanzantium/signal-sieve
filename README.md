@@ -177,6 +177,35 @@ A declared type that contradicts inferred signals (e.g. passing `source_type="pr
 
 ---
 
+## X / Twitter News Posts
+
+Signal Sieve has a dedicated `x_news_post` genre for short breaking-news posts
+from X/Twitter URLs or X-style post text. It treats these posts as leads, not
+receipt-grade evidence.
+
+The X news layer checks for:
+
+- Off-platform or primary receipts such as official statements, raw video,
+  court records, named wire reports, or non-social links.
+- Timestamp/time-zone shape so breaking-news claims can be placed in sequence.
+- Rumor-chain markers such as "unconfirmed", "sources say", screenshots, or
+  repost-only framing.
+- Engagement bait such as "repost before they delete this" or "follow for
+  updates".
+
+API responses for this genre include `x_post_assessment` with a receipt score
+and marker counts. Even a strong X news post is capped at `treat_as_lead`; use
+the follow-up questions to find primary/off-platform confirmation before
+repeating the claim as fact.
+
+```bash
+curl -X POST https://signal-sieve.onrender.com/api/v1/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text":"BREAKING: Officials confirm...","source_url":"https://x.com/example/status/123","source_type":"auto"}'
+```
+
+---
+
 ## Running the tests
 
 ```bash
@@ -199,11 +228,12 @@ python test_i18n.py
 These are **open questions**, not bugs. Contributions and field data welcome.
 
 1. **News articles** — longer articles with mixed sourcing get averaged scores; the worst paragraph can be buried.
-2. **Abstracts** — academic abstracts are dense with evidence markers and often score higher than the full paper warrants.
-3. **Forum / conversational text** — casual hedges ("I think", "maybe") suppress certainty_bias even in irresponsible claims.
-4. **Spanish calibration** — the starter pack needs multi-author corpus calibration before parity claims.
-5. **Additional languages** — unsupported languages are structural-only until a reviewed lexicon pack is added.
-6. **Adversarial salting** — a motivated actor can inflate scores by pasting evidence marker words near numbers. Signal Sieve is a filter, not a firewall.
+2. **X / Twitter posts** — source links may be hidden behind short links or screenshots. Treat the mode as a receipt ladder, not verification.
+3. **Abstracts** — academic abstracts are dense with evidence markers and often score higher than the full paper warrants.
+4. **Forum / conversational text** — casual hedges ("I think", "maybe") suppress certainty_bias even in irresponsible claims.
+5. **Spanish calibration** — the starter pack needs multi-author corpus calibration before parity claims.
+6. **Additional languages** — unsupported languages are structural-only until a reviewed lexicon pack is added.
+7. **Adversarial salting** — a motivated actor can inflate scores by pasting evidence marker words near numbers. Signal Sieve is a filter, not a firewall.
 
 ---
 

@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.4.0"
+ANALYSIS_VERSION  = "v1.5.0"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -52,14 +52,14 @@ _ACTION_ENUM = [
 _SOURCE_TYPE_ENUM = [
     "auto", "primary", "official", "official_release", "regulatory_filing",
     "expert", "first_hand", "secondary", "secondary_market_article",
-    "news_article", "opinion_article", "social_post", "tertiary",
-    "anonymous", "unknown",
+    "news_article", "opinion", "opinion_article", "social", "social_post",
+    "tertiary", "anonymous", "unknown",
 ]
 _GENRE_ENUM = [
     "financial_market_snapshot", "global_macro_market_update",
     "investment_strategy_commentary",
     "official_release", "regulatory_filing",
-    "news_article", "opinion_article", "social_post", "generic_article",
+    "news_article", "x_news_post", "opinion_article", "social_post", "generic_article",
 ]
 
 SOURCE_TYPES = [
@@ -555,6 +555,14 @@ _OPENAPI_SPEC: dict = {
                             "Structured extraction with keys: top_movers, key_signals, "
                             "source_caveats, interpretation_or_framing, missing_receipts, "
                             "do_not_pass_forward_as, follow_up_sources."
+                        ),
+                    },
+                    "x_post_assessment": {
+                        "type": "object",
+                        "description": (
+                            "Present for x_news_post genre. Tracks receipt score, "
+                            "timestamp/link presence, weak rumor-chain markers, and "
+                            "engagement-bait markers."
                         ),
                     },
                     "missing_receipts": {
@@ -1161,6 +1169,8 @@ def api_v1_analyze():
 
     if result.get("evidence_shape"):
         response["evidence_shape"] = result["evidence_shape"]
+    if result.get("x_post_assessment"):
+        response["x_post_assessment"] = result["x_post_assessment"]
 
     if include_brief and result.get("signal_brief"):
         response["signal_brief"]      = result["signal_brief"]

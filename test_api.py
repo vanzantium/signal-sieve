@@ -201,6 +201,30 @@ def _():
     assert "signal_brief" not in d
 
 
+@test("POST /api/v1/analyze detects X news posts and exposes receipt assessment")
+def _():
+    r = client.post(
+        "/api/v1/analyze",
+        json={
+            "text": (
+                "BREAKING: Officials confirm the bridge is closed after a fire. "
+                "2026-06-19 09:42 PDT statement linked from the city. "
+                "Official update: https://city.example.gov/bridge-fire-update"
+            ),
+            "source_url": "https://x.com/example/status/1234567890",
+            "source_type": "auto",
+        },
+    )
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d["source_genre"] == "x_news_post"
+    assert d["source_type"] == "social"
+    assert d["recommended_action"] == "treat_as_lead"
+    assert "x_post_assessment" in d
+    assert d["x_post_assessment"]["has_non_social_link"] is True
+    assert d["x_post_assessment"]["receipt_score"] > 0
+
+
 # ── error responses ─────────────────────────────────────────────────────────────
 
 @test("POST /api/v1/analyze missing text -> 400 bad_request")
