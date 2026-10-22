@@ -37,7 +37,10 @@ OUTPUT SCHEMA (stable keys)
   scores              : dict of 0-1 floats (gap is -1..1)
   confidence_band     : {"low": float, "high": float}
   custody_label       : human-readable source custody description
-  custody_warning_level: clean | watch | mismatch | weak
+  custody_warning_level: clean | watch | weak | uncertain | mismatch
+                        ('mismatch' only when the caller declared a source type
+                         the text contradicts; 'uncertain' when undeclared/auto
+                         and inference is weak)
   evidence_breakdown  : {"anchored": int, "unanchored": int}
   flags               : [str, ...]
   questions_to_ask    : [str, ...]
@@ -590,9 +593,15 @@ ACTION_IMPERATIVES = {
 }
 
 
-def custody_warning_level(custody: float, st_confidence: float) -> str:
+def custody_warning_level(custody: float, st_confidence: float, declared_st: str = "") -> str:
+    # "mismatch" means the CALLER declared a source type the text contradicts.
+    # An undeclared/auto analysis with weak inference is "uncertain", not a
+    # mismatch: the caller declared nothing, so nothing can be mismatched.
+    # (Previously every auto-mode text with unknown inference reported
+    # "Source-type declaration mismatch" in the triage summary.)
+    caller_declared = (declared_st or "").lower() not in ("", "auto", "unknown")
     if st_confidence < 0.50:
-        return "mismatch"
+        return "mismatch" if caller_declared else "uncertain"
     if custody < 0.45:
         return "weak"
     if custody < 0.70:
@@ -610,7 +619,7 @@ def build_triage_summary(
     unanchored_n: int,
     action: str,
 ) -> str:
-    parts = [{"weak": "Weak custody", "mismatch": "Source-type declaration mismatch", "watch": "Mid custody", "clean": "Solid custody"}.get(custody_warning, "Unknown custody state")]
+    parts = [{"weak": "Weak custody", "mismatch": "Source-type declaration mismatch", "uncertain": "Source type uncertain", "watch": "Mid custody", "clean": "Solid custody"}.get(custody_warning, "Unknown custody state")]
     if attack_hits >= 1:
         parts.append("attack language present")
     if pressure >= 0.55:
@@ -883,7 +892,15 @@ def analyze(
         verdict, recommended_action = "manipulation + attack language — reject as evidence", "reject"
     elif manipulation_risk >= 0.65:
         verdict, recommended_action = "high-pressure / low-trust — do not pass forward without receipts", "drop"
-    elif overall >= 0.70 and custody >= 0.70 and manipulation_risk < 0.35:
+    elif (overall >= 0.70 or (overall >= 0.62 and custody >= 0.85)) \
+            and custody >= 0.70 and manipulation_risk < 0.35:
+        # Calibration fix (2026-10-22): the flat 0.70 overall bar made
+        # verify_primary unreachable in practice — density-normalized signal
+        # scoring keeps even textbook-grade primary texts (trial abstracts with
+        # n, CIs, p-values, registration, DOI) in the 0.60-0.68 band. The
+        # 0.62 + custody>=0.85 path lets exceptional, cleanly-scored custody
+        # compensate. Manipulation_risk and the custody floor still gate, so
+        # confident scams and clean-wrapper hype stay out (see pinned issue #1).
         verdict, recommended_action = "usable signal — still verify key claims at the primary source", "verify_primary"
     elif overall >= 0.50:
         verdict, recommended_action = "mixed signal — read, verify, and separate facts from framing", "treat_as_lead"
@@ -983,7 +1000,7 @@ def analyze(
         internal_coherence=internal_coherence,
         overall_confidence=round(overall, 3),
     )
-    warning_level = custody_warning_level(custody, st_confidence)
+    warning_level = custody_warning_level(custody, st_confidence, declared_st)
     triage_summary = build_triage_summary(
         custody_warning=warning_level,
         certainty_bias=certainty_bias,

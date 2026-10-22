@@ -176,6 +176,22 @@ EXPECTATIONS = {
             "score_at_most":  {"pressure": 0.15, "manipulation_risk": 0.30},
         },
     },
+    "primary_abstract_auto.txt": {
+        # Textbook trial abstract in AUTO mode (no declared source type).
+        # Regression fixture for the 2026-10-22 calibration fix: before the
+        # fix, verify_primary was unreachable without a declared type even
+        # with custody ~0.9, zero pressure and full anchoring (n, CI, p, DOI,
+        # trial registration). Pinned issue #1.
+        "source_type": "auto",
+        "checks": {
+            "action_in":     ["verify_primary"],
+            "warning_in":    ["clean"],
+            "score_at_least": {"source_custody": 0.85, "evidence": 0.30},
+            "score_at_most":  {"pressure": 0.30, "manipulation_risk": 0.35},
+            "evidence":       {"anchored_at_least": 3},
+        },
+    },
+
     "tertiary_wiki.txt": {
         # Wikipedia-style background summary — low specificity, no strong attribution chain.
         # Should score low confidence, low pressure, no strong custody.

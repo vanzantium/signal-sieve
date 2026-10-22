@@ -169,7 +169,7 @@
 
           <div class="pillbar">
             <span class="pill {% if action in ['drop','reject'] %}bad{% elif action == 'seek_receipts' %}warn{% else %}good{% endif %}">action: {{ action }}</span>
-            <span class="pill {% if warn in ['weak','mismatch'] %}bad{% elif warn == 'watch' %}warn{% else %}good{% endif %}">custody: {{ warn }}</span>
+            <span class="pill {% if warn in ['weak','mismatch'] %}bad{% elif warn in ['watch','uncertain'] %}warn{% else %}good{% endif %}">custody: {{ warn }}</span>
             <span class="pill">source: {{ result.source_type }}</span>
             <span class="pill">language: {{ result.language.lexicon or result.language.requested_language or "structural" }}</span>
             <span class="pill">words: {{ result.word_count }}</span>

@@ -1,0 +1,8 @@
+Abstract. We conducted a randomized controlled trial of 214 participants
+(n=214, registered at clinicaltrials.gov NCT01234567) to evaluate the effect
+of the intervention on outcome scores. Participants were randomly assigned
+1:1 to treatment or placebo. The primary endpoint changed by 4.2 points
+(95% CI 2.1-6.3, p=0.003) at 12 weeks. Methodology, sample size
+calculations, and the full dataset are provided in the supplementary
+appendix, Table 3. DOI: 10.1000/xyz123. Limitations: the cohort excluded
+participants who dropped out before week 4, which may bias results.
