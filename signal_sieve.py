@@ -31,7 +31,7 @@ PIPELINE PATTERN
 
 OUTPUT SCHEMA (stable keys)
 ---------------------------
-  recommended_action  : verify_primary | treat_as_lead | seek_receipts | drop | reject
+  recommended_action  : use_as_anchor | verify_primary | treat_as_lead | seek_receipts | drop | reject
   triage_summary      : one-line summary for fast routing / downstream AI
   verdict             : human-readable summary
   scores              : dict of 0-1 floats (gap is -1..1)
@@ -231,6 +231,13 @@ _ARTICLE_GENRES = {
     "investment_strategy_commentary",                            # Phase 1.6
     "news_article", "opinion_article", "social_post", "x_news_post",
 }
+# Form/role compatibility (Arch design note 2026-11-01): a declared document
+# FORM ("article") vs an inferred evidentiary ROLE ("secondary") is not a
+# custody conflict — an ordinary article being secondary is exactly what to
+# expect. Format and role are different axes; only genuinely meaningful
+# disagreements (e.g. declared PRIMARY, inferred SECONDARY) stay flagged.
+_FORM_TYPES = {"article", "news_article", "generic_article"}
+_ROLE_TYPES = {"secondary", "secondary_market_article", "news_article"}
 # All financial secondary genres — shared logic (coherence flag, verify cap)
 _FINANCIAL_SECONDARY_GENRES = {
     "financial_market_snapshot", "global_macro_market_update",
@@ -412,6 +419,11 @@ def resolve_source_type(declared: str, text: str, source_url: str = "") -> Tuple
         return inferred, declared_norm, inferred, 0.75 if inferred != "unknown" else 0.30
     if inferred == "unknown" or inferred == declared_norm:
         return declared_norm, declared_norm, inferred, 0.90
+    if declared_norm in _FORM_TYPES and inferred in _ROLE_TYPES:
+        # Declared form vs inferred role: compatible, not a mismatch.
+        # Resolve to the role at match confidence so no low-confidence
+        # "contradicts inferred" flag fires downstream.
+        return inferred, declared_norm, inferred, 0.90
     return declared_norm, declared_norm, inferred, 0.40
 
 def resolve_source_type_v2(
@@ -585,6 +597,7 @@ def assess_x_news_post(text: str, source_url: str = "") -> Dict:
 # ---------------------------------------------------------------------------
 
 ACTION_IMPERATIVES = {
+    "use_as_anchor": "Anchor-grade primary source — suitable to anchor the evidence chain for the claim it directly supports. Custody is proximity, not proof of truth.",
     "verify_primary": "Usable signal; verify key claims at the primary source.",
     "treat_as_lead": "Treat as lead only; do not pass forward as evidence.",
     "seek_receipts": "Request receipts before trusting.",
@@ -892,6 +905,41 @@ def analyze(
         verdict, recommended_action = "manipulation + attack language — reject as evidence", "reject"
     elif manipulation_risk >= 0.65:
         verdict, recommended_action = "high-pressure / low-trust — do not pass forward without receipts", "drop"
+    elif (
+        effective_st in ("primary", "first_hand", "regulatory_filing")
+        and custody >= 0.70
+        and not genre_mismatch
+        and st_confidence >= 0.70
+        and manipulation_risk < 0.35
+        and not re.search(
+            r"\b(anonymous|unnamed|source familiar|people are saying|rumor)\b",
+            raw, re.I,
+        )
+    ):
+        # Anchor-grade primary (Arch design note 2026-11-01): a clean
+        # primary source earns "use_as_anchor" — suitable to anchor the
+        # evidence chain for the claim it directly supports. Custody is
+        # proximity, not proof of truth, so this is deliberately NOT an
+        # overall-confidence gate: custody and epistemic confidence are
+        # separate axes, and overall is not consulted here.
+        # Operationalization of Arch's conditions:
+        #   custody PRIMARY     -> effective type in the primary-grade family
+        #   identity verified   -> st_confidence >= 0.70 (not a laundered label)
+        #                          AND no anonymous/rumor sourcing language:
+        #                          a "primary" that talks like a rumor has
+        #                          not verified its provenance
+        #   no material flags   -> no genre mismatch, no contradiction flag
+        #                          (st_confidence >= 0.70 subsumes the latter)
+        #   no contradiction    -> manipulation_risk < 0.35 (same bar as below)
+        #   claim actually present + scope/version/date appropriate
+        #                       -> the CALLER's check when anchoring a
+        #                       specific claim; analyze() sees documents,
+        #                       not claims, so it cannot verify them.
+        verdict, recommended_action = (
+            "primary source — suitable to anchor the evidence chain for the claim "
+            "it directly supports; custody is proximity, not proof of truth",
+            "use_as_anchor",
+        )
     elif (overall >= 0.70 or (overall >= 0.62 and custody >= 0.85)) \
             and custody >= 0.70 and manipulation_risk < 0.35:
         # Calibration fix (2026-10-22): the flat 0.70 overall bar made
@@ -907,7 +955,14 @@ def analyze(
     elif certainty_bias >= 0.50 or unanchored_n > anchored_n:
         verdict, recommended_action = "claims outpace support — request receipts", "seek_receipts"
     else:
-        verdict, recommended_action = "weak custody or noisy frame — useful as a lead, not evidence", "treat_as_lead"
+        # Custody and confidence are separate axes (Arch design note
+        # 2026-11-01): a thin-signal document with solid custody must never
+        # be described as "weak custody" merely because it fell through to
+        # this branch.
+        if custody >= 0.70:
+            verdict, recommended_action = "thin signal despite solid custody — useful as a lead, not evidence", "treat_as_lead"
+        else:
+            verdict, recommended_action = "weak custody or noisy frame — useful as a lead, not evidence", "treat_as_lead"
 
     # Cap for secondary market articles — cannot earn verify_primary
     if (
@@ -921,7 +976,9 @@ def analyze(
         receipt_score = x_post_assessment.get("receipt_score", 0.0)
         weak_chain_hits = x_post_assessment.get("weak_chain_markers", 0)
         bait_hits = x_post_assessment.get("engagement_bait_markers", 0)
-        if recommended_action == "verify_primary":
+        if recommended_action in ("verify_primary", "use_as_anchor"):
+            # Social custody is not anchor-grade without off-platform
+            # confirmation — same reason verify_primary is capped here.
             recommended_action = "treat_as_lead"
             verdict = "X news post with some receipts - treat as lead, verify off-platform before repeating"
         if receipt_score < 0.35 and (weak_chain_hits or bait_hits or certainty_bias >= 0.45):
@@ -933,7 +990,17 @@ def analyze(
     # custody-aware verdict produced above.
     language_guardrail_action = ""
     if language_assessment:
+        # Guardrail-internal comparison ONLY (Arch design note 2026-11-01):
+        # the six actions are different next moves, not points on one
+        # confidence scale, and no numerical ordering is imposed on the
+        # enum itself. The language layer's vocabulary tops out at
+        # verify_primary, so that value means "no language objection" —
+        # it must NOT displace an anchor-grade custody verdict. Only a
+        # strictly more cautious language action (treat_as_lead or worse)
+        # downgrades an anchor. The guardrail never upgrades anything TO
+        # use_as_anchor: the language layer never returns it.
         action_rank = {
+            "use_as_anchor": 0,
             "verify_primary": 0,
             "treat_as_lead": 1,
             "seek_receipts": 2,
