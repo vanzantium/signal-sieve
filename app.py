@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.5.0"
+ANALYSIS_VERSION  = "v1.6.0"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -46,7 +46,7 @@ def _get_max_chars() -> int:
     return MAX_TEXT_CHARS
 
 _ACTION_ENUM = [
-    "verify_primary", "treat_as_lead", "treat_as_background",
+    "use_as_anchor", "verify_primary", "treat_as_lead", "treat_as_background",
     "seek_receipts", "drop", "reject",
 ]
 _SOURCE_TYPE_ENUM = [
@@ -936,6 +936,15 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
                 for v in c.get("values", [])[:3]
             )
             lines.append(f"  · {c['entity_label']}: {val_str}")
+
+    if cmp_result.get("presence_absence_mismatches"):
+        lines.append("PRESENCE/ABSENCE MISMATCHES:")
+        for m in cmp_result["presence_absence_mismatches"][:5]:
+            lines.append(
+                f"  · {m['entity_label']}: present in "
+                f"{', '.join(m.get('present_in', []))}; explicitly absent in "
+                f"{', '.join(m.get('explicitly_absent_in', []))}"
+            )
 
     if cmp_result.get("crude_note"):
         lines.append("NOTE:      WTI ≠ Brent — different benchmarks, not comparable")
