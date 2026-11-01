@@ -17,6 +17,7 @@ It scores text across four dimensions and returns a `recommended_action`:
 
 | Action | Meaning |
 |---|---|
+| `use_as_anchor` | Anchor-grade primary — suitable to anchor the evidence chain for the claim it directly supports (custody is proximity, not proof of truth) |
 | `verify_primary` | Usable signal — check key claims at the source |
 | `treat_as_lead` | Mixed signal — read, don't trust uncritically |
 | `seek_receipts` | Claims outpace evidence — demand support |
@@ -127,7 +128,7 @@ python test_i18n.py
 
 ```json
 {
-  "recommended_action": "verify_primary | treat_as_lead | seek_receipts | drop | reject",
+  "recommended_action": "use_as_anchor | verify_primary | treat_as_lead | seek_receipts | drop | reject",
   "triage_summary":     "one-line summary for fast routing / downstream AI",
   "verdict":            "human-readable summary",
   "scores": {
