@@ -47,7 +47,9 @@ EXPECTATIONS = {
     "primary_clean.txt": {
         "source_type": "primary",
         "checks": {
-            "action_in":     ["verify_primary"],
+            # Arch design note 2026-11-01: a clean primary now earns
+            # use_as_anchor rather than verify_primary.
+            "action_in":     ["use_as_anchor"],
             "warning_in":    ["clean"],
             "score_at_least": {"overall_confidence": 0.65, "source_custody": 0.70, "evidence": 0.30},
             "score_at_most":  {"pressure": 0.30, "manipulation_risk": 0.35},
@@ -182,9 +184,11 @@ EXPECTATIONS = {
         # fix, verify_primary was unreachable without a declared type even
         # with custody ~0.9, zero pressure and full anchoring (n, CI, p, DOI,
         # trial registration). Pinned issue #1.
+        # Arch design note 2026-11-01: this textbook-grade primary now
+        # earns use_as_anchor rather than verify_primary.
         "source_type": "auto",
         "checks": {
-            "action_in":     ["verify_primary"],
+            "action_in":     ["use_as_anchor"],
             "warning_in":    ["clean"],
             "score_at_least": {"source_custody": 0.85, "evidence": 0.30},
             "score_at_most":  {"pressure": 0.30, "manipulation_risk": 0.35},
