@@ -10,6 +10,8 @@ A check is one of:
   "score_at_least"           : scores[key] >= threshold
   "flag_contains"            : at least one flag contains this substring (case-insensitive)
   "evidence"                 : {"anchored_at_least": N} or {"unanchored_at_least": N}
+  "flag_absent"              : no flag contains this substring (case-insensitive)
+  "questions_absent"         : no question contains this substring (case-insensitive)
   "genre_in"                 : source_genre is one of these values (Phase 1.2)
   "source_type_in"           : source_type is one of these values (Phase 1.2)
   "source_type_confidence_max": source_type_confidence <= threshold (Phase 1.2)
@@ -54,6 +56,9 @@ EXPECTATIONS = {
             "score_at_least": {"overall_confidence": 0.65, "source_custody": 0.70, "evidence": 0.30},
             "score_at_most":  {"pressure": 0.30, "manipulation_risk": 0.35},
             "evidence":       {"anchored_at_least": 3},
+            # Sieve gap 2026-11-02: a verified primary feed must not get
+            # the generic "find a primary" question.
+            "questions_absent": ["closest primary source"],
         },
     },
     "primary_laundered.txt": {
@@ -193,6 +198,27 @@ EXPECTATIONS = {
             "score_at_least": {"source_custody": 0.85, "evidence": 0.30},
             "score_at_most":  {"pressure": 0.30, "manipulation_risk": 0.35},
             "evidence":       {"anchored_at_least": 3},
+            # Sieve gap 2026-11-02: custody-adaptive questions.
+            "questions_absent": ["closest primary source"],
+        },
+    },
+
+    # ── Sieve gap 2026-11-02: first-party announcement on a blog URL ─────
+    "primary_blog_announcement.txt": {
+        # A first-person announcement hosted on a /blog/ URL, declared
+        # primary. The URL token alone must not downgrade it to secondary:
+        # the publisher speaking about its own policy IS a primary source.
+        # The exemption holds the TYPE at primary (and the adaptive
+        # questions follow); the ACTION stays treat_as_lead because the
+        # language guardrail holds a thin announcement at lead — type and
+        # action are separate axes, and the guardrail is doing its job.
+        "source_type": "primary",
+        "source_url": "https://example.com/blog/2026/10/shared-ai-training-control",
+        "checks": {
+            "action_in":     ["treat_as_lead"],
+            "source_type_in": ["primary"],
+            "flag_absent":   ["conflicts with"],
+            "questions_absent": ["closest primary source"],
         },
     },
 
@@ -271,6 +297,19 @@ def check_one(result: dict, spec: dict) -> list[str]:
         if not any(needle.lower() in f.lower() for f in result["flags"]):
             fails.append(
                 f"flags: no flag contains {needle!r}. Actual flags: {result['flags']}"
+            )
+
+    for needle in checks.get("flag_absent", []):
+        if any(needle.lower() in f.lower() for f in result["flags"]):
+            fails.append(
+                f"flags: unexpected flag contains {needle!r}. Actual flags: {result['flags']}"
+            )
+
+    for needle in checks.get("questions_absent", []):
+        if any(needle.lower() in q.lower() for q in result.get("questions_to_ask", [])):
+            fails.append(
+                f"questions: unexpected question contains {needle!r}. "
+                f"Actual questions: {result.get('questions_to_ask', [])}"
             )
 
     ev = checks.get("evidence", {})
