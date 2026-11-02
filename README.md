@@ -207,13 +207,50 @@ curl -X POST https://signal-sieve.onrender.com/api/v1/analyze \
 
 ---
 
+## Cross-document comparison (`POST /api/v1/compare`)
+
+Compares numeric claims across 2–10 documents. Claims normalize to
+canonical entity keys (Treasury yields, indices, commodities, macro
+indicators, benchmark scores) so different surface forms still match.
+
+- **Dates are claims too.** Full dates normalize to ISO and bare years
+  stay years; shared dates and shared years align across documents.
+  Differing dates are never conflicts — different events legitimately
+  have different dates.
+- **Benchmark scores** (GPQA, SWE-bench, HumanEval, MMLU, MMMU, AIME,
+  GSM8K, MATH, ARC-AGI, Humanity's Last Exam) match in colon form
+  ("GPQA: 61.3%") and reverse form ("61.3% on GPQA").
+- **Pricing rows** match only when pricing words sit near the $ amount,
+  so market prices never leak into pricing claims. Input vs output is
+  decided by the nearest input/output word.
+- **Unit guard.** The same entity in different units (a count vs a
+  percentage) is reported as a unit mismatch — not comparable, not a
+  conflict, not an alignment.
+- **Presence/absence channel.** PRESENT / EXPLICITLY_ABSENT /
+  NOT_OBSERVED / UNKNOWN per entity per document. Only explicit absence
+  language ("no Gold row", "Gold not listed") counts as absence; a
+  merely-missing entity is NOT_OBSERVED and never becomes a conflict.
+
+## Custody notes (v1.7.0)
+
+- **First-party announcements keep their type.** A declared primary on
+  a first-person announcement ("we are announcing…") is not downgraded
+  to secondary merely because the URL contains "blog". The publisher
+  speaking about its own policy is a primary source; the genre downgrade
+  still fires for reporting on others. When it does fire, the flag names
+  the genre that triggered it.
+- **Questions adapt to custody.** A verified primary feed gets
+  follow-ups about implementation dates, scope, and supersession — not
+  the generic "closest primary source?" question, which only makes
+  sense while the primary is still missing.
+
 ## Running the tests
 
 ```bash
 python run_tests.py
 ```
 
-The suite includes 15 source/genre fixtures, API contract checks, and the
+The suite includes 19 source/genre fixtures, API contract checks, and the
 declared-language contract:
 
 ```bash
