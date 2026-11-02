@@ -426,6 +426,24 @@ def resolve_source_type(declared: str, text: str, source_url: str = "") -> Tuple
         return inferred, declared_norm, inferred, 0.90
     return declared_norm, declared_norm, inferred, 0.40
 
+# First-party announcement voice: the publisher speaking about its own
+# action or policy ("we are announcing/introducing/supporting ...").
+# This outranks a URL token ("blog") when deciding whether a declared
+# high-trust type is really an article: a company blog post announcing its
+# own policy IS a primary source. Secondary-reporting cues ("reported",
+# "according to", "sources said") veto the exemption — a post reporting
+# on others is not a first-party announcement, whatever its verbs.
+_ANNOUNCEMENT_RE = re.compile(
+    r"\bwe\s+(?:are\s+|will\s+|have\s+)?"
+    r"(?:announc|introduc|launch|publish|releas|roll\s*out|implement|support|offer)"
+    r"|"
+    r"\btoday\s*,?\s*we\s+(?:are\s+|will\s+)?"
+    r"(?:announc|introduc|launch|support)",
+    re.I,
+)
+_SECONDARY_REPORTING_CUES = ("reported", "according to", "sources said", "sources say")
+
+
 def resolve_source_type_v2(
     declared: str, text: str, source_url: str, genre: str
 ) -> Tuple[str, str, str, float, bool]:
@@ -438,6 +456,20 @@ def resolve_source_type_v2(
     effective, declared_norm, inferred, confidence = resolve_source_type(declared, text, source_url)
     genre_st = _GENRE_TO_SOURCE_TYPE.get(genre)
     genre_mismatch = False
+
+    # First-party announcement exemption (Sieve gap 2026-11-02): a declared
+    # high-trust type on a first-person announcement keeps its type even
+    # when the URL alone classifies the page as an article ("blog").
+    # The publisher's own voice beats the URL token. This does NOT grant
+    # anchor status — custody, manipulation, and rumor gates still apply
+    # downstream; it only stops the genre downgrade.
+    if (
+        declared_norm in _HIGH_TRUST_TYPES
+        and genre in _ARTICLE_GENRES
+        and _ANNOUNCEMENT_RE.search(text)
+        and not any(cue in text.lower() for cue in _SECONDARY_REPORTING_CUES)
+    ):
+        return declared_norm, declared_norm, inferred, max(confidence, 0.70), False
 
     # Declared high-trust but genre signals article/secondary → mismatch
     if declared_norm in _HIGH_TRUST_TYPES and genre in _ARTICLE_GENRES:
@@ -896,7 +928,7 @@ def analyze(
     if genre_mismatch:
         flags.append(
             f"Declared high-trust source type ('{declared_st}') conflicts with "
-            f"article/secondary-source cues in text and URL. "
+            f"genre '{source_genre}' (article/secondary-source cues in text and URL). "
             f"Effective type downgraded to '{effective_st}'."
         )
 
@@ -1020,13 +1052,22 @@ def analyze(
                 "declared-language lexical or paragraph-level risk."
             )
 
-    # Dynamic follow-up questions
-    questions = [
-        "What is the closest primary source for the main claim?",
+    # Dynamic follow-up questions. Custody-adaptive (Sieve gap 2026-11-02):
+    # a verified primary feed gets follow-ups about dates, scope, and
+    # supersession — not a generic "find a primary" question, which only
+    # makes sense when the primary is still missing.
+    questions = []
+    if effective_st in ("primary", "first_hand", "regulatory_filing") and not genre_mismatch:
+        questions.append(
+            "What implementation dates, scope limits, or superseding versions apply to this claim?"
+        )
+    else:
+        questions.append("What is the closest primary source for the main claim?")
+    questions.extend([
         "Who benefits if this framing is believed?",
         "What would change my mind if this claim were wrong?",
         "Which claims are observed facts vs interpretation vs speculation?",
-    ]
+    ])
     if certainty_bias > 0.45:
         questions.append("Why is the author so certain, and what uncertainty is missing?")
     if custody < 0.50:
