@@ -617,6 +617,81 @@ def _():
     assert d["error"] == "bad_request"
 
 
+# ── v1.7.0: dates, benchmarks, pricing, unit guard ───────────────────────────
+
+@test("POST /api/v1/compare shares rollout years and exact dates")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "We aim to support the shared token in 2027. Early 2027 rollout planned.",
+             "source_name": "Google"},
+            {"text": "We will honour the new preferences from February 1, 2027, and publishers "
+                     "should act by March 1, 2027.",
+             "source_name": "Bing"},
+            {"text": "From 2027, nobody reads the new token yet.",
+             "source_name": "Stacked"},
+        ]
+    })
+    d = r.get_json()
+    shared_years = [x["date_key"] for x in d.get("shared_years", [])]
+    assert "2027" in shared_years, f"expected shared year 2027, got {shared_years}"
+    unique_dates = [x["date_key"] for x in d.get("unique_dates", [])]
+    assert "2027-02-01" in unique_dates, f"expected Bing 2027-02-01 unique, got {unique_dates}"
+    assert "2027-03-01" in unique_dates, f"expected Bing 2027-03-01 unique, got {unique_dates}"
+    assert "shared date" in d["triage_summary"], "triage should mention shared dates"
+    assert "SHARED DATES:" in d["capsule"]
+
+
+@test("POST /api/v1/compare aligns benchmark scores across surface forms")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "GPQA Diamond: 61.3%.", "source_name": "A"},
+            {"text": "The model scored 61.3% on GPQA.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = [c["entity_key"] for c in d.get("alignment", [])]
+    assert "gpqa" in aligned, f"expected gpqa aligned, got {aligned}"
+    assert not d.get("conflicts"), "equal benchmark scores must not conflict"
+
+
+@test("POST /api/v1/compare surfaces pricing rows as unique claims")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "API pricing: input $15 per million tokens, output $75 per million tokens.",
+             "source_name": "A"},
+            {"text": "The announcement describes the new model with no pricing details.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    unique_keys = [c["entity_key"] for c in d.get("unique_claims", [])]
+    assert "pricing-input" in unique_keys, f"expected pricing-input unique, got {unique_keys}"
+    assert "pricing-output" in unique_keys, f"expected pricing-output unique, got {unique_keys}"
+    pricing_conflicts = [c for c in d.get("conflicts", [])
+                         if "pricing" in c["entity_key"]]
+    assert not pricing_conflicts, "a missing pricing row is unique, not a conflict"
+
+
+@test("POST /api/v1/compare does not conflate counts with percentages")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "GPQA: 94 problems in the set.", "source_name": "A"},
+            {"text": "GPQA: 61.3% accuracy.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    mismatches = [m for m in d.get("unit_mismatches", []) if m["entity_key"] == "gpqa"]
+    assert mismatches, "expected a gpqa unit mismatch (count vs %)"
+    assert sorted(mismatches[0]["units"]) == ["%", "count"]
+    assert not [c for c in d.get("conflicts", []) if c["entity_key"] == "gpqa"], \
+        "count vs percentage must not read as a conflict"
+    assert "UNIT MISMATCHES" in d["capsule"]
+
+
 @test("GET /openapi.json documents compare and capsule endpoints")
 def _():
     r = client.get("/openapi.json")
