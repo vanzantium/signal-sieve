@@ -47,6 +47,20 @@ _ENTITY_KEY_MAP: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r"\bPCE\b",                                    re.I), "pce",         "PCE"),
     (re.compile(r"\bPMI\b",                                    re.I), "pmi",         "PMI"),
     (re.compile(r"\bGDP\b",                                    re.I), "gdp",         "GDP"),
+    # Benchmark scores (Sieve gap 2026-10-31: benchmark-style numerics were
+    # invisible to the market-only map). MMLU-Pro precedes MMLU so the
+    # longer name wins; same order rule as the Treasury yields above.
+    (re.compile(r"\bGPQA(?:\s+Diamond)?\b",                 re.I), "gpqa",        "GPQA"),
+    (re.compile(r"\bSWE[-\s]?bench(?:\s+Verified)?\b",       re.I), "swe-bench",   "SWE-bench"),
+    (re.compile(r"\bHumanEval(?:\+)?\b",                     re.I), "humaneval",   "HumanEval"),
+    (re.compile(r"\bMMLU[-\s]?Pro\b",                        re.I), "mmlu-pro",    "MMLU-Pro"),
+    (re.compile(r"\bMMLU\b",                                 re.I), "mmlu",        "MMLU"),
+    (re.compile(r"\bMMMU\b",                                 re.I), "mmmu",        "MMMU"),
+    (re.compile(r"\bAIME\b",                                 re.I), "aime",        "AIME"),
+    (re.compile(r"\bGSM8K\b",                                re.I), "gsm8k",       "GSM8K"),
+    (re.compile(r"\bMATH(?:[-\s]?500)?\b",                   re.I), "math",        "MATH"),
+    (re.compile(r"\bARC[-\s]?AGI\b",                         re.I), "arc-agi",     "ARC-AGI"),
+    (re.compile(r"\bHumanity'?s\s+Last\s+Exam\b",             re.I), "hle",         "Humanity's Last Exam"),
     # Initial/jobless claims (keep last to not over-match)
     (re.compile(r"\b(?:initial\s+)?jobless\s+claims?\b|\binitial\s+claims?\b", re.I),
      "jobless-claims", "Jobless Claims"),
@@ -75,10 +89,61 @@ _INLINE_ENTITY_RE = re.compile(
     r"\d{1,2}[-\s]?y(?:ear|r)(?:\s+Treasury)?|"
     r"WTI(?:\s+crude)?|Brent(?:\s+crude)?|Gold|VIX|DXY|"
     r"CPI|PPI|PCE|PMI|GDP|"
+    r"GPQA(?:\s+Diamond)?|SWE[-\s]?bench(?:\s+Verified)?|HumanEval(?:\+)?|"
+    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|"
     r"(?:initial\s+)?jobless\s+claims?|retail\s+sales?)"
     r"[^.!?\n]{0,70}?"
     r"([+-]?\$?\d[\d,\.]*"
     r"(?:%|\s*bps|\s*/bbl|\s*/oz|\s+per\s+(?:barrel|oz)|\s*,\d{3})*)",
+    re.I,
+)
+
+# Benchmark-reverse pass: "61.3% on GPQA" — the score precedes the
+# benchmark name, so the forward inline pattern cannot see it. Restricted
+# to benchmark names + a % value so prose percentages never match.
+_BENCHMARK_NAMES_RE = (
+    r"GPQA(?:\s+Diamond)?|SWE[-\s]?bench(?:\s+Verified)?|HumanEval(?:\+)?|"
+    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam"
+)
+_BENCHMARK_REVERSE_RE = re.compile(
+    r"(\d+\.?\d*\s*%)[^.!?\n]{0,40}?\b(" + _BENCHMARK_NAMES_RE + r")\b",
+    re.I,
+)
+
+# Pricing-row pass (Sieve gap 2026-11-01: a $15/$75 pricing row vs no row
+# was invisible because pricing was not an entity). A $ amount counts as
+# a pricing claim only when pricing words sit nearby, so market prices
+# ("WTI Crude: $68.43/bbl") never match. Input/output words split the
+# key so an input price and an output price are never conflated.
+_PRICING_WORDS_RE = re.compile(
+    r"\b(pric(?:e|ing)|per\s+(?:million|1M)\s+tokens?|tokens?)\b", re.I)
+_INPUT_WORD_RE = re.compile(r"\binput\b", re.I)
+_OUTPUT_WORD_RE = re.compile(r"\boutput\b", re.I)
+_DOLLAR_RE = re.compile(r"\$\s?(\d[\d,\.]*)")
+
+# ── Date claims (Sieve gap 2026-11-02: rollout stories live on dates) ──────
+# Full dates normalize to ISO; bare years stay years — a year is not a
+# date, and a full date must not also mint a year claim (else every dated
+# doc trivially "shares" the year with every other dated doc).
+_MONTHS = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9, "october": 10,
+    "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+_MONTH_ALT = (
+    r"January|February|March|April|May|June|July|August|September|Sept|"
+    r"October|November|December|Jan\.?|Feb\.?|Mar\.?|Apr\.?|Jun\.?|Jul\.?|"
+    r"Aug\.?|Sep\.?|Oct\.?|Nov\.?|Dec\.?"
+)
+_DATE_FULL_RE = re.compile(
+    r"\b(" + _MONTH_ALT + r")\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b"
+    r"|\b(\d{1,2})(?:st|nd|rd|th)?\s+(" + _MONTH_ALT + r")\s+(\d{4})\b"
+    r"|\b(\d{4})-(\d{2})-(\d{2})\b",
+    re.I,
+)
+_YEAR_RE = re.compile(
+    r"\b(?:in|from|by|during|starting|effective|early|late|mid)[\s\-]+(20\d{2})\b",
     re.I,
 )
 
@@ -152,6 +217,61 @@ def _has_explicit_absence(text: str, label: str) -> bool:
     return any(re.search(p, text, re.I) for p in patterns)
 
 
+def extract_date_claims(text: str) -> List[Dict]:
+    """Extract normalized date claims from text.
+
+    Full dates → ISO "YYYY-MM-DD" (kind "date"); bare years → "YYYY"
+    (kind "year"). A full date never also mints a year claim: the year
+    inside "February 1, 2027" is part of that date, not a separate
+    year-only claim, or every dated document would trivially share every
+    year with every other dated document. Deduplicates on date_key.
+    Returns [{date_key, date_label, kind, raw, context}].
+    """
+    claims: List[Dict] = []
+    seen: set = set()
+    # Mask full-date spans so the year pass cannot re-read their years.
+    masked = list(text)
+    for m in _DATE_FULL_RE.finditer(text):
+        if m.group(7):
+            year, month, day = int(m.group(7)), int(m.group(8)), int(m.group(9))
+        elif m.group(1):
+            month = _MONTHS[m.group(1).lower().rstrip(".")]
+            day, year = int(m.group(2)), int(m.group(3))
+        else:
+            day = int(m.group(4))
+            month = _MONTHS[m.group(5).lower().rstrip(".")]
+            year = int(m.group(6))
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            continue
+        key = f"{year:04d}-{month:02d}-{day:02d}"
+        if key in seen:
+            continue
+        seen.add(key)
+        for i in range(m.start(), m.end()):
+            masked[i] = " "
+        claims.append({
+            "date_key":   key,
+            "date_label": key,
+            "kind":       "date",
+            "raw":        m.group(0).strip(),
+            "context":    text[max(0, m.start() - 40):m.end() + 40].strip()[:120],
+        })
+    masked_text = "".join(masked)
+    for m in _YEAR_RE.finditer(masked_text):
+        key = m.group(1)
+        if key in seen:
+            continue
+        seen.add(key)
+        claims.append({
+            "date_key":   key,
+            "date_label": key,
+            "kind":       "year",
+            "raw":        m.group(0).strip(),
+            "context":    text[max(0, m.start() - 40):m.end() + 40].strip()[:120],
+        })
+    return claims
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def extract_numeric_claims(text: str) -> List[Dict]:
@@ -173,11 +293,11 @@ def extract_numeric_claims(text: str) -> List[Dict]:
     claims: List[Dict] = []
     seen: set = set()  # (entity_key, numeric_value) dedup
 
-    def _add(key: str, label: str, raw_val: str, context: str) -> None:
+    def _add(key: str, label: str, raw_val: str, context: str, unit_override: str = "") -> None:
         numeric = _parse_value(raw_val)
         if numeric is None:
             return
-        unit    = _unit_of(raw_val)
+        unit    = unit_override or _unit_of(raw_val)
         dedup   = (key, numeric)
         if dedup in seen:
             return
@@ -199,7 +319,14 @@ def extract_numeric_claims(text: str) -> List[Dict]:
         if entity is None:
             continue
         key, label = entity
-        _add(key, label, raw_val, m.group(0))
+        # A bare number followed by a count word ("GPQA: 94 problems") is
+        # a count, not an unspecified unit — without this, a count and a
+        # percentage on the same entity read as one comparable series.
+        count_after = bool(re.search(
+            r"\b(problems|questions|items|examples|tasks|samples)\b",
+            text[m.end():m.end() + 25], re.I))
+        _add(key, label, raw_val, m.group(0),
+             unit_override="count" if count_after else "")
 
     # Pass 2 — inline patterns (catches prose and snapshot lines)
     for m in _INLINE_ENTITY_RE.finditer(text):
@@ -212,6 +339,39 @@ def extract_numeric_claims(text: str) -> List[Dict]:
             continue
         key, label = entity
         _add(key, label, raw_val, m.group(0))
+
+    # Pass 3 — benchmark-reverse: "61.3% on GPQA" (score precedes the name)
+    for m in _BENCHMARK_REVERSE_RE.finditer(text):
+        raw_val = m.group(1).strip()
+        entity = _normalize_entity_key(m.group(2).strip())
+        if entity is None:
+            continue
+        key, label = entity
+        _add(key, label, raw_val, m.group(0))
+
+    # Pass 4 — pricing rows: a $ amount is a pricing claim only when
+    # pricing words sit within ~60 chars, so market prices never match.
+    # Input vs output is decided by the NEAREST input/output word, not
+    # mere presence — a line naming both must not key every amount input.
+    for m in _DOLLAR_RE.finditer(text):
+        window_start = max(0, m.start() - 60)
+        window = text[window_start:m.end() + 60]
+        if not _PRICING_WORDS_RE.search(window):
+            continue
+        dollar_pos = m.start() - window_start
+        nearest, nearest_dist = "", None
+        for word_re, word_key in ((_INPUT_WORD_RE, "input"), (_OUTPUT_WORD_RE, "output")):
+            for wm in word_re.finditer(window):
+                dist = abs(wm.start() - dollar_pos)
+                if nearest_dist is None or dist < nearest_dist:
+                    nearest, nearest_dist = word_key, dist
+        if nearest == "input":
+            key, label = "pricing-input", "Pricing (input)"
+        elif nearest == "output":
+            key, label = "pricing-output", "Pricing (output)"
+        else:
+            key, label = "pricing", "Pricing"
+        _add(key, label, m.group(1), window.strip()[:120], unit_override="$")
 
     return claims
 
@@ -251,6 +411,10 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "unique_claims":     [],
             "conflicts":         [],
             "alignment":         [],
+            "unit_mismatches":   [],
+            "shared_dates":      [],
+            "shared_years":      [],
+            "unique_dates":      [],
             "presence_absence_mismatches": [],
             "presence_status":   {},
             "crude_note":        "",
@@ -261,6 +425,10 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     # Extract claims per doc
     doc_claims: List[List[Dict]] = [
         extract_numeric_claims(doc.get("text", ""))
+        for doc in analyzed_docs
+    ]
+    doc_dates: List[List[Dict]] = [
+        extract_date_claims(doc.get("text", ""))
         for doc in analyzed_docs
     ]
 
@@ -278,6 +446,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     unique_claims: List[Dict] = []
     conflicts:     List[Dict] = []
     alignment:     List[Dict] = []
+    unit_mismatches: List[Dict] = []
     presence_absence_mismatches: List[Dict] = []
 
     # WTI vs Brent: note their presence but don't call it a conflict
@@ -389,6 +558,28 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         if key in _CRUDE_KEYS and crude_note:
             continue
 
+        # Unit guard (Sieve gap 2026-10-31: a count vs a percentage on the
+        # same entity was read as one comparable series). Different
+        # non-empty units are not comparable at all — neither a conflict
+        # nor an alignment. An empty unit is "unspecified", not a unit,
+        # so "$2,650" vs "2650" still compares; but a bare number
+        # followed by a count word ("94 problems") carries unit "count"
+        # (see the colon pass), so counts never merge with percentages.
+        specified_units = {u for u in units if u}
+        if len(specified_units) > 1:
+            unit_mismatches.append({
+                "entity_key":   key,
+                "entity_label": label,
+                "units":        sorted(specified_units),
+                "values":       val_objs,
+                "note": (
+                    "Same entity reported in different units across sources "
+                    "(e.g. a count vs a percentage) — values are not directly "
+                    "comparable. Do not read as a conflict or an alignment."
+                ),
+            })
+            continue
+
         vals_sorted = sorted(values)
         spread      = vals_sorted[-1] - vals_sorted[0]
 
@@ -416,6 +607,37 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         else:
             alignment.append(entry)
 
+    # ── Date claims (Sieve gap 2026-11-02) ───────────────────────────────
+    # Dates are claims too, and rollout stories live on them. Exact dates
+    # shared across docs align; years shared across docs align at year
+    # granularity; differing dates are NOT conflicts — different events
+    # legitimately have different dates, so a date in one doc only is
+    # unique, never a discrepancy.
+    date_map: Dict[str, List[Dict]] = {}
+    for doc_idx, claims in enumerate(doc_dates):
+        for claim in claims:
+            date_map.setdefault(claim["date_key"], []).append(
+                {"doc_idx": doc_idx, "claim": claim})
+    shared_dates: List[Dict] = []
+    shared_years: List[Dict] = []
+    unique_dates: List[Dict] = []
+    for date_key, entries in date_map.items():
+        doc_names = [_doc_name(e["doc_idx"]) for e in entries]
+        raws = [e["claim"]["raw"] for e in entries]
+        kind = entries[0]["claim"]["kind"]
+        entry = {
+            "date_key":  date_key,
+            "kind":      kind,
+            "found_in":  doc_names,
+            "raw":       raws,
+        }
+        if len(entries) == 1:
+            unique_dates.append(entry)
+        elif kind == "date":
+            shared_dates.append(entry)
+        else:
+            shared_years.append(entry)
+
     # Follow-up source suggestions based on what was found
     follow_up: List[str] = []
     entity_keys_found = {c["entity_key"] for c in all_claims_flat}
@@ -433,6 +655,8 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     n_conflicts = len(conflicts)
     n_shared    = len(shared_claims)
     n_mismatches = len(presence_absence_mismatches)
+    n_unit_mismatches = len(unit_mismatches)
+    n_shared_dates = len(shared_dates) + len(shared_years)
     if n_conflicts > 0:
         triage_summary = (
             f"{n_conflicts} numeric conflict(s) detected across "
@@ -455,6 +679,15 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "in one source is explicitly absent in another — check scope "
             "before forwarding."
         )
+    if n_unit_mismatches > 0:
+        triage_summary += (
+            f" {n_unit_mismatches} unit mismatch(es): same entity in different "
+            "units across sources — not comparable, not a conflict."
+        )
+    if n_shared_dates > 0:
+        triage_summary += (
+            f" {n_shared_dates} shared date claim(s) across documents."
+        )
 
     return {
         "doc_count":         len(analyzed_docs),
@@ -462,6 +695,10 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         "unique_claims":     unique_claims,
         "conflicts":         conflicts,
         "alignment":         alignment,
+        "unit_mismatches":   unit_mismatches,
+        "shared_dates":      shared_dates,
+        "shared_years":      shared_years,
+        "unique_dates":      unique_dates,
         "presence_absence_mismatches": presence_absence_mismatches,
         "presence_status":   presence_status,
         "crude_note":        crude_note,
