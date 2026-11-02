@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.6.0"
+ANALYSIS_VERSION  = "v1.7.0"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -944,6 +944,20 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
                 f"  · {m['entity_label']}: present in "
                 f"{', '.join(m.get('present_in', []))}; explicitly absent in "
                 f"{', '.join(m.get('explicitly_absent_in', []))}"
+            )
+
+    if cmp_result.get("shared_dates") or cmp_result.get("shared_years"):
+        lines.append("SHARED DATES:")
+        for d in (cmp_result.get("shared_dates", []) + cmp_result.get("shared_years", []))[:5]:
+            lines.append(
+                f"  · {d['date_key']}: {', '.join(d.get('found_in', []))}"
+            )
+
+    if cmp_result.get("unit_mismatches"):
+        lines.append("UNIT MISMATCHES (not comparable, not conflicts):")
+        for m in cmp_result["unit_mismatches"][:5]:
+            lines.append(
+                f"  · {m['entity_label']}: units {', '.join(m.get('units', []))}"
             )
 
     if cmp_result.get("crude_note"):
