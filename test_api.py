@@ -692,6 +692,130 @@ def _():
     assert "UNIT MISMATCHES" in d["capsule"]
 
 
+# ── v1.8.0: GDPx preservation, version gate, timeline, agreement ─────────
+
+@test("POST /api/v1/compare keeps GDPx distinct and does not manufacture a conflict from inline counts")
+def _():
+    # Reconstruction of the Nov 3 GDPx run: the primary says 12% on GDPx;
+    # coverage says 13 models on 206 tasks. The v1.7.0 comparator collapsed
+    # GDPx to GDP and compared the 13-count against 12%, reporting a
+    # spread-204.0 "conflict". v1.8.0 must key GDPx separately, read the
+    # inline count as unit "count", and report a unit mismatch, not a
+    # conflict — and must not claim agreement when nothing compared.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "SemiAnalysis GDPx v1.0: 12%. The best agent scores just 12% on 206 long professional tasks across 11 domains.",
+             "source_name": "SemiAnalysis"},
+            {"text": "Coverage of GDPx: 13 models evaluated on 206 tasks.",
+             "source_name": "Coverage"},
+        ]
+    })
+    d = r.get_json()
+    all_keys = (
+        [c["entity_key"] for c in d.get("shared_claims", [])] +
+        [c["entity_key"] for c in d.get("conflicts", [])] +
+        [c["entity_key"] for c in d.get("alignment", [])] +
+        [m["entity_key"] for m in d.get("unit_mismatches", [])]
+    )
+    assert "gdpx" in all_keys, f"expected gdpx keyed, got {all_keys}"
+    assert "gdp" not in all_keys, f"GDPx must not collapse to GDP, got {all_keys}"
+    assert not d.get("conflicts"), "inline counts vs percentages must not conflict"
+    mismatches = [m for m in d.get("unit_mismatches", []) if m["entity_key"] == "gdpx"]
+    assert mismatches, "expected a gdpx unit mismatch (count vs %)"
+    assert d.get("agreement_status") == "not_established", \
+        f"nothing compared, so agreement must not be established, got {d.get('agreement_status')}"
+    assert "no agreement is established" in d["triage_summary"]
+    assert "AGREEMENT: not established" in d["capsule"]
+
+
+@test("POST /api/v1/compare does not compare the same benchmark across versions")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "GPQA v1.0: 61.3%.", "source_name": "A"},
+            {"text": "GPQA v2.0: 58.1%.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    vm = [m for m in d.get("version_mismatches", []) if m["entity_key"] == "gpqa"]
+    assert vm, "expected a gpqa version mismatch (v1.0 vs v2.0)"
+    assert sorted(vm[0]["versions"]) == ["v1.0", "v2.0"]
+    assert not [c for c in d.get("conflicts", []) if c["entity_key"] == "gpqa"], \
+        "different versions must not read as a conflict"
+    assert not [c for c in d.get("alignment", []) if c["entity_key"] == "gpqa"], \
+        "different versions must not read as an alignment"
+    assert "VERSION MISMATCHES" in d["capsule"]
+
+
+@test("POST /api/v1/compare reconciles timelines instead of conflicting on them")
+def _():
+    # Nov 4 rollout shape: same shared year 2027, different precisions —
+    # a year-only plan, an exact date, and a vague "coming months".
+    # These are not contradictions and must land in the separate
+    # timeline_reconciliation diagnostic, not in conflicts.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "We aim to support the token in 2027.", "source_name": "Google"},
+            {"text": "We will honour the new preferences from February 1, 2027.", "source_name": "Bing"},
+            {"text": "Our rollout is planned in 2027, in the coming months.", "source_name": "OpenAI"},
+        ]
+    })
+    d = r.get_json()
+    notes = [n for n in d.get("timeline_reconciliation", []) if n["year"] == "2027"]
+    assert notes, "expected a 2027 timeline reconciliation note"
+    assert "not a conflict" in notes[0]["note"]
+    assert "timeline reconciliation" in d["triage_summary"]
+    assert "TIMELINE RECONCILIATION" in d["capsule"]
+
+
+@test("POST /api/v1/compare keeps presence/absence distinct from conflict")
+def _():
+    # Negative regression test for the presence/absence channel (Arch:
+    # preserved unchanged): a doc that EXPLICITLY lacks an entity is a
+    # mismatch, never a numeric conflict, and a merely-missing entity
+    # stays NOT_OBSERVED.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "GPQA: 61.3% accuracy.", "source_name": "A"},
+            {"text": "The table has no GPQA row.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    mm = [m for m in d.get("presence_absence_mismatches", []) if m["entity_key"] == "gpqa"]
+    assert mm, "expected a gpqa presence/absence mismatch"
+    assert d["presence_status"]["gpqa"]["B"] == "EXPLICITLY_ABSENT"
+    assert not [c for c in d.get("conflicts", []) if c["entity_key"] == "gpqa"], \
+        "explicit absence must not read as a numeric conflict"
+
+
+@test("Actions stay inside the six-verb enum and presence statuses stay in vocabulary")
+def _():
+    # Negative regression test (Arch: enum and channel preserved
+    # unchanged): no action outside the six verbs, no presence status
+    # outside the four statuses, whatever v1.8.0 changed elsewhere.
+    for text in [
+        "BREAKTHROUGH miracle discovery proves doctors were wrong all along. Act now!",
+        "The Q3 2024 SEC 10-Q filing reports revenue of $1.2 billion, up 8% year-over-year.",
+        "We are announcing a new policy today. According to anonymous sources, it changes everything.",
+    ]:
+        r = client.post("/api/v1/analyze", json={"text": text, "source_type": "auto"})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert r.get_json()["recommended_action"] in _ACTION_ENUM, \
+            f"action outside the six-verb enum: {r.get_json()['recommended_action']}"
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "GPQA: 61.3%.", "source_name": "A"},
+            {"text": "The table has no GPQA row.", "source_name": "B"},
+            {"text": "Unrelated market note with no benchmark.", "source_name": "C"},
+        ]
+    })
+    d = r.get_json()
+    allowed = {"PRESENT", "EXPLICITLY_ABSENT", "NOT_OBSERVED", "UNKNOWN"}
+    for key, status in d.get("presence_status", {}).items():
+        for doc_name, value in status.items():
+            assert value in allowed, f"presence status outside vocabulary: {key}/{doc_name}={value}"
+
+
 @test("GET /openapi.json documents compare and capsule endpoints")
 def _():
     r = client.get("/openapi.json")
