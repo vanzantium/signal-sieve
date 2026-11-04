@@ -1,0 +1,1 @@
+Our blog covers the latest in AI research. According to researchers at Stanford, a study by the team found that large models improve with scale. The report describes their methodology and sample size in detail, and researchers found consistent gains across benchmarks. We are excited to share their work with our readers.
