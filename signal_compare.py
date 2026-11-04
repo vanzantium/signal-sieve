@@ -50,6 +50,8 @@ _ENTITY_KEY_MAP: List[Tuple[re.Pattern, str, str]] = [
     # Benchmark scores (Sieve gap 2026-10-31: benchmark-style numerics were
     # invisible to the market-only map). MMLU-Pro precedes MMLU so the
     # longer name wins; same order rule as the Treasury yields above.
+    # GDPx precedes GDP for the same reason (Arch review 2026-11-04):
+    # "GDPx" must key as its own benchmark, never collapse to "GDP".
     (re.compile(r"\bGPQA(?:\s+Diamond)?\b",                 re.I), "gpqa",        "GPQA"),
     (re.compile(r"\bSWE[-\s]?bench(?:\s+Verified)?\b",       re.I), "swe-bench",   "SWE-bench"),
     (re.compile(r"\bHumanEval(?:\+)?\b",                     re.I), "humaneval",   "HumanEval"),
@@ -61,6 +63,7 @@ _ENTITY_KEY_MAP: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r"\bMATH(?:[-\s]?500)?\b",                   re.I), "math",        "MATH"),
     (re.compile(r"\bARC[-\s]?AGI\b",                         re.I), "arc-agi",     "ARC-AGI"),
     (re.compile(r"\bHumanity'?s\s+Last\s+Exam\b",             re.I), "hle",         "Humanity's Last Exam"),
+    (re.compile(r"\bGDPx\b",                                 re.I), "gdpx",        "GDPx"),
     # Initial/jobless claims (keep last to not over-match)
     (re.compile(r"\b(?:initial\s+)?jobless\s+claims?\b|\binitial\s+claims?\b", re.I),
      "jobless-claims", "Jobless Claims"),
@@ -88,7 +91,7 @@ _INLINE_ENTITY_RE = re.compile(
     r"\b(S&P\s*500|Nasdaq(?:\s+Composite)?|Dow(?:\s+Jones)?|DJIA|Russell\s+2000|"
     r"\d{1,2}[-\s]?y(?:ear|r)(?:\s+Treasury)?|"
     r"WTI(?:\s+crude)?|Brent(?:\s+crude)?|Gold|VIX|DXY|"
-    r"CPI|PPI|PCE|PMI|GDP|"
+    r"CPI|PPI|PCE|PMI|GDPx|GDP|"
     r"GPQA(?:\s+Diamond)?|SWE[-\s]?bench(?:\s+Verified)?|HumanEval(?:\+)?|"
     r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|"
     r"(?:initial\s+)?jobless\s+claims?|retail\s+sales?)"
@@ -103,7 +106,8 @@ _INLINE_ENTITY_RE = re.compile(
 # to benchmark names + a % value so prose percentages never match.
 _BENCHMARK_NAMES_RE = (
     r"GPQA(?:\s+Diamond)?|SWE[-\s]?bench(?:\s+Verified)?|HumanEval(?:\+)?|"
-    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam"
+    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|"
+    r"GDPx"
 )
 _BENCHMARK_REVERSE_RE = re.compile(
     r"(\d+\.?\d*\s*%)[^.!?\n]{0,40}?\b(" + _BENCHMARK_NAMES_RE + r")\b",
@@ -193,6 +197,54 @@ def _unit_of(raw: str) -> str:
     return ""
 
 
+# Benchmark entity keys — the only keys that carry a version. Arch review
+# 2026-11-04: two claims must concern the same metric, subject, unit, AND
+# benchmark version before they compare. A version token adjacent to the
+# benchmark name is recorded; when both sides name versions and they
+# differ, the pair is version-mismatched, never a conflict or an
+# alignment. When neither side (or only one side) names a version,
+# sameness cannot be disproven, so the pair still compares — the version
+# field on each value lets the caller see what was (not) established.
+_BENCHMARK_KEYS = frozenset({
+    "gpqa", "swe-bench", "humaneval", "mmlu-pro", "mmlu", "mmmu", "aime",
+    "gsm8k", "math", "arc-agi", "hle", "gdpx",
+})
+_VERSION_RE = re.compile(r"\bv(\d+(?:\.\d+)?)\b", re.I)
+# A bare number followed by a count word is a count, not an unspecified
+# unit. This is what the Nov 3 false conflict missed: the counts
+# (206 tasks, 13 models) came through the inline pass, which had no
+# count detection, so they read as unit "" and "compared" with 12%.
+_COUNT_WORDS_RE = re.compile(
+    r"\b(problems|questions|items|examples|tasks|samples|models|agents|systems|entries|runs)\b",
+    re.I,
+)
+
+
+def _benchmark_version(key: str, window: str) -> str:
+    if key not in _BENCHMARK_KEYS:
+        return ""
+    m = _VERSION_RE.search(window)
+    return f"v{m.group(1)}" if m else ""
+
+
+def _count_after(text: str, pos: int, window: int = 25) -> bool:
+    return bool(_COUNT_WORDS_RE.search(text[pos:pos + window]))
+
+
+_VERSION_PREFIX_RE = re.compile(r"(?:\bv|version)\s*$", re.I)
+
+
+def _is_version_number(text: str, num_start: int) -> bool:
+    """True when a matched number is a version token, not a value.
+
+    "GDPx v1.0" must not mint a claim of value 1.0: the digits belong
+    to the version, and the version is recorded on the real claim (if
+    any) instead. Without this, every versioned benchmark mention
+    injects a spurious 1.0/2.0 claim into the comparison.
+    """
+    return bool(_VERSION_PREFIX_RE.search(text[max(0, num_start - 10):num_start]))
+
+
 def _label_regex(label: str) -> str:
     """Regex for an entity label with flexible whitespace ("S&P 500" etc.)."""
     tokens = [re.escape(t) for t in re.split(r"\s+", label.strip()) if t]
@@ -272,6 +324,88 @@ def extract_date_claims(text: str) -> List[Dict]:
     return claims
 
 
+# ── Timeline reconciliation (Arch review 2026-11-04) ───────────────────────
+# A SEPARATE DIAGNOSTIC, not a conflict channel. Rollout stories live on
+# dates, and "February 1, 2027" vs "early 2027" vs "in the coming months"
+# are not necessarily contradictory — they may describe different stages,
+# or the same stage at different precisions. This channel extracts the
+# event-adjacent date expressions per doc and flags shared-year frames
+# where expressions differ, so a caller can ask for clarification instead
+# of inheriting a false conflict (or a false agreement from a shared year).
+_VAGUE_TIMING_RE = re.compile(
+    r"\b(in the coming (?:weeks|months)|coming (?:weeks|months)|"
+    r"later this year|later next year)\b",
+    re.I,
+)
+
+
+def _timeline_expressions(text: str) -> List[Dict]:
+    """Timeline expressions in one doc: exact dates, year-only claims, vague phrases."""
+    exprs: List[Dict] = []
+    for c in extract_date_claims(text):
+        exprs.append({
+            "expression": c["date_label"],
+            "precision": "exact" if c["kind"] == "date" else "year_only",
+            "raw": c["raw"],
+        })
+    for m in _VAGUE_TIMING_RE.finditer(text):
+        exprs.append({"expression": m.group(0), "precision": "vague", "raw": m.group(0)})
+    return exprs
+
+
+def reconcile_timelines(analyzed_docs: List[Dict]) -> List[Dict]:
+    """Flag shared-year frames where timeline expressions differ.
+
+    A doc participates in a year frame through its exact dates in that
+    year or its year-only claims; its vague phrases ("coming months")
+    ride along on every frame it participates in. A frame fires only
+    when 2+ docs participate AND their expressions are not all
+    identical — same date at same precision is agreement, not a note.
+    Returns [{year, docs: {name: [expressions]}, note}].
+    """
+    per_doc = [_timeline_expressions(doc.get("text", "")) for doc in analyzed_docs]
+    doc_years: List[set] = []
+    for exprs in per_doc:
+        years = set()
+        for e in exprs:
+            if e["precision"] == "exact":
+                years.add(e["expression"][:4])
+            elif e["precision"] == "year_only":
+                years.add(e["expression"])
+        doc_years.append(years)
+    shared_years: set = set()
+    for i in range(len(analyzed_docs)):
+        for j in range(i + 1, len(analyzed_docs)):
+            shared_years |= (doc_years[i] & doc_years[j])
+    notes: List[Dict] = []
+    for year in sorted(shared_years):
+        docs_with: Dict[str, List[Dict]] = {}
+        for idx, doc in enumerate(analyzed_docs):
+            if year not in doc_years[idx]:
+                continue
+            exprs = [e for e in per_doc[idx]
+                     if (e["precision"] == "exact" and e["expression"].startswith(year))
+                     or (e["precision"] == "year_only" and e["expression"] == year)
+                     or e["precision"] == "vague"]
+            if exprs:
+                docs_with[doc.get("source_name", f"doc_{idx + 1}")] = exprs
+        if len(docs_with) < 2:
+            continue
+        distinct = {(e["expression"], e["precision"]) for es in docs_with.values() for e in es}
+        if len(distinct) <= 1:
+            continue
+        notes.append({
+            "year": year,
+            "docs": docs_with,
+            "note": (
+                "Timeline expressions for this year differ in date or precision "
+                "across sources; they may describe different stages, not a "
+                "disagreement. Needs clarification, not a conflict."
+            ),
+        })
+    return notes
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def extract_numeric_claims(text: str) -> List[Dict]:
@@ -293,7 +427,8 @@ def extract_numeric_claims(text: str) -> List[Dict]:
     claims: List[Dict] = []
     seen: set = set()  # (entity_key, numeric_value) dedup
 
-    def _add(key: str, label: str, raw_val: str, context: str, unit_override: str = "") -> None:
+    def _add(key: str, label: str, raw_val: str, context: str, unit_override: str = "",
+             version: str = "") -> None:
         numeric = _parse_value(raw_val)
         if numeric is None:
             return
@@ -308,6 +443,7 @@ def extract_numeric_claims(text: str) -> List[Dict]:
             "raw_value":     raw_val.strip(),
             "numeric_value": numeric,
             "unit":          unit,
+            "version":       version,
             "context":       context[:120],
         })
 
@@ -322,11 +458,13 @@ def extract_numeric_claims(text: str) -> List[Dict]:
         # A bare number followed by a count word ("GPQA: 94 problems") is
         # a count, not an unspecified unit — without this, a count and a
         # percentage on the same entity read as one comparable series.
-        count_after = bool(re.search(
-            r"\b(problems|questions|items|examples|tasks|samples)\b",
-            text[m.end():m.end() + 25], re.I))
+        # Count detection applies to bare numbers only: a percentage
+        # followed by a count word ("12% on 206 tasks") is still a %.
+        bare = _unit_of(raw_val) == ""
+        count_after = bare and _count_after(text, m.end())
         _add(key, label, raw_val, m.group(0),
-             unit_override="count" if count_after else "")
+             unit_override="count" if count_after else "",
+             version=_benchmark_version(key, m.group(0)))
 
     # Pass 2 — inline patterns (catches prose and snapshot lines)
     for m in _INLINE_ENTITY_RE.finditer(text):
@@ -334,20 +472,31 @@ def extract_numeric_claims(text: str) -> List[Dict]:
         raw_val     = m.group(2).strip()
         if not raw_val or raw_val == ".":
             continue
+        if _is_version_number(text, m.start(2)):
+            continue
         entity = _normalize_entity_key(entity_frag)
         if entity is None:
             continue
         key, label = entity
-        _add(key, label, raw_val, m.group(0))
+        # Same bare-number count rule as the colon pass (Sieve gap
+        # 2026-11-03: inline counts had no unit and "compared" with %).
+        bare = _unit_of(raw_val) == ""
+        count_after = bare and _count_after(text, m.end())
+        _add(key, label, raw_val, m.group(0),
+             unit_override="count" if count_after else "",
+             version=_benchmark_version(key, m.group(0)))
 
     # Pass 3 — benchmark-reverse: "61.3% on GPQA" (score precedes the name)
     for m in _BENCHMARK_REVERSE_RE.finditer(text):
         raw_val = m.group(1).strip()
+        if _is_version_number(text, m.start(1)):
+            continue
         entity = _normalize_entity_key(m.group(2).strip())
         if entity is None:
             continue
         key, label = entity
-        _add(key, label, raw_val, m.group(0))
+        _add(key, label, raw_val, m.group(0),
+             version=_benchmark_version(key, m.group(0)))
 
     # Pass 4 — pricing rows: a $ amount is a pricing claim only when
     # pricing words sit within ~60 chars, so market prices never match.
@@ -391,6 +540,11 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
           "unique_claims":     [...],   # entity found in only one doc
           "conflicts":         [...],   # same entity, values outside tolerance
           "alignment":         [...],   # same entity, values within tolerance
+          "unit_mismatches":   [...],   # same entity, different units
+          "version_mismatches": [...],  # same benchmark, different versions
+          "timeline_reconciliation": [...],  # shared-year date/precision notes
+          "agreement_status":  str,     # aligned | conflicts_present | not_established
+          "comparable_claims": int,     # claims that actually went through comparison
           "presence_absence_mismatches": [...],  # PRESENT vs EXPLICITLY_ABSENT
           "presence_status":   {entity_key: {doc_name: status}},
           "crude_note":        str,     # WTI/Brent note if both found
@@ -412,9 +566,13 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "conflicts":         [],
             "alignment":         [],
             "unit_mismatches":   [],
+            "version_mismatches": [],
             "shared_dates":      [],
             "shared_years":      [],
             "unique_dates":      [],
+            "timeline_reconciliation": [],
+            "agreement_status":  "not_established",
+            "comparable_claims": 0,
             "presence_absence_mismatches": [],
             "presence_status":   {},
             "crude_note":        "",
@@ -447,6 +605,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     conflicts:     List[Dict] = []
     alignment:     List[Dict] = []
     unit_mismatches: List[Dict] = []
+    version_mismatches: List[Dict] = []
     presence_absence_mismatches: List[Dict] = []
 
     # WTI vs Brent: note their presence but don't call it a conflict
@@ -517,8 +676,10 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         raws       = [e["claim"]["raw_value"]      for e in entries]
 
         val_objs = [
-            {"source": n, "value": v, "unit": u, "raw": r}
-            for n, v, u, r in zip(doc_names, values, units, raws)
+            {"source": n, "value": v, "unit": u, "raw": r, "version": ver}
+            for n, v, u, r, ver in zip(
+                doc_names, values, units, raws,
+                [e["claim"].get("version", "") for e in entries])
         ]
 
         if len(entries) == 1:
@@ -575,6 +736,25 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                 "note": (
                     "Same entity reported in different units across sources "
                     "(e.g. a count vs a percentage) — values are not directly "
+                    "comparable. Do not read as a conflict or an alignment."
+                ),
+            })
+            continue
+
+        # Version gate (Arch review 2026-11-04): the same benchmark in
+        # different declared versions is not comparable — neither a
+        # conflict nor an alignment. Only positive version disagreement
+        # fires: unversioned claims still compare (see _BENCHMARK_KEYS).
+        named_versions = {e["claim"].get("version", "") for e in entries} - {""}
+        if key in _BENCHMARK_KEYS and len(named_versions) > 1:
+            version_mismatches.append({
+                "entity_key":   key,
+                "entity_label": label,
+                "versions":     sorted(named_versions),
+                "values":       val_objs,
+                "note": (
+                    "Same benchmark reported in different versions across "
+                    "sources — scores from different versions are not directly "
                     "comparable. Do not read as a conflict or an alignment."
                 ),
             })
@@ -656,7 +836,20 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     n_shared    = len(shared_claims)
     n_mismatches = len(presence_absence_mismatches)
     n_unit_mismatches = len(unit_mismatches)
+    n_version_mismatches = len(version_mismatches)
     n_shared_dates = len(shared_dates) + len(shared_years)
+    timeline_notes = reconcile_timelines(analyzed_docs)
+    # Agreement status (Arch review 2026-11-04): zero conflicts must not
+    # imply agreement when nothing was actually compared. Only claims
+    # that went through alignment/conflict comparison count as
+    # comparable; unit/version mismatches are explicitly NOT comparable.
+    comparable_claims = len(alignment) + len(conflicts)
+    if conflicts:
+        agreement_status = "conflicts_present"
+    elif alignment:
+        agreement_status = "aligned"
+    else:
+        agreement_status = "not_established"
     if n_conflicts > 0:
         triage_summary = (
             f"{n_conflicts} numeric conflict(s) detected across "
@@ -684,9 +877,25 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             f" {n_unit_mismatches} unit mismatch(es): same entity in different "
             "units across sources — not comparable, not a conflict."
         )
+    if n_version_mismatches > 0:
+        triage_summary += (
+            f" {n_version_mismatches} version mismatch(es): same benchmark in "
+            "different versions across sources — not comparable, not a conflict."
+        )
     if n_shared_dates > 0:
         triage_summary += (
             f" {n_shared_dates} shared date claim(s) across documents."
+        )
+    if timeline_notes:
+        triage_summary += (
+            f" {len(timeline_notes)} timeline reconciliation note(s): shared-year "
+            "dates differ in precision — see timeline_reconciliation, not conflicts."
+        )
+    if comparable_claims == 0:
+        triage_summary += (
+            " No comparable claims were extracted, so no agreement is "
+            "established — zero conflicts here means no detected "
+            "disagreement, not agreement."
         )
 
     return {
@@ -696,9 +905,13 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         "conflicts":         conflicts,
         "alignment":         alignment,
         "unit_mismatches":   unit_mismatches,
+        "version_mismatches": version_mismatches,
         "shared_dates":      shared_dates,
         "shared_years":      shared_years,
         "unique_dates":      unique_dates,
+        "timeline_reconciliation": timeline_notes,
+        "agreement_status":  agreement_status,
+        "comparable_claims": comparable_claims,
         "presence_absence_mismatches": presence_absence_mismatches,
         "presence_status":   presence_status,
         "crude_note":        crude_note,
