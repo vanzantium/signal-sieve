@@ -256,6 +256,83 @@ EXPECTATIONS = {
             "flag_contains": ["X news post"],
         },
     },
+
+    # ── v1.8.0 fixtures (Arch review 2026-11-04) ───────────────────────────
+    "primary_blog_contraction.txt": {
+        # Same first-party announcement as primary_blog_announcement, but
+        # contracted: "Today, we're announcing our plans..." The v1.7.0
+        # announcement pattern required whitespace after "we" and missed
+        # every contracted announcement — the Nov 4 Google blog downgrade.
+        # Ownership + origin, not URL vocabulary, decides the exemption.
+        "source_type": "primary",
+        "source_url": "https://example.com/blog/2026/10/shared-ai-training-control",
+        "checks": {
+            "action_in":     ["treat_as_lead"],
+            "source_type_in": ["primary"],
+            "flag_absent":   ["conflicts with"],
+            "questions_absent": ["closest primary source"],
+        },
+    },
+    "primary_discussing_others.txt": {
+        # First-party channel discussing SOMEBODY ELSE'S research, declared
+        # primary. Arch: a Google blog discussing another party's research
+        # is not primary evidence for that research. Third-party attribution
+        # ("according to", "a study by", "researchers found") vetoes the
+        # exemption, so the blog URL's article genre downgrades it.
+        "source_type": "primary",
+        "source_url": "https://example.com/blog/2026/10/research-roundup",
+        "checks": {
+            "source_type_in": ["secondary"],
+            "flag_contains": ["first-party exemption did not apply"],
+        },
+    },
+    "inferred_primary_no_evidence.txt": {
+        # Dealroom case (Nov 3 gap 2): an ordinary article whose text
+        # mentions methodology/sample size, declared "article" (form).
+        # The old inference reported PRIMARY with a contradictory
+        # "trusted at low confidence" flag. The gate drops the inference
+        # to secondary and flags it with Arch's custody-uncertain wording.
+        "source_type": "article",
+        "checks": {
+            "source_type_in": ["secondary"],
+            "flag_contains": ["Source custody uncertain"],
+        },
+    },
+    "x_post_genuine_text.txt": {
+        # A genuine X post fed as bare text (no URL): short, @handle,
+        # #tag, breaking cue. Post STRUCTURE is the evidence — this must
+        # still classify as x_news_post after the mention-only fix.
+        "source_type": "auto",
+        "checks": {
+            "action_in": ["treat_as_lead"],
+            "genre_in": ["x_news_post"],
+            "source_type_in": ["social"],
+            "flag_contains": ["X news post"],
+        },
+    },
+    "article_mentioning_social.txt": {
+        # TechPolicy.Press case (Nov 4 addendum): a long-form analysis
+        # that mentions social media ("follow standardized crawler
+        # instructions") and carries news cues ("Reports"). Mentioning a
+        # platform is not post structure — it must NOT become x_news_post.
+        "source_type": "auto",
+        "checks": {
+            "genre_in": ["generic_article"],
+            "flag_absent": ["X news post"],
+        },
+    },
+    "primary_announcement_with_rumor.txt": {
+        # NEGATIVE anchor-gate test (Arch: gates preserved unchanged):
+        # a declared primary with announcement voice BUT anonymous/rumor
+        # sourcing language. The anchor predicate's provenance bar
+        # (st_confidence >= 0.70, no rumor language) must keep this out
+        # of use_as_anchor whatever else changes in v1.8.0.
+        "source_type": "primary",
+        "checks": {
+            "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
+            "flag_contains": ["custody"],
+        },
+    },
 }
 
 GREEN  = "\033[32m" if sys.stdout.isatty() else ""
