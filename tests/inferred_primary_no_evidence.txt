@@ -1,0 +1,1 @@
+Dealroom: SemiAnalysis has published GDPx, a new benchmark for frontier models. The methodology section describes 206 tasks across 11 domains, and the sample size covers 13 models. According to the report, the best agent scores just 12 percent. Coverage of the launch continues.
