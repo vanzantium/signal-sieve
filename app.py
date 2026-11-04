@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.7.0"
+ANALYSIS_VERSION  = "v1.8.0"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -635,6 +635,17 @@ _OPENAPI_SPEC: dict = {
                                         "description": "Claims where values differ beyond tolerance."},
                     "alignment":       {"type": "array", "items": {"type": "object"},
                                         "description": "Claims where values agree within tolerance."},
+                    "unit_mismatches": {"type": "array", "items": {"type": "object"},
+                                        "description": "Same entity in different units — not comparable, not conflicts."},
+                    "version_mismatches": {"type": "array", "items": {"type": "object"},
+                                        "description": "Same benchmark in different versions — not comparable, not conflicts."},
+                    "timeline_reconciliation": {"type": "array", "items": {"type": "object"},
+                                        "description": "Shared-year date/precision notes — needs clarification, not conflicts."},
+                    "agreement_status": {"type": "string",
+                                        "enum": ["aligned", "conflicts_present", "not_established"],
+                                        "description": "not_established when nothing was actually compared."},
+                    "comparable_claims": {"type": "integer",
+                                        "description": "Claims that went through alignment/conflict comparison."},
                     "crude_note":      {"type": "string", "description": "WTI/Brent benchmark note if both found."},
                     "follow_up_sources": {"type": "array", "items": {"type": "string"}},
                     "triage_summary":  {"type": "string"},
@@ -959,6 +970,21 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
             lines.append(
                 f"  · {m['entity_label']}: units {', '.join(m.get('units', []))}"
             )
+
+    if cmp_result.get("version_mismatches"):
+        lines.append("VERSION MISMATCHES (not comparable, not conflicts):")
+        for m in cmp_result["version_mismatches"][:5]:
+            lines.append(
+                f"  · {m['entity_label']}: versions {', '.join(m.get('versions', []))}"
+            )
+
+    if cmp_result.get("timeline_reconciliation"):
+        lines.append("TIMELINE RECONCILIATION (needs clarification, not conflicts):")
+        for t in cmp_result["timeline_reconciliation"][:5]:
+            lines.append(f"  · {t['year']}: expressions differ across sources")
+
+    if cmp_result.get("agreement_status") == "not_established":
+        lines.append("AGREEMENT: not established — zero conflicts here means no detected disagreement")
 
     if cmp_result.get("crude_note"):
         lines.append("NOTE:      WTI ≠ Brent — different benchmarks, not comparable")
