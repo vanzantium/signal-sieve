@@ -428,28 +428,107 @@ def resolve_source_type(declared: str, text: str, source_url: str = "") -> Tuple
 
 # First-party announcement voice: the publisher speaking about its own
 # action or policy ("we are announcing/introducing/supporting ...").
-# This outranks a URL token ("blog") when deciding whether a declared
-# high-trust type is really an article: a company blog post announcing its
-# own policy IS a primary source. Secondary-reporting cues ("reported",
-# "according to", "sources said") veto the exemption — a post reporting
-# on others is not a first-party announcement, whatever its verbs.
+# Contractions count: "we're announcing" is the same voice as "we are
+# announcing" — the v1.7.0 pattern required whitespace after "we" and
+# missed every contracted announcement (Sieve gap 2026-11-04: Google's
+# "Today, we're announcing our plans..."). This outranks a URL token
+# ("blog") when deciding whether a declared high-trust type is really an
+# article: a company blog post announcing its own policy IS a primary
+# source. Secondary-reporting cues ("reported", "according to",
+# "sources said") veto the exemption — a post reporting on others is
+# not a first-party announcement, whatever its verbs.
 _ANNOUNCEMENT_RE = re.compile(
-    r"\bwe\s+(?:are\s+|will\s+|have\s+)?"
-    r"(?:announc|introduc|launch|publish|releas|roll\s*out|implement|support|offer)"
+    r"\bwe\s*(?:'re|are|will|have)?\s*"
+    r"(?:announc|introduc|launch|publish|releas|roll\s*out|implement|support|offer|build|develop)"
     r"|"
-    r"\btoday\s*,?\s*we\s+(?:are\s+|will\s+)?"
+    r"\btoday\s*,?\s*we\s*(?:'re|are|will)?\s*"
     r"(?:announc|introduc|launch|support)",
     re.I,
 )
 _SECONDARY_REPORTING_CUES = ("reported", "according to", "sources said", "sources say")
+# Third-party attribution cues (Arch review 2026-11-04): the claim's
+# ORIGIN is someone else, not the publisher. A first-party channel
+# discussing somebody else's research is not primary evidence FOR that
+# research, even when the channel itself is first-party. "Our study"
+# (first-person possessive) is not a third-party cue; "a study by X"
+# and "researchers found" are.
+_THIRD_PARTY_ATTRIBUTION_CUES = (
+    "according to", "announced by", "researchers found", "researchers at",
+    "a study by", "study conducted by", "research conducted by",
+)
+_DOI_RE = re.compile(r"\bdoi\s*:\s*10\.\d{4,}/", re.I)
+
+
+def _first_party_announcement(text: str) -> Tuple[bool, str]:
+    """Return (fires, reason) for the first-party announcement exemption.
+
+    Fires only when the publisher speaks in the first person about its
+    OWN action or policy AND no cue attributes the main claim to another
+    party. The reason names the deciding evidence so a downgrade flag
+    can explain itself instead of citing vague "cues in text and URL".
+    """
+    low = text.lower()
+    for cue in _THIRD_PARTY_ATTRIBUTION_CUES:
+        if cue in low:
+            return False, f"third-party attribution cue present ({cue!r})"
+    for cue in _SECONDARY_REPORTING_CUES:
+        if cue in low:
+            return False, f"secondary-reporting cue present ({cue!r})"
+    if _ANNOUNCEMENT_RE.search(text):
+        return True, "first-person announcement voice about the publisher's own action"
+    return False, "no first-person announcement voice found"
+
+
+def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
+    """Positive first-party evidence for an inferred PRIMARY type.
+
+    An inferred primary is an upgrade: it must be earned, not assumed
+    from passing evidence-marker mentions (Arch review 2026-11-04,
+    Dealroom case). Evidence is one of: first-party announcement voice;
+    an academic/institutional host; or the document carrying its own
+    primary identifiers (DOI, arXiv, SEC/EDGAR references).
+    """
+    if _first_party_announcement(text)[0]:
+        return True
+    host = urlparse(source_url).netloc.lower() if source_url else ""
+    if any(h in host for h in ACADEMIC_HOSTS):
+        return True
+    if any(host.endswith(d) for d in INSTITUTIONAL_DOMAINS):
+        return True
+    low = text.lower()
+    if _DOI_RE.search(text):
+        return True
+    if "arxiv.org" in low or "sec.gov" in low or "edgar" in low:
+        return True
+    return False
+
+
+def _gate_inferred_primary(
+    declared_norm: str, inferred: str, text: str, source_url: str
+) -> Tuple[str, bool]:
+    """Gate an inferred PRIMARY behind positive first-party evidence.
+
+    Returns (inferred, gated). When inferred is "primary" but nothing
+    establishes that this publisher originated the claim, the inference
+    drops to "secondary" and the caller must flag it with Arch's
+    custody-uncertain wording. Non-primary inferences pass through.
+    """
+    if inferred == "primary" and not _has_first_party_primary_evidence(text, source_url):
+        return "secondary", True
+    return inferred, False
 
 
 def resolve_source_type_v2(
     declared: str, text: str, source_url: str, genre: str
-) -> Tuple[str, str, str, float, bool]:
+) -> Tuple[str, str, str, float, bool, Dict]:
     """Genre-aware source resolution.
 
-    Returns (effective, declared_norm, inferred, confidence, genre_mismatch).
+    Returns (effective, declared_norm, inferred, confidence,
+    genre_mismatch, notes). notes carries:
+      first_party_exemption : bool — the exemption held the declared type
+      exemption_reason      : str  — the deciding evidence, for flag text
+      inferred_primary_gated: bool — an inferred PRIMARY was gated to
+        SECONDARY for lack of first-party evidence (Arch 2026-11-04)
     genre_mismatch is True when the caller declared a high-trust type but the
     text/URL signals an article or secondary source.
     """
@@ -457,19 +536,35 @@ def resolve_source_type_v2(
     genre_st = _GENRE_TO_SOURCE_TYPE.get(genre)
     genre_mismatch = False
 
-    # First-party announcement exemption (Sieve gap 2026-11-02): a declared
-    # high-trust type on a first-person announcement keeps its type even
-    # when the URL alone classifies the page as an article ("blog").
-    # The publisher's own voice beats the URL token. This does NOT grant
-    # anchor status — custody, manipulation, and rumor gates still apply
-    # downstream; it only stops the genre downgrade.
+    # Inferred-primary gate (Arch review 2026-11-04, Dealroom case): an
+    # inferred PRIMARY with no positive first-party evidence is not
+    # reported as primary at all. It drops to secondary — the safe
+    # default for an article-form document — and the caller flags it
+    # with Arch's custody-uncertain wording.
+    inferred, gated = _gate_inferred_primary(declared_norm, inferred, text, source_url)
+    if gated and declared_norm in _FORM_TYPES:
+        effective = "secondary"
+        confidence = max(confidence, 0.70)
+
+    # First-party announcement exemption (Sieve gap 2026-11-02, generalized
+    # 2026-11-04 per Arch): a declared high-trust type on a first-person
+    # announcement keeps its type even when the genre signals an article.
+    # The trigger is ownership + claim origin (the publisher's own voice
+    # about its own action, no third-party attribution), NOT the URL
+    # token — a blog URL neither grants nor denies the exemption. This
+    # does NOT grant anchor status — custody, manipulation, and rumor
+    # gates still apply downstream; it only stops the genre downgrade.
+    fires, reason = _first_party_announcement(text)
     if (
         declared_norm in _HIGH_TRUST_TYPES
         and genre in _ARTICLE_GENRES
-        and _ANNOUNCEMENT_RE.search(text)
-        and not any(cue in text.lower() for cue in _SECONDARY_REPORTING_CUES)
+        and fires
     ):
-        return declared_norm, declared_norm, inferred, max(confidence, 0.70), False
+        return declared_norm, declared_norm, inferred, max(confidence, 0.70), False, {
+            "first_party_exemption": True,
+            "exemption_reason": reason,
+            "inferred_primary_gated": gated,
+        }
 
     # Declared high-trust but genre signals article/secondary → mismatch
     if declared_norm in _HIGH_TRUST_TYPES and genre in _ARTICLE_GENRES:
@@ -483,7 +578,11 @@ def resolve_source_type_v2(
         effective = genre_st
         confidence = max(confidence, 0.70)
 
-    return effective, declared_norm, inferred, confidence, genre_mismatch
+    return effective, declared_norm, inferred, confidence, genre_mismatch, {
+        "first_party_exemption": False,
+        "exemption_reason": reason,
+        "inferred_primary_gated": gated,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -804,12 +903,21 @@ def analyze(
 
     # Custody — genre-aware resolution prevents article pages from being classed as primary
     if _EXTRACT_AVAILABLE:
-        effective_st, declared_st, inferred_st, st_confidence, genre_mismatch = \
+        effective_st, declared_st, inferred_st, st_confidence, genre_mismatch, resolve_notes = \
             resolve_source_type_v2(source_type, raw, source_url, source_genre)
     else:
         effective_st, declared_st, inferred_st, st_confidence = \
             resolve_source_type(source_type, raw, source_url)
         genre_mismatch = False
+        inferred_st, gated_fallback = _gate_inferred_primary(declared_st, inferred_st, raw, source_url)
+        if gated_fallback and declared_st in _FORM_TYPES:
+            effective_st = "secondary"
+            st_confidence = max(st_confidence, 0.70)
+        resolve_notes = {
+            "first_party_exemption": False,
+            "exemption_reason": _first_party_announcement(raw)[1],
+            "inferred_primary_gated": gated_fallback,
+        }
 
     custody_raw, custody_label, custody_clues = source_custody_score(raw, effective_st, source_url)
     # st_confidence scales custody: prevents laundering weak text through a declared 'primary' label
@@ -920,15 +1028,25 @@ def analyze(
             flags.append("X news post includes engagement-bait cues; separate reporting from spread incentives.")
     if language_note:
         flags.append(language_note)
+    if resolve_notes.get("inferred_primary_gated"):
+        # Arch review 2026-11-04: an inferred PRIMARY with no first-party
+        # evidence is custody-uncertain, not "trusted at low confidence".
+        flags.append(
+            "Source custody uncertain: available evidence does not establish "
+            "that this publisher originated the claim. Treat as a lead pending verification."
+        )
     if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and not genre_mismatch:
         flags.append(
             f"Declared source_type='{declared_st}' contradicts inferred='{inferred_st}'. "
-            f"Custody base is being trusted at low confidence."
+            f"Custody is discounted for the contradiction; treat as a lead pending verification."
         )
     if genre_mismatch:
+        # The flag names the deciding evidence (genre + why the
+        # first-party exemption did not apply) instead of vague "cues".
         flags.append(
             f"Declared high-trust source type ('{declared_st}') conflicts with "
-            f"genre '{source_genre}' (article/secondary-source cues in text and URL). "
+            f"genre '{source_genre}' (secondary-reporting signals); first-party "
+            f"exemption did not apply: {resolve_notes.get('exemption_reason', 'unknown')}. "
             f"Effective type downgraded to '{effective_st}'."
         )
 
