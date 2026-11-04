@@ -112,6 +112,13 @@ _SOCIAL_HINTS = re.compile(
     r"(?:^|\s)(?:RT\s+@|#[A-Za-z]\w{1,}|@[A-Za-z]\w{1,}|\bthread\b|\bdm me\b|\bfollow\b)",
     re.I | re.MULTILINE,
 )
+# Strong post markers: the structural evidence that a text IS a post, not
+# merely a text mentioning a platform. @handles, #tags, and RT @ forms
+# are post format; bare "follow"/"thread" words are ordinary prose.
+_STRONG_POST_MARKERS = re.compile(
+    r"(?:^|\s)(?:RT\s+@|#[A-Za-z]\w{1,}|@[A-Za-z]\w{1,})",
+    re.I | re.MULTILINE,
+)
 _X_NEWS_CUES = re.compile(
     r"\b(breaking|developing|just\s+in|update|confirmed|unconfirmed|"
     r"reports?|sources?|eyewitness|scanner|statement|press\s+conference|"
@@ -190,10 +197,17 @@ def detect_genre(text: str, url: str = "") -> str:
     if any(h in lower_url for h in _NEWSLIKE_URL_HINTS):
         return "news_article"
 
+    # Text-only social classification requires POST STRUCTURE (Arch review
+    # 2026-11-04): a short text carrying strong post markers (@handle,
+    # #tag, RT @). Mentioning a platform — "follow standardized
+    # instructions" inside a 2,000-char analysis — is not evidence the
+    # document belongs to that platform, so bare "follow"/"thread" words
+    # in longer text fall through to the opinion/generic checks below.
     if _SOCIAL_HINTS.search(text):
-        if _X_NEWS_CUES.search(text):
-            return "x_news_post"
-        return "social_post"
+        if _STRONG_POST_MARKERS.search(text) and len(text) <= 2000:
+            if _X_NEWS_CUES.search(text):
+                return "x_news_post"
+            return "social_post"
 
     if _OPINION_HINTS.search(text):
         return "opinion_article"
