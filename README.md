@@ -279,6 +279,7 @@ These are **open questions**, not bugs. Contributions and field data welcome.
 
 - **Receipt clerk, not an oracle.** For any consequential decision, demand primary sources.
 - **Honest framing.** The `ai_instruction` field in every output reminds downstream models that the verdict is heuristic, not truth.
+- **Extract → Identify → Contextualize → Compare → Recommend.** Each stage preserves the evidence supporting its decisions (Arch review 2026-11-05, v1.8.1). Recognizing a pattern is not establishing what the pattern represents: a number means nothing without its relationship to a measurement, a word does not identify an entity without context, a document does not establish primary custody merely by declaring itself primary, and a recommendation is not justified merely because an entity extractor produced a name. New failure modes should be investigated against this pipeline before becoming another collection of special-case exemptions.
 - **Zero dependencies.** Standard library only. Drop `signal_sieve.py` anywhere Python 3.8+ runs.
 - **Tunable.** All scoring weights are named constants. The test corpus makes regression easy.
 
