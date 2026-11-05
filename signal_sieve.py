@@ -390,6 +390,16 @@ def _infer_source_type_from_signals(text: str, source_url: str = "") -> str:
         return "anonymous"
     if any(x in t for x in ["press release", "we are excited to announce"]):
         return "official"
+    # Hosted release artifact (Arch review 2026-11-05, v1.8.1): a
+    # vendor's own release artifact hosted on a third-party page (a
+    # model card on Hugging Face, a release on GitHub) is the
+    # publisher's own document. Ownership is established by the
+    # hierarchy in _hosted_release_artifact — an org-name match alone
+    # never fires this. Checked here, after the rumor veto above but
+    # before the weak secondary cues ("reported", "according to"),
+    # which misfire on release tables ("results reported alongside...").
+    if _hosted_release_artifact(text, source_url)[0]:
+        return "primary"
     if any(x in t for x in ["abstract", "methodology", "sample size", "doi", "preprint", "sec 10-q", "edgar", "filing"]):
         return "primary"
     if any(x in t for x in ["i saw", "i recorded", "i measured", "my experience"]):
@@ -485,10 +495,14 @@ def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
     An inferred primary is an upgrade: it must be earned, not assumed
     from passing evidence-marker mentions (Arch review 2026-11-04,
     Dealroom case). Evidence is one of: first-party announcement voice;
-    an academic/institutional host; or the document carrying its own
-    primary identifiers (DOI, arXiv, SEC/EDGAR references).
+    an academic/institutional host; the document carrying its own
+    primary identifiers (DOI, arXiv, SEC/EDGAR references); or a
+    hosted release artifact whose ownership is established per Arch's
+    hierarchy (Arch review 2026-11-05, v1.8.1).
     """
     if _first_party_announcement(text)[0]:
+        return True
+    if _hosted_release_artifact(text, source_url)[0]:
         return True
     host = urlparse(source_url).netloc.lower() if source_url else ""
     if any(h in host for h in ACADEMIC_HOSTS):
@@ -501,6 +515,89 @@ def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
     if "arxiv.org" in low or "sec.gov" in low or "edgar" in low:
         return True
     return False
+
+
+# Hosted release artifacts (Arch review 2026-11-05, v1.8.1): a vendor's
+# own release artifact does not stop being first-party merely because
+# another platform hosts it. A Baidu model card on Hugging Face can be
+# primary evidence for Baidu's own model-release claims. But ownership
+# must be ESTABLISHED, not assumed from a name match. Evidence hierarchy:
+#   1. verified publisher/org ownership — the source URL is on a known
+#      artifact host (huggingface.co, github.com, gitlab.com) under an
+#      org slug, AND the text names that org as the releaser/author
+#      (an authorship construction, not a bare name match);
+#   2. official links connecting the org to the artifact — the text
+#      links to the org's own domain, or the source URL host is the
+#      org's own domain;
+#   3. consistent release metadata + identifiable authorship — the doc
+#      carries release-artifact markers (model card / release / license /
+#      version / parameters / checkpoint / weights) and names the org
+#      as author.
+# Level 1 must hold AND at least one of levels 2 or 3. An org-name
+# match alone is NOT sufficient.
+_ARTIFACT_HOSTS = ("huggingface.co", "github.com", "gitlab.com")
+_RELEASE_METADATA_MARKERS = (
+    "model card", "license", "release", "version", "parameters",
+    "pre-train", "pretrain", "checkpoint", "weights",
+)
+
+
+def _hosted_release_artifact(text: str, source_url: str = "") -> Tuple[bool, str]:
+    """Return (fires, reason) for hosted-artifact first-party evidence.
+
+    The reason names the hierarchy levels that fired, so a custody
+    decision can explain itself instead of citing vague "cues".
+    """
+    if not source_url:
+        return False, "no source URL: hosted ownership cannot be established"
+    host = urlparse(source_url).netloc.lower()
+    if not any(host == h or host.endswith("." + h) for h in _ARTIFACT_HOSTS):
+        return False, "source URL is not on a known artifact host"
+    parts = [p for p in urlparse(source_url).path.split("/") if p]
+    if not parts:
+        return False, "source URL has no org path segment"
+    org = parts[0].lower()
+    if len(org) < 2:
+        return False, "org slug too short to identify a publisher"
+    low = text.lower()
+    org_re = re.escape(org)
+    # Level 1 — the org named as releaser/author (not a bare name match).
+    authorship_res = [
+        rf"\b{org_re}\b(?:\s+\w+){{0,2}}\s+team\b",
+        rf"\b{org_re}\s+(?:labs?|research|ai)\b",
+        rf"\bby\s+{org_re}\b",
+        rf"\b{org_re}'s\b",
+        rf"copyright[^.\n]{{0,40}}?\b{org_re}\b",
+        rf"\b{org_re}\b[^.!?\n]{{0,60}}?\b(?:releas|announc|introduc|present|publish|launch)\w*\b",
+    ]
+    if not any(re.search(p, low) for p in authorship_res):
+        return False, f"org {org!r} not named as releaser/author in text"
+    # Level 2 — official links connecting the org to the artifact.
+    official_link = False
+    for u in re.findall(r"https?://\S+", text):
+        u_host = urlparse(u).netloc.lower()
+        if org in u_host.split("."):
+            official_link = True
+            break
+    if not official_link and org in host.split("."):
+        official_link = True
+    # Level 3 — consistent release metadata + identifiable authorship.
+    metadata_hits = [m for m in _RELEASE_METADATA_MARKERS if m in low]
+    has_metadata = len(metadata_hits) >= 2
+    if official_link:
+        return True, (
+            f"hosted release artifact: org {org!r} named as releaser/author "
+            "(level 1) + official link to the org's domain (level 2)"
+        )
+    if has_metadata:
+        return True, (
+            f"hosted release artifact: org {org!r} named as releaser/author "
+            f"(level 1) + release metadata ({', '.join(metadata_hits[:4])}) (level 3)"
+        )
+    return False, (
+        f"org {org!r} named as releaser/author but neither an official link "
+        "nor release metadata establishes the artifact"
+    )
 
 
 def _gate_inferred_primary(
@@ -1170,14 +1267,29 @@ def analyze(
                 "declared-language lexical or paragraph-level risk."
             )
 
-    # Dynamic follow-up questions. Custody-adaptive (Sieve gap 2026-11-02):
-    # a verified primary feed gets follow-ups about dates, scope, and
-    # supersession — not a generic "find a primary" question, which only
-    # makes sense when the primary is still missing.
+    # Dynamic follow-up questions. Two-stage custody-aware (Arch
+    # review 2026-11-05, v1.8.1): a VERIFIED primary gets dates/scope/
+    # versions questions; a doc that CLAIMS primary status but whose
+    # custody is still uncertain gets a custody question — what evidence
+    # would establish its authorship or authority. A document claiming
+    # to be the original source is never asked where the original source
+    # is. Declaration is never proof of custody: the verified bar is
+    # the same st_confidence >= 0.70 the anchor predicate uses, with
+    # no genre mismatch.
+    primary_verified = (
+        effective_st in ("primary", "first_hand", "regulatory_filing")
+        and st_confidence >= 0.70
+        and not genre_mismatch
+    )
     questions = []
-    if effective_st in ("primary", "first_hand", "regulatory_filing") and not genre_mismatch:
+    if primary_verified:
         questions.append(
             "What implementation dates, scope limits, or superseding versions apply to this claim?"
+        )
+    elif declared_st in _HIGH_TRUST_TYPES:
+        questions.append(
+            "What evidence would establish that this publisher originated the claim — "
+            "authorship, ownership, or an official link to the source?"
         )
     else:
         questions.append("What is the closest primary source for the main claim?")
@@ -1242,19 +1354,35 @@ def analyze(
             f"{language_guardrail_action.replace('_', ' ')}; inspect lexical and "
             "paragraph-level risk before passing this text forward."
         )
+    # Hosted-artifact first-party evidence (v1.8.1, gap 1), computed
+    # once and reused: the custody breakdown needs it for
+    # primary_source_present, and the signal brief needs to know
+    # whether the doc was downgraded (see the no-cue sentinel).
+    hosted_first_party, hosted_reason = _hosted_release_artifact(raw, source_url)
+    # A consequential custody change: a declared high-trust type that
+    # was not kept at full confidence, or a genre mismatch. The signal
+    # brief must not accept an empty key_signals list in that case
+    # (Arch review 2026-11-05): if no supporting cue exists, it must
+    # say so rather than manufacture certainty.
+    custody_downgraded = bool(genre_mismatch) or (
+        declared_st in _HIGH_TRUST_TYPES and st_confidence < 0.50
+    )
     # Phase 1.2 enrichment (requires signal_extract.py)
     custody_breakdown: Dict = {}
     evidence_shape_data: Dict = {}
     signal_brief: Dict = {}
     if _EXTRACT_AVAILABLE:
         custody_breakdown = build_custody_breakdown(
-            raw, source_genre, effective_st, source_url, st_confidence
+            raw, source_genre, effective_st, source_url, st_confidence,
+            hosted_first_party=hosted_first_party,
+            hosted_reason=hosted_reason,
         )
         evidence_shape_data = build_evidence_shape(
             raw, sentences, anchored_n, unanchored_n
         )
         signal_brief = extract_signal_brief(
-            raw, source_genre, effective_st, source_url
+            raw, source_genre, effective_st, source_url,
+            custody_downgraded=custody_downgraded,
         )
 
     assessment = Assessment(
