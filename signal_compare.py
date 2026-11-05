@@ -6,6 +6,14 @@ reference. Each claim is normalized to a canonical entity key so claims across
 documents can be matched even when they use different surface forms
 (e.g. "10-Year Treasury Yield: 4.61%" and "10yr Treasury: 4.61%").
 
+Engineering principle (Arch review 2026-11-05, v1.8.1):
+Extract -> Identify -> Contextualize -> Compare -> Recommend. Each stage
+preserves the evidence supporting its decisions. Recognizing a pattern is
+not establishing what the pattern represents: a number means nothing
+without its relationship to a measurement, a word does not identify an
+entity without context, and a recommendation is not justified merely
+because an entity extractor produced a name.
+
 Zero external dependencies.
 """
 from __future__ import annotations
@@ -77,16 +85,28 @@ _CRUDE_KEYS = frozenset({"wti-crude", "brent-crude"})
 
 # High-confidence colon-separated data lines:
 #   "10-Year Treasury Yield: 4.61%"  or  "WTI Crude: $68.43/bbl"
+# The trailing lookahead keeps a shot count out of the value slot:
+# "MMLU: 5-shot 93.3" must not mint a claim of value 5 — the 5 is a
+# measurement condition, not a result (Arch review 2026-11-05, v1.8.1).
 _COLON_RE = re.compile(
     r"([A-Za-z&][^:\n]{2,55}):"          # label (2–55 chars)
     r"\s*"
     r"([+-]?\$?\d[\d,\.]*"               # leading digit (with optional sign/$)
     r"(?:%|bps|(?:\s*/bbl)|(?:\s*/oz)|(?:\s+per\s+(?:barrel|oz(?:ounce)?)))?"
-    r"(?:\s*[-–]\s*\d[\d,\.]*(?:%|bps)?)?)",  # optional range "4.25-4.75"
+    r"(?:\s*[-–]\s*\d[\d,\.]*(?:%|bps)?)?)"  # optional range "4.25-4.75"
+    r"(?!\s*-\s*shot\b)",
     re.I,
 )
 
 # Lower-confidence inline patterns: "S&P 500 +0.02%" or "S&P 500 reached 5,894"
+# Whole-word guard (v1.8.1, gap 3): the entity alternation is followed by
+# (?!\w), so "Downloads"/"downloadable" can never match "Dow", "Goldman"
+# can never match "Gold", and "MATHEMATICS" can never match "MATH".
+# Number guards (v1.8.1, gap 2): the value must not be embedded in another
+# token — (?<![A-Za-z0-9@]) blocks the "3" in "Hy3", the "8" in "FP8",
+# the "1" in "Pass@1" — and must not be a shot count — the trailing
+# lookahead blocks the "5" in "5-shot" so the regex finds the real score
+# ("93.3") instead.
 _INLINE_ENTITY_RE = re.compile(
     r"\b(S&P\s*500|Nasdaq(?:\s+Composite)?|Dow(?:\s+Jones)?|DJIA|Russell\s+2000|"
     r"\d{1,2}[-\s]?y(?:ear|r)(?:\s+Treasury)?|"
@@ -94,10 +114,11 @@ _INLINE_ENTITY_RE = re.compile(
     r"CPI|PPI|PCE|PMI|GDPx|GDP|"
     r"GPQA(?:\s+Diamond)?|SWE[-\s]?bench(?:\s+Verified)?|HumanEval(?:\+)?|"
     r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|"
-    r"(?:initial\s+)?jobless\s+claims?|retail\s+sales?)"
+    r"(?:initial\s+)?jobless\s+claims?|retail\s+sales?)(?!\w)"
     r"[^.!?\n]{0,70}?"
-    r"([+-]?\$?\d[\d,\.]*"
-    r"(?:%|\s*bps|\s*/bbl|\s*/oz|\s+per\s+(?:barrel|oz)|\s*,\d{3})*)",
+    r"(?<![A-Za-z0-9@])([+-]?\$?\d[\d,\.]*"
+    r"(?:%|\s*bps|\s*/bbl|\s*/oz|\s+per\s+(?:barrel|oz)|\s*,\d{3})*)"
+    r"(?!\s*-\s*shot\b)",
     re.I,
 )
 
@@ -173,6 +194,10 @@ def _parse_value(raw: str) -> Optional[float]:
              .replace("/oz", "")
              .strip())
     clean = re.sub(r"\s+per\s+(?:barrel|oz(?:ounce)?)", "", clean, flags=re.I).strip()
+    # A sentence-final period is punctuation, not part of the number:
+    # the extraction patterns' [\d,\.]* class eats it ("93.3."), and
+    # float() rejects a two-dot literal. Strip it here (v1.8.1).
+    clean = clean.rstrip(".")
     # Range: "4.25-4.75" or "4.25–4.75" → midpoint
     range_m = re.match(r"([+-]?\d+\.?\d*)[-–](\d+\.?\d*)", clean)
     if range_m:
@@ -229,6 +254,89 @@ def _benchmark_version(key: str, window: str) -> str:
 
 def _count_after(text: str, pos: int, window: int = 25) -> bool:
     return bool(_COUNT_WORDS_RE.search(text[pos:pos + window]))
+
+
+# Shot counts (Arch review 2026-11-05, v1.8.1): a shot count is a
+# measurement-condition attribute, not a performance result. A benchmark
+# claim is approximately benchmark + model + benchmark version + shot
+# count + metric + score + unit, with the source excerpt preserved
+# (the claim's "context" field). "MMLU 5-shot: 93.3" yields score 93.3
+# with shot_count=5 — never a claim of value 5. Word forms
+# ("five-shot", "one-shot", "zero-shot") count the same as digits.
+_SHOT_RE = re.compile(r"(\d+)\s*-\s*shot\b", re.I)
+_SHOT_WORD_RE = re.compile(
+    r"\b(zero|one|two|three|four|five|six|seven|eight|nine|ten)\s*-\s*shot\b", re.I)
+_SHOT_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+               "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+def _shot_count_in_window(window: str) -> Optional[int]:
+    """First shot count mentioned in a window, or None when unstated."""
+    m = _SHOT_RE.search(window)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    m = _SHOT_WORD_RE.search(window)
+    if m:
+        return _SHOT_WORDS[m.group(1).lower()]
+    return None
+
+
+def _shot_count_for_match(text: str, m: "re.Match[str]", num_group: int) -> Optional[int]:
+    """Shot count for one extracted claim.
+
+    Prefer a shot count inside the claim's own matched fragment (the
+    "5-shot" in "MMLU (EM) 5-shot: ERNIE 93.3"); only when the fragment
+    carries none ("MMLU: 93.3 (5-shot)") fall back to the nearest shot
+    mention in the surrounding ±80 chars. Taking the FIRST shot in a
+    wide window is wrong: a table line's neighbours carry other
+    benchmarks' shot counts (the Nov 5 card's HumanEval line sits
+    under the GPQA 5-shot line, and must read 1-shot, not 5-shot).
+    """
+    frag = text[m.start():m.end()]
+    shot = _shot_count_in_window(frag)
+    if shot is not None:
+        return shot
+    win_start = max(0, m.start() - 80)
+    win_end = m.end() + 80
+    window = text[win_start:win_end]
+    num_pos = m.start(num_group) - win_start
+    best: Optional[int] = None
+    best_dist: Optional[int] = None
+    for regex, conv in ((_SHOT_RE, int), (_SHOT_WORD_RE, lambda w: _SHOT_WORDS[w.lower()])):
+        for hit in regex.finditer(window):
+            try:
+                value = conv(hit.group(1))
+            except (ValueError, KeyError):
+                continue
+            dist = abs(hit.start() - num_pos)
+            if best_dist is None or dist < best_dist:
+                best, best_dist = value, dist
+    return best
+
+
+# Market entities (Arch review 2026-11-05, v1.8.1): a market entity must
+# have positive market context before it fires. Whole-word matching
+# alone is not sufficient evidence of entity identity — a document
+# about downloading language models must never acquire stock-market
+# interpretations because a short financial abbreviation appears inside
+# another word. The gate is document-level: a genuine market snapshot
+# carries market vocabulary somewhere; a download page does not.
+# Treasury yields and macro indicators (CPI/PPI/GDP) are NOT gated:
+# their names cannot be confused with ordinary words.
+_MARKET_ENTITY_KEYS = frozenset({
+    "sp500", "nasdaq", "dow", "russell2000", "vix", "dxy",
+    "eur-usd", "usd-jpy", "gold", "brent-crude", "wti-crude",
+})
+_MARKET_CONTEXT_RE = re.compile(
+    r"\b(stock|stocks|market|markets|index|indices|trading|traded|"
+    r"shares?|investors?|exchange|nyse|nasdaq|dow\s+jones|djia|"
+    r"points|futures|equities|bonds?|yields?|"
+    r"treasury|treasuries|crude|oil|wall\s+street|s&p)\b",
+    re.I,
+)
 
 
 _VERSION_PREFIX_RE = re.compile(r"(?:\bv|version)\s*$", re.I)
@@ -408,7 +516,10 @@ def reconcile_timelines(analyzed_docs: List[Dict]) -> List[Dict]:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def extract_numeric_claims(text: str) -> List[Dict]:
+def extract_numeric_claims(
+    text: str,
+    dropped_out: Optional[List[Dict]] = None,
+) -> List[Dict]:
     """Extract normalized numeric claims from text.
 
     Returns a list of::
@@ -419,24 +530,51 @@ def extract_numeric_claims(text: str) -> List[Dict]:
           "raw_value":     "4.61%",
           "numeric_value": 4.61,
           "unit":          "%",
+          "shot_count":    5,        # benchmark claims only; None when unstated
           "context":       "10-Year Treasury Yield: 4.61%",
         }
 
-    Deduplicates on (entity_key, numeric_value) pairs.
+    Deduplicates on (entity_key, numeric_value) pairs. When the same
+    entity + value is mentioned twice and only one mention states a shot
+    count, the surviving claim keeps the stated count — the condition is
+    evidence, not a second claim.
+
+    Market claims dropped by the context gate (v1.8.1) are appended to
+    *dropped_out* when the caller passes a list, so the caller can
+    audit the drop instead of silently losing the evidence.
+
+    The claim's "context" field preserves the source excerpt (Arch
+    review 2026-11-05: each stage preserves the evidence supporting
+    its decisions).
     """
     claims: List[Dict] = []
-    seen: set = set()  # (entity_key, numeric_value) dedup
+    seen: Dict[Tuple[str, float], int] = {}  # (entity_key, numeric_value) -> index into claims
+    dropped: List[Dict] = []
 
     def _add(key: str, label: str, raw_val: str, context: str, unit_override: str = "",
-             version: str = "") -> None:
+             version: str = "", shot_count: Optional[int] = None) -> None:
         numeric = _parse_value(raw_val)
         if numeric is None:
+            return
+        # Market-context gate (v1.8.1, gap 3): a market entity with no
+        # positive market context anywhere in the document is not a
+        # claim at all. Record the drop for the caller to audit.
+        if key in _MARKET_ENTITY_KEYS and not _MARKET_CONTEXT_RE.search(text):
+            dropped.append({
+                "entity_key":   key,
+                "entity_label": label,
+                "raw_value":    raw_val.strip(),
+                "reason":       "no positive market context in document",
+            })
             return
         unit    = unit_override or _unit_of(raw_val)
         dedup   = (key, numeric)
         if dedup in seen:
+            idx = seen[dedup]
+            if claims[idx].get("shot_count") is None and shot_count is not None:
+                claims[idx]["shot_count"] = shot_count
             return
-        seen.add(dedup)
+        seen[dedup] = len(claims)
         claims.append({
             "entity_key":    key,
             "entity_label":  label,
@@ -444,6 +582,7 @@ def extract_numeric_claims(text: str) -> List[Dict]:
             "numeric_value": numeric,
             "unit":          unit,
             "version":       version,
+            "shot_count":    shot_count,
             "context":       context[:120],
         })
 
@@ -464,7 +603,8 @@ def extract_numeric_claims(text: str) -> List[Dict]:
         count_after = bare and _count_after(text, m.end())
         _add(key, label, raw_val, m.group(0),
              unit_override="count" if count_after else "",
-             version=_benchmark_version(key, m.group(0)))
+             version=_benchmark_version(key, m.group(0)),
+             shot_count=_shot_count_for_match(text, m, 2))
 
     # Pass 2 — inline patterns (catches prose and snapshot lines)
     for m in _INLINE_ENTITY_RE.finditer(text):
@@ -484,7 +624,8 @@ def extract_numeric_claims(text: str) -> List[Dict]:
         count_after = bare and _count_after(text, m.end())
         _add(key, label, raw_val, m.group(0),
              unit_override="count" if count_after else "",
-             version=_benchmark_version(key, m.group(0)))
+             version=_benchmark_version(key, m.group(0)),
+             shot_count=_shot_count_for_match(text, m, 2))
 
     # Pass 3 — benchmark-reverse: "61.3% on GPQA" (score precedes the name)
     for m in _BENCHMARK_REVERSE_RE.finditer(text):
@@ -496,7 +637,8 @@ def extract_numeric_claims(text: str) -> List[Dict]:
             continue
         key, label = entity
         _add(key, label, raw_val, m.group(0),
-             version=_benchmark_version(key, m.group(0)))
+             version=_benchmark_version(key, m.group(0)),
+             shot_count=_shot_count_for_match(text, m, 1))
 
     # Pass 4 — pricing rows: a $ amount is a pricing claim only when
     # pricing words sit within ~60 chars, so market prices never match.
@@ -522,6 +664,9 @@ def extract_numeric_claims(text: str) -> List[Dict]:
             key, label = "pricing", "Pricing"
         _add(key, label, m.group(1), window.strip()[:120], unit_override="$")
 
+    if dropped_out is not None:
+        dropped_out.extend(dropped)
+
     return claims
 
 
@@ -542,13 +687,16 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
           "alignment":         [...],   # same entity, values within tolerance
           "unit_mismatches":   [...],   # same entity, different units
           "version_mismatches": [...],  # same benchmark, different versions
+          "evaluation_setting_mismatches": [...],  # same benchmark, different shot counts
           "timeline_reconciliation": [...],  # shared-year date/precision notes
           "agreement_status":  str,     # aligned | conflicts_present | not_established
           "comparable_claims": int,     # claims that actually went through comparison
           "presence_absence_mismatches": [...],  # PRESENT vs EXPLICITLY_ABSENT
           "presence_status":   {entity_key: {doc_name: status}},
           "crude_note":        str,     # WTI/Brent note if both found
-          "follow_up_sources": [...],
+          "follow_up_sources": [...],   # gated on compared entities (v1.8.1, gap 5)
+          "follow_up_trace":   [...],   # which entity + claim supports each suggestion
+          "dropped_market_claims": [...],  # market entities dropped for lack of context
           "triage_summary":    str,
         }
 
@@ -567,6 +715,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "alignment":         [],
             "unit_mismatches":   [],
             "version_mismatches": [],
+            "evaluation_setting_mismatches": [],
             "shared_dates":      [],
             "shared_years":      [],
             "unique_dates":      [],
@@ -577,21 +726,28 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "presence_status":   {},
             "crude_note":        "",
             "follow_up_sources": [],
+            "follow_up_trace":   [],
+            "dropped_market_claims": [],
             "triage_summary":    "Insufficient documents for comparison.",
         }
 
-    # Extract claims per doc
-    doc_claims: List[List[Dict]] = [
-        extract_numeric_claims(doc.get("text", ""))
-        for doc in analyzed_docs
-    ]
+    def _doc_name(idx: int) -> str:
+        return analyzed_docs[idx].get("source_name", f"doc_{idx + 1}")
+
+    # Extract claims per doc. Dropped market claims are collected per
+    # doc so the caller can audit the context gate (v1.8.1, gap 3)
+    # instead of silently losing the evidence.
+    doc_claims: List[List[Dict]] = []
+    dropped_market_claims: List[Dict] = []
+    for doc_idx, doc in enumerate(analyzed_docs):
+        dropped: List[Dict] = []
+        doc_claims.append(extract_numeric_claims(doc.get("text", ""), dropped_out=dropped))
+        for entry in dropped:
+            dropped_market_claims.append({**entry, "source": _doc_name(doc_idx)})
     doc_dates: List[List[Dict]] = [
         extract_date_claims(doc.get("text", ""))
         for doc in analyzed_docs
     ]
-
-    def _doc_name(idx: int) -> str:
-        return analyzed_docs[idx].get("source_name", f"doc_{idx + 1}")
 
     # Group all claims by canonical entity key
     entity_map: Dict[str, List[Dict]] = {}   # key → [{doc_idx, claim}]
@@ -606,6 +762,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     alignment:     List[Dict] = []
     unit_mismatches: List[Dict] = []
     version_mismatches: List[Dict] = []
+    evaluation_setting_mismatches: List[Dict] = []
     presence_absence_mismatches: List[Dict] = []
 
     # WTI vs Brent: note their presence but don't call it a conflict
@@ -615,8 +772,6 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         "WTI and Brent crude benchmarks both present — these are different contracts "
         "(WTI = US delivery; Brent = North Sea/international) and cannot be directly compared."
     ) if (has_wti and has_brent) else ""
-
-    all_claims_flat = [c for cl in doc_claims for c in cl]
 
     # ── Presence/absence channel (Arch design note 2026-11-01) ──────────
     # Presence and absence are different kinds of evidence, not two values
@@ -676,10 +831,11 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         raws       = [e["claim"]["raw_value"]      for e in entries]
 
         val_objs = [
-            {"source": n, "value": v, "unit": u, "raw": r, "version": ver}
-            for n, v, u, r, ver in zip(
+            {"source": n, "value": v, "unit": u, "raw": r, "version": ver, "shot_count": sh}
+            for n, v, u, r, ver, sh in zip(
                 doc_names, values, units, raws,
-                [e["claim"].get("version", "") for e in entries])
+                [e["claim"].get("version", "") for e in entries],
+                [e["claim"].get("shot_count") for e in entries])
         ]
 
         if len(entries) == 1:
@@ -760,6 +916,51 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             })
             continue
 
+        # Shot-count gate (Arch review 2026-11-05, v1.8.1): a shot count
+        # is a measurement-condition attribute, not a performance result.
+        # Different STATED shot counts block direct score comparison —
+        # the scores were measured under different evaluation settings —
+        # and land in evaluation_setting_mismatches with a note naming
+        # the difference. When no side states a shot count (or only one
+        # side does), the comparison proceeds PROVISIONALLY, but the
+        # missing conditions stay visible on the entry: a score must
+        # never be called aligned or conflicting while its measurement
+        # conditions are unstated and invisible.
+        named_shots: set = set()
+        evaluation_note = ""
+        if key in _BENCHMARK_KEYS:
+            shots = [e["claim"].get("shot_count") for e in entries]
+            named_shots = {s for s in shots if s is not None}
+            if len(named_shots) > 1:
+                evaluation_setting_mismatches.append({
+                    "entity_key":   key,
+                    "entity_label": label,
+                    "shot_counts":  sorted(named_shots),
+                    "values":       val_objs,
+                    "note": (
+                        "Same benchmark evaluated under different shot counts "
+                        f"({', '.join(str(s) + '-shot' for s in sorted(named_shots))}) — "
+                        "scores measured under different evaluation settings are not "
+                        "directly comparable. Do not read as a conflict or an alignment."
+                    ),
+                })
+                continue
+            if named_shots:
+                stated = next(iter(named_shots))
+                if any(s is None for s in shots):
+                    evaluation_note = (
+                        f"Shot count stated in some sources ({stated}-shot) and unstated "
+                        "elsewhere — comparison is provisional; missing evaluation "
+                        "conditions must remain visible."
+                    )
+                else:
+                    evaluation_note = f"All sources state {stated}-shot evaluation."
+            else:
+                evaluation_note = (
+                    "Shot count not stated in any source — comparison is provisional; "
+                    "missing evaluation conditions must remain visible."
+                )
+
         vals_sorted = sorted(values)
         spread      = vals_sorted[-1] - vals_sorted[0]
 
@@ -777,6 +978,9 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "spread":       round(spread, 5),
             "values":       val_objs,
         }
+        if key in _BENCHMARK_KEYS:
+            entry["shot_count"] = next(iter(named_shots), None) if named_shots else None
+            entry["evaluation_conditions"] = evaluation_note
 
         if is_conflict:
             entry["note"] = (
@@ -818,18 +1022,43 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         else:
             shared_years.append(entry)
 
-    # Follow-up source suggestions based on what was found
+    # Follow-up source suggestions, gated (Arch review 2026-11-05,
+    # v1.8.1, gap 5): a recommended follow-up source must be traceable
+    # to a supported entity AND a relevant claim. Eligibility is
+    # derived from the entities that actually appear in the compared
+    # output — shared/unique claims, alignment, conflicts, mismatches —
+    # never from raw extraction alone, so a dropped false entity (the
+    # Nov 5 Dow) cannot smuggle a market-data recommendation into the
+    # result. Each suggestion carries its trace: the entity keys that
+    # support it. A small additional guard, not a new recommendation
+    # engine.
+    compared_entity_keys = (
+        {c["entity_key"] for c in shared_claims}
+        | {c["entity_key"] for c in unique_claims}
+        | {c["entity_key"] for c in alignment}
+        | {c["entity_key"] for c in conflicts}
+        | {m["entity_key"] for m in unit_mismatches}
+        | {m["entity_key"] for m in version_mismatches}
+        | {m["entity_key"] for m in evaluation_setting_mismatches}
+    )
     follow_up: List[str] = []
-    entity_keys_found = {c["entity_key"] for c in all_claims_flat}
-    if entity_keys_found & {"10yr-treasury-yield", "2yr-treasury-yield",
-                            "5yr-treasury-yield", "30yr-treasury-yield"}:
-        follow_up.append("US Treasury (treasurydirect.gov) — authoritative daily yield curve data")
-    if entity_keys_found & {"wti-crude", "brent-crude"}:
-        follow_up.append("EIA (eia.gov) — US and international crude pricing / inventory")
-    if entity_keys_found & {"cpi", "ppi", "jobless-claims", "retail-sales"}:
-        follow_up.append("BLS (bls.gov) — CPI, PPI, jobless claims primary releases")
-    if entity_keys_found & {"sp500", "nasdaq", "dow", "russell2000", "vix"}:
-        follow_up.append("Exchange closing prices (NYSE, Nasdaq) — authoritative end-of-day data")
+    follow_up_trace: List[Dict] = []
+
+    def _suggest(keys, text: str) -> None:
+        hit = sorted(compared_entity_keys & set(keys))
+        if hit:
+            follow_up.append(text)
+            follow_up_trace.append({"source": text, "entity_keys": hit})
+
+    _suggest({"10yr-treasury-yield", "2yr-treasury-yield",
+              "5yr-treasury-yield", "30yr-treasury-yield"},
+             "US Treasury (treasurydirect.gov) — authoritative daily yield curve data")
+    _suggest({"wti-crude", "brent-crude"},
+             "EIA (eia.gov) — US and international crude pricing / inventory")
+    _suggest({"cpi", "ppi", "jobless-claims", "retail-sales"},
+             "BLS (bls.gov) — CPI, PPI, jobless claims primary releases")
+    _suggest({"sp500", "nasdaq", "dow", "russell2000", "vix"},
+             "Exchange closing prices (NYSE, Nasdaq) — authoritative end-of-day data")
 
     # Triage summary
     n_conflicts = len(conflicts)
@@ -837,6 +1066,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     n_mismatches = len(presence_absence_mismatches)
     n_unit_mismatches = len(unit_mismatches)
     n_version_mismatches = len(version_mismatches)
+    n_setting_mismatches = len(evaluation_setting_mismatches)
     n_shared_dates = len(shared_dates) + len(shared_years)
     timeline_notes = reconcile_timelines(analyzed_docs)
     # Agreement status (Arch review 2026-11-04): zero conflicts must not
@@ -882,6 +1112,26 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             f" {n_version_mismatches} version mismatch(es): same benchmark in "
             "different versions across sources — not comparable, not a conflict."
         )
+    if n_setting_mismatches > 0:
+        triage_summary += (
+            f" {n_setting_mismatches} evaluation-setting mismatch(es): same benchmark "
+            "evaluated under different shot counts — not comparable, not a conflict."
+        )
+    n_provisional = sum(
+        1 for c in alignment + conflicts
+        if "provisional" in c.get("evaluation_conditions", "")
+    )
+    if n_provisional > 0:
+        triage_summary += (
+            f" {n_provisional} provisional comparison(s): shot counts unstated on "
+            "one or both sides — see evaluation_conditions on the entries."
+        )
+    if dropped_market_claims:
+        triage_summary += (
+            f" {len(dropped_market_claims)} market-entity claim(s) dropped: the entity "
+            "fired without positive market context in the document — see "
+            "dropped_market_claims."
+        )
     if n_shared_dates > 0:
         triage_summary += (
             f" {n_shared_dates} shared date claim(s) across documents."
@@ -906,6 +1156,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         "alignment":         alignment,
         "unit_mismatches":   unit_mismatches,
         "version_mismatches": version_mismatches,
+        "evaluation_setting_mismatches": evaluation_setting_mismatches,
         "shared_dates":      shared_dates,
         "shared_years":      shared_years,
         "unique_dates":      unique_dates,
@@ -916,5 +1167,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         "presence_status":   presence_status,
         "crude_note":        crude_note,
         "follow_up_sources": follow_up,
+        "follow_up_trace":   follow_up_trace,
+        "dropped_market_claims": dropped_market_claims,
         "triage_summary":    triage_summary,
     }
