@@ -12,11 +12,13 @@ A check is one of:
   "evidence"                 : {"anchored_at_least": N} or {"unanchored_at_least": N}
   "flag_absent"              : no flag contains this substring (case-insensitive)
   "questions_absent"         : no question contains this substring (case-insensitive)
+  "questions_contains"       : at least one question contains this substring (v1.8.1)
   "genre_in"                 : source_genre is one of these values (Phase 1.2)
   "source_type_in"           : source_type is one of these values (Phase 1.2)
   "source_type_confidence_max": source_type_confidence <= threshold (Phase 1.2)
   "signal_brief_min"         : {brief_key: min_count} (Phase 1.2)
   "evidence_shape"           : {field: expected_value} (Phase 1.2)
+  "custody_breakdown"        : {field: expected_value} (v1.8.1)
 
 A test passes only when ALL checks pass.
 
@@ -333,6 +335,58 @@ EXPECTATIONS = {
             "flag_contains": ["custody"],
         },
     },
+
+    # ── v1.8.1 fixtures (Arch review 2026-11-05) ───────────────────────────
+    "primary_hf_model_card.txt": {
+        # Nov 5 gap 1: Baidu's own model card hosted on Hugging Face,
+        # declared primary. A vendor's own release artifact does not
+        # stop being first-party because another platform hosts it:
+        # the org slug (baidu) + authorship ("Baidu ERNIE Team") +
+        # release metadata (model card, license, parameters) establish
+        # ownership per Arch's hierarchy. The old inference said
+        # secondary ("results reported alongside...") and the
+        # contradiction flag discounted custody to 0.40.
+        "source_type": "primary",
+        "source_url": "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base",
+        "checks": {
+            "source_type_in": ["primary"],
+            "flag_absent":   ["contradicts"],
+            "questions_absent": ["closest primary source", "evidence would establish"],
+            "signal_brief_min": {"key_signals": 1},
+            "custody_breakdown": {"primary_source_present": True},
+        },
+    },
+    "primary_claims_custody_uncertain.txt": {
+        # Nov 5 gap 4 + gap 1 sentinel: declared primary, but the text
+        # reports on somebody else's release ("according to reports",
+        # "sources say") and carries no ownership evidence. The
+        # two-stage question system must ask what evidence would
+        # establish authorship — never "where is the original source?"
+        # for a doc claiming to BE it. And because the classifier made
+        # a consequential custody change with no supporting cue, the
+        # signal brief must say so (the no-cue sentinel) instead of
+        # returning an empty key_signals list.
+        "source_type": "primary",
+        "checks": {
+            "questions_contains": ["evidence would establish"],
+            "questions_absent": ["closest primary source"],
+            "flag_contains": ["contradicts"],
+            "signal_brief_min": {"key_signals": 1},
+        },
+    },
+    "primary_hf_with_rumor.txt": {
+        # NEGATIVE anchor-gate test (Arch: the hosted-artifact
+        # exemption must never bypass the complete anchor predicate):
+        # a hosted release artifact WITH anonymous/rumor sourcing
+        # language. Ownership evidence does not cure a provenance
+        # failure — this must stay out of use_as_anchor.
+        "source_type": "primary",
+        "source_url": "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base",
+        "checks": {
+            "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
+            "flag_contains": ["custody"],
+        },
+    },
 }
 
 GREEN  = "\033[32m" if sys.stdout.isatty() else ""
@@ -389,6 +443,15 @@ def check_one(result: dict, spec: dict) -> list[str]:
                 f"Actual questions: {result.get('questions_to_ask', [])}"
             )
 
+    # v1.8.1 check: at least one question contains this substring
+    # (two-stage custody-aware questions — Arch review 2026-11-05).
+    for needle in checks.get("questions_contains", []):
+        if not any(needle.lower() in q.lower() for q in result.get("questions_to_ask", [])):
+            fails.append(
+                f"questions: no question contains {needle!r}. "
+                f"Actual questions: {result.get('questions_to_ask', [])}"
+            )
+
     ev = checks.get("evidence", {})
     if "anchored_at_least" in ev and result["evidence_breakdown"]["anchored"] < ev["anchored_at_least"]:
         fails.append(
@@ -437,6 +500,16 @@ def check_one(result: dict, spec: dict) -> list[str]:
         if got != expected:
             fails.append(
                 f"evidence_shape.{field}: got {got!r}, expected {expected!r}"
+            )
+
+    # v1.8.1 check: custody_breakdown field equality (same shape as
+    # evidence_shape above).
+    cb = result.get("custody_breakdown", {})
+    for field, expected in checks.get("custody_breakdown", {}).items():
+        got = cb.get(field)
+        if got != expected:
+            fails.append(
+                f"custody_breakdown.{field}: got {got!r}, expected {expected!r}"
             )
 
     return fails
