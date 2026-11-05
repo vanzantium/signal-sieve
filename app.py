@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.8.0"
+ANALYSIS_VERSION  = "v1.8.1"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -549,6 +549,13 @@ _OPENAPI_SPEC: dict = {
                         "type": "object",
                         "description": "Structural inventory: numeric anchors, named sources, receipts.",
                     },
+                    "custody_breakdown": {
+                        "type": "object",
+                        "description": (
+                            "Layered custody: publisher/data/claim custody, "
+                            "primary_source_present, and hosted-first-party artifact evidence."
+                        ),
+                    },
                     "signal_brief": {
                         "type": "object",
                         "description": (
@@ -639,6 +646,8 @@ _OPENAPI_SPEC: dict = {
                                         "description": "Same entity in different units — not comparable, not conflicts."},
                     "version_mismatches": {"type": "array", "items": {"type": "object"},
                                         "description": "Same benchmark in different versions — not comparable, not conflicts."},
+                    "evaluation_setting_mismatches": {"type": "array", "items": {"type": "object"},
+                                        "description": "Same benchmark in different shot counts — not comparable, not conflicts."},
                     "timeline_reconciliation": {"type": "array", "items": {"type": "object"},
                                         "description": "Shared-year date/precision notes — needs clarification, not conflicts."},
                     "agreement_status": {"type": "string",
@@ -647,7 +656,12 @@ _OPENAPI_SPEC: dict = {
                     "comparable_claims": {"type": "integer",
                                         "description": "Claims that went through alignment/conflict comparison."},
                     "crude_note":      {"type": "string", "description": "WTI/Brent benchmark note if both found."},
-                    "follow_up_sources": {"type": "array", "items": {"type": "string"}},
+                    "follow_up_sources": {"type": "array", "items": {"type": "string"},
+                                        "description": "Gated on entities in the compared output; each entry is traceable via follow_up_trace."},
+                    "follow_up_trace": {"type": "array", "items": {"type": "object"},
+                                        "description": "Per suggestion, the entity keys that support it."},
+                    "dropped_market_claims": {"type": "array", "items": {"type": "object"},
+                                        "description": "Market-entity claims dropped for lack of positive market context."},
                     "triage_summary":  {"type": "string"},
                     "capsule":         {"type": "string", "description": "Compact compare capsule for AI pipelines."},
                 },
@@ -978,6 +992,14 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
                 f"  · {m['entity_label']}: versions {', '.join(m.get('versions', []))}"
             )
 
+    if cmp_result.get("evaluation_setting_mismatches"):
+        lines.append("EVALUATION SETTING MISMATCHES (not comparable, not conflicts):")
+        for m in cmp_result["evaluation_setting_mismatches"][:5]:
+            lines.append(
+                f"  · {m['entity_label']}: shot counts "
+                f"{', '.join(str(s) + '-shot' for s in m.get('shot_counts', []))}"
+            )
+
     if cmp_result.get("timeline_reconciliation"):
         lines.append("TIMELINE RECONCILIATION (needs clarification, not conflicts):")
         for t in cmp_result["timeline_reconciliation"][:5]:
@@ -1218,6 +1240,8 @@ def api_v1_analyze():
 
     if result.get("evidence_shape"):
         response["evidence_shape"] = result["evidence_shape"]
+    if result.get("custody_breakdown"):
+        response["custody_breakdown"] = result["custody_breakdown"]
     if result.get("x_post_assessment"):
         response["x_post_assessment"] = result["x_post_assessment"]
 
