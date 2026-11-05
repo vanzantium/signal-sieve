@@ -31,6 +31,8 @@ from app import (
     API_VERSION, ANALYSIS_VERSION, MAX_TEXT_CHARS, MAX_TEXT_CHARS_KEYED,
     _ACTION_ENUM, _SOURCE_TYPE_ENUM,
 )
+from signal_compare import extract_numeric_claims
+from signal_sieve import _hosted_release_artifact
 
 client = app_module.app.test_client()
 
@@ -831,6 +833,225 @@ def _():
     assert "capsule" in ar_props, "AnalyzeResponse missing capsule field in OpenAPI spec"
     assert "language" in ar_props, "AnalyzeResponse missing language field"
     assert "language_assessment" in ar_props, "AnalyzeResponse missing language assessment"
+
+
+# ── v1.8.1: shot counts, whole-word entities, hosted artifacts, custody questions, follow-up gate ─
+
+@test("POST /api/v1/compare does not mistake shot counts for scores")
+def _():
+    # Reconstruction of the Nov 5 MMLU case: the model card says
+    # "MMLU (EM) 5-shot: ERNIE 93.3" and coverage says "MMLU five-shot
+    # EM 93.3". v1.8.0 read the 5 as a competing score and reported a
+    # 90.3-spread conflict. v1.8.1 must read 93.3 as the score with
+    # shot_count=5 on both sides and align them genuinely.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "MMLU (EM) 5-shot: ERNIE 93.3, DeepSeek-V4-Flash 89.4.",
+             "source_name": "Card"},
+            {"text": "Selected results: MMLU five-shot EM 93.3 (ERNIE) vs 89.4 (DeepSeek).",
+             "source_name": "Coverage"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"shot counts must not conflict, got {d.get('conflicts')}"
+    aligned = [c for c in d.get("alignment", []) if c["entity_key"] == "mmlu"]
+    assert aligned, "expected a genuine mmlu alignment on 93.3"
+    assert aligned[0]["shot_count"] == 5, f"expected shot_count 5, got {aligned[0].get('shot_count')}"
+    assert "5-shot" in aligned[0]["evaluation_conditions"]
+    assert "ALIGNED: 1" in d["capsule"]
+
+
+@test("POST /api/v1/compare blocks comparison across different shot counts")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "MMLU (EM) 5-shot: ERNIE 93.3.", "source_name": "A"},
+            {"text": "MMLU (EM) 0-shot: ERNIE 88.1.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    mm = [m for m in d.get("evaluation_setting_mismatches", []) if m["entity_key"] == "mmlu"]
+    assert mm, "expected an mmlu evaluation-setting mismatch (5-shot vs 0-shot)"
+    assert mm[0]["shot_counts"] == [0, 5], f"expected shot_counts [0, 5], got {mm[0].get('shot_counts')}"
+    assert not [c for c in d.get("conflicts", []) if c["entity_key"] == "mmlu"], \
+        "different shot counts must not read as a conflict"
+    assert not [c for c in d.get("alignment", []) if c["entity_key"] == "mmlu"], \
+        "different shot counts must not read as an alignment"
+    assert d.get("agreement_status") == "not_established"
+    assert "EVALUATION SETTING MISMATCHES" in d["capsule"]
+
+
+@test("POST /api/v1/compare compares provisionally when shot counts are unstated")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "MMLU: 93.3.", "source_name": "A"},
+            {"text": "MMLU 93.3 in the latest run.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = [c for c in d.get("alignment", []) if c["entity_key"] == "mmlu"]
+    assert aligned, "expected an mmlu alignment on 93.3"
+    assert aligned[0]["shot_count"] is None
+    assert "provisional" in aligned[0]["evaluation_conditions"]
+    assert "not stated" in aligned[0]["evaluation_conditions"]
+    assert "provisional comparison" in d["triage_summary"]
+
+
+@test("POST /api/v1/compare does not turn Downloads into the Dow Jones")
+def _():
+    # Arch's requested negative fixture (v1.8.1, gap 3): the terms
+    # Downloads, Dow, and Dow Jones in different contexts. A model
+    # release ("Downloads are available", "Mr. Dow reviewed the
+    # release: 280 billion parameters") must never acquire a Dow Jones
+    # entity, while a genuine market sentence ("Dow Jones rose 120
+    # points as stocks rallied") still reads as one.
+    model_release = (
+        "Downloads are available in FP8 and BF16 formats. "
+        "The model has 280 billion parameters and 14 billion active per token."
+    )
+    prose_dow = (
+        "Mr. Dow reviewed the release: 280 billion parameters, 14 billion active."
+    )
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": model_release, "source_name": "Release"},
+            {"text": prose_dow, "source_name": "Prose"},
+        ]
+    })
+    d = r.get_json()
+    all_keys = (
+        [c["entity_key"] for c in d.get("shared_claims", [])] +
+        [c["entity_key"] for c in d.get("conflicts", [])] +
+        [c["entity_key"] for c in d.get("alignment", [])] +
+        [c["entity_key"] for c in d.get("unique_claims", [])]
+    )
+    assert "dow" not in all_keys, f"Downloads/prose Dow must not key as Dow Jones, got {all_keys}"
+    assert not d.get("conflicts"), "no market conflict may come out of a model release"
+    assert d.get("follow_up_sources") == [], \
+        f"no market follow-up for a model-release story, got {d.get('follow_up_sources')}"
+    assert d.get("follow_up_trace") == []
+    dropped = [x for x in d.get("dropped_market_claims", []) if x["entity_key"] == "dow"]
+    assert dropped, "the whole-word Dow in non-market prose must be recorded as dropped"
+    assert dropped[0]["raw_value"] == "280"
+
+    # The genuine market sentence still reads as the Dow Jones.
+    r2 = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": model_release, "source_name": "Release"},
+            {"text": "Dow Jones rose 120 points as stocks rallied.", "source_name": "Market"},
+        ]
+    })
+    d2 = r2.get_json()
+    unique = [c for c in d2.get("unique_claims", []) if c["entity_key"] == "dow"]
+    assert unique, "a genuine market Dow Jones mention must still extract"
+    assert unique[0]["value"] == 120.0
+    assert any("Exchange closing prices" in s for s in d2.get("follow_up_sources", [])), \
+        "a genuine market doc still earns the exchange follow-up"
+    trace = [t for t in d2.get("follow_up_trace", []) if "dow" in t["entity_keys"]]
+    assert trace, "the follow-up must carry its entity trace"
+
+
+@test("POST /api/v1/analyze recognizes a hosted release artifact as primary")
+def _():
+    # Nov 5 gap 1 via the API: Baidu's model card on Hugging Face,
+    # declared primary. Ownership (org slug + "Baidu ERNIE Team" +
+    # release metadata) must hold the type at primary with no
+    # contradiction flag and primary_source_present true.
+    text = (
+        "Baidu ERNIE Team — ERNIE-5.5-Flash-Base model card "
+        "(Hugging Face, baidu/ERNIE-5.5-Flash-Base, released 5 November 2026). "
+        "ERNIE 5.5 Flash is a sparse Mixture-of-Experts model with 280B total "
+        "parameters and 14B activated per token, pre-trained from scratch on "
+        "33.5T tokens. By releasing the weights, we let developers build on it. "
+        "License: ERNIE-5.5-Flash-Base is provided under the ERNIE 5.5 Flash "
+        "Base Model License Agreement v1.0. Copyright 2026 Baidu."
+    )
+    r = client.post("/api/v1/analyze", json={
+        "text": text,
+        "source_type": "primary",
+        "source_url": "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base",
+    })
+    d = r.get_json()
+    assert d["source_type"] == "primary", f"hosted artifact must stay primary, got {d['source_type']}"
+    assert d["source_type_confidence"] >= 0.70
+    assert not any("contradicts" in f for f in d["flags"]), f"no contradiction flag, got {d['flags']}"
+    assert d["custody_breakdown"]["primary_source_present"] is True
+    assert d["custody_breakdown"]["hosted_first_party_artifact"] is True
+    assert any("implementation dates" in q for q in d["questions_to_ask"]), \
+        f"verified primary must get the adaptive question, got {d['questions_to_ask']}"
+    assert not any("closest primary source" in q for q in d["questions_to_ask"])
+    assert not any("evidence would establish" in q for q in d["questions_to_ask"])
+
+
+@test("POST /api/v1/analyze asks a custody question for a declared primary with uncertain custody")
+def _():
+    # Nov 5 gap 4, two-stage system: declared primary, custody
+    # uncertain (contradiction, conf 0.40) — the question must be
+    # what evidence would establish authorship, never "where is the
+    # original source?" for a doc claiming to BE it.
+    r = client.post("/api/v1/analyze", json={
+        "text": "According to reports, the new model is out today. Sources say it is "
+                "fast and cheap, and everyone is talking about it. The launch happened "
+                "quietly, with no official word yet.",
+        "source_type": "primary",
+    })
+    d = r.get_json()
+    assert any("evidence would establish" in q for q in d["questions_to_ask"]), \
+        f"expected a custody question, got {d['questions_to_ask']}"
+    assert not any("closest primary source" in q for q in d["questions_to_ask"])
+    assert any("contradicts" in f for f in d["flags"])
+    assert d["signal_brief"]["key_signals"], "downgrade with no cue must carry the no-cue sentinel"
+    assert any("No supporting cue" in s for s in d["signal_brief"]["key_signals"])
+
+
+@test("Hosted-artifact evidence requires ownership, not a bare org-name match")
+def _():
+    # Arch's hierarchy (v1.8.1, gap 1): an org-name match alone is NOT
+    # sufficient. Level 1 (org named as releaser/author) AND level 2
+    # (official link) or level 3 (release metadata) must hold.
+    card = (
+        "Baidu ERNIE Team — ERNIE-5.5-Flash-Base model card "
+        "(Hugging Face, baidu/ERNIE-5.5-Flash-Base, released 5 November 2026). "
+        "By releasing the weights, we let developers build on it. "
+        "License: provided under the ERNIE 5.5 Flash Base Model License "
+        "Agreement v1.0. Copyright 2026 Baidu."
+    )
+    fires, _reason = _hosted_release_artifact(card, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base")
+    assert fires, "the Baidu card must establish hosted first-party evidence"
+    # Bare org-name match: Baidu mentioned, but never as releaser/author,
+    # and no release metadata.
+    assert not _hosted_release_artifact(
+        "I love Baidu. Their models are great. Check out this page.",
+        "https://huggingface.co/baidu/ernie")[0], "a bare org-name match must not establish ownership"
+    # Right text, wrong host: not an artifact host.
+    assert not _hosted_release_artifact(
+        card, "https://example.com/baidu/ERNIE-5.5-Flash-Base")[0], \
+        "a non-artifact host must not establish hosted ownership"
+    # No URL at all: ownership cannot be established.
+    assert not _hosted_release_artifact(card, "")[0]
+
+
+@test("extract_numeric_claims never mints a claim from a shot count or a model name")
+def _():
+    # Direct extraction checks for the v1.8.1 guards: the "5" in
+    # "5-shot", the "3" in "Hy3", the "8" in "FP8", and the "1" in
+    # "Pass@1" are conditions and name fragments, not values.
+    claims = extract_numeric_claims(
+        "MMLU (EM) 5-shot: ERNIE 93.3, DeepSeek-V4-Flash 89.4. "
+        "HumanEval+ (Pass@1) 1-shot: ERNIE 82.3. "
+        "Downloads are available in FP8 and BF16 formats."
+    )
+    by_key = {}
+    for c in claims:
+        by_key.setdefault(c["entity_key"], []).append(c)
+    assert [c["numeric_value"] for c in by_key.get("mmlu", [])] == [93.3], \
+        f"mmlu must be only the 93.3 score, got {by_key.get('mmlu')}"
+    assert by_key["mmlu"][0]["shot_count"] == 5
+    assert [c["numeric_value"] for c in by_key.get("humaneval", [])] == [82.3], \
+        f"humaneval must be only the 82.3 score, got {by_key.get('humaneval')}"
+    assert by_key["humaneval"][0]["shot_count"] == 1
+    assert "dow" not in by_key, f"Downloads/FP8 must not mint a Dow claim, got {by_key.get('dow')}"
 
 
 # ── runner ─────────────────────────────────────────────────────────────────────
