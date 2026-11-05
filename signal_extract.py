@@ -397,8 +397,17 @@ def build_custody_breakdown(
     source_type: str,
     source_url: str,
     st_confidence: float,
+    hosted_first_party: bool = False,
+    hosted_reason: str = "",
 ) -> Dict:
-    """Return layered custody breakdown."""
+    """Return layered custody breakdown.
+
+    primary_source_present is True when a primary link is present in
+    the text OR the document itself is a hosted first-party artifact
+    (v1.8.1, gap 1): a vendor's own release artifact hosted on a
+    third-party page IS the primary source material, not merely a
+    document that links to one.
+    """
     data_providers = _find_data_providers(text)
     market_venues  = _find_market_venues(text)
     named_srcs     = _unique_ordered(data_providers + market_venues)
@@ -418,8 +427,10 @@ def build_custody_breakdown(
         "data_custody":           round(data_custody, 2),
         "claim_custody":          round(claim_custody, 2),
         "source_type_confidence": round(st_confidence, 2),
-        "primary_source_present": primary_linked,
+        "primary_source_present": primary_linked or hosted_first_party,
         "primary_source_linked":  primary_linked,
+        "hosted_first_party_artifact": hosted_first_party,
+        "hosted_first_party_reason":   hosted_reason,
         "data_source_named":      bool(data_providers),
         "data_source_name":       data_providers[0] if data_providers else None,
         "named_data_providers":   data_providers,
@@ -521,9 +532,18 @@ def _split_sentences(text: str) -> List[str]:
 
 
 def _is_key_signal_generic(sent: str) -> bool:
-    """Sentence has specific numeric data and some attribution/specificity."""
+    """Sentence has specific numeric data and some attribution/specificity.
+
+    Magnitude suffixes (M/B/K/T) count as units — "280B total
+    parameters", "33.5T tokens" are numeric data (Arch review
+    2026-11-05, v1.8.1: the Nov 5 model card carried no key signals
+    at all because bare magnitudes were invisible to this pattern).
+    Bare decimals without any unit ("93.3") still do not qualify on
+    their own: a bare number with no magnitude is not specific enough
+    to be a signal.
+    """
     has_number = bool(re.search(
-        r"\$\d+|\b\d+(?:\.\d+)?(?:\s*(?:%|million|billion|thousand|bps))",
+        r"\$\d+|\b\d+(?:\.\d+)?(?:\s*(?:%|million|billion|thousand|bps|M\b|B\b|K\b|T\b))",
         sent, re.I,
     ))
     has_attr = bool(re.search(
@@ -646,7 +666,8 @@ def _extract_financial(text: str, source_type: str, source_url: str) -> Dict:
     }
 
 
-def _extract_generic(text: str, genre: str, source_type: str, source_url: str) -> Dict:
+def _extract_generic(text: str, genre: str, source_type: str, source_url: str,
+                     custody_downgraded: bool = False) -> Dict:
     sentences      = _split_sentences(text)
     data_providers = _find_data_providers(text)
     market_venues  = _find_market_venues(text)
@@ -672,6 +693,19 @@ def _extract_generic(text: str, genre: str, source_type: str, source_url: str) -
             key_signals.append(_compress(sent))
         elif _INTERP_CUES.search(sent):
             interpretation.append(_compress(sent))
+
+    if not key_signals and custody_downgraded:
+        # Arch review 2026-11-05 (v1.8.1): a source-type downgrade
+        # without an explanation is an auditability defect. An empty
+        # key_signals list must not be accepted when the classifier
+        # made a consequential change to source custody — if no
+        # supporting cue exists, the system says so rather than
+        # manufacturing certainty.
+        key_signals.append(
+            "No supporting cue identified: the extractor found no "
+            "key-signal sentence in this document, so the custody "
+            "change is not backed by a named cue."
+        )
 
     dnpf: List[str] = []
     if source_type in ("secondary", "news_article", "tertiary", "secondary_market_article"):
@@ -990,8 +1024,15 @@ def extract_signal_brief(
     genre: str,
     source_type: str,
     source_url: str = "",
+    custody_downgraded: bool = False,
 ) -> Dict:
-    """Return structured signal brief. Dispatches to genre-specific extractor."""
+    """Return structured signal brief. Dispatches to genre-specific extractor.
+
+    custody_downgraded marks a consequential custody change (a declared
+    high-trust type not kept at full confidence, or a genre mismatch);
+    the generic extractor must not accept an empty key_signals list in
+    that case (Arch review 2026-11-05, v1.8.1).
+    """
     if genre == "financial_market_snapshot":
         return _extract_financial(text, source_type, source_url)
     if genre == "global_macro_market_update":
@@ -1000,4 +1041,5 @@ def extract_signal_brief(
         return _extract_strategy_commentary(text, source_type, source_url)
     if genre == "x_news_post":
         return _extract_x_news_post(text, source_type, source_url)
-    return _extract_generic(text, genre, source_type, source_url)
+    return _extract_generic(text, genre, source_type, source_url,
+                            custody_downgraded=custody_downgraded)
