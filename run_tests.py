@@ -472,6 +472,165 @@ EXPECTATIONS = {
             "flag_contains": ["custody"],
         },
     },
+    # ── v1.8.4 fixtures (Arch review 2026-11-06, adjacent window) ───────
+    "primary_doi_quote_others.txt": {
+        # A blog summary quoting SOMEBODY ELSE'S DOI. Before v1.8.4 the
+        # quoted DOI was first-party evidence in itself: the inference
+        # ("doi" in text) plus the gate (DOI regex) reported this as a
+        # primary source and it ANCHORED (use_as_anchor). A DOI proves
+        # the cited work exists; it does not prove this document
+        # authored it. The gate now drops the inference to secondary
+        # (the v1.8.4 auto-downgrade: the gate must change the effective
+        # type the verdict reads, not just the internal inferred value)
+        # and asks for the closest primary source.
+        "source_type": "auto",
+        "checks": {
+            "source_type_in": ["secondary"],
+            "action_in": ["treat_as_lead", "seek_receipts", "drop", "reject"],
+            "flag_contains": ["Source custody uncertain"],
+            "questions_contains": ["closest primary source"],
+            "questions_absent": ["implementation dates"],
+        },
+    },
+    "primary_doi_quote_alone.txt": {
+        # The bare minimum: a document whose only research signal is a
+        # DOI citation. Same treatment as the fuller quote above — a
+        # citation is not authorship.
+        "source_type": "auto",
+        "checks": {
+            "source_type_in": ["secondary"],
+            "action_in": ["treat_as_lead", "seek_receipts", "drop", "reject"],
+            "flag_contains": ["Source custody uncertain"],
+            "questions_contains": ["closest primary source"],
+        },
+    },
+    "primary_hf_fake_with_doi.txt": {
+        # The self-certifying fake, plus one quoted DOI sentence. Before
+        # v1.8.4 the DOI counted as independent first-party evidence and
+        # LIFTED the hosted-ownership cap: the fake anchored at 0.90.
+        # The cap now lifts only on verified ownership (Q2b, currently
+        # unreachable), so the fake stays a capped candidate exactly as
+        # the unchanged fake does.
+        "source_type": "primary",
+        "source_url": "https://huggingface.co/randomuser/nova-7-base",
+        "checks": {
+            "source_type_in": ["primary"],
+            "source_type_confidence_max": 0.60,
+            "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
+            "flag_contains": ["uncertain ownership"],
+            "questions_contains": ["evidence would establish"],
+            "signal_brief_min": {"key_signals": 1},
+            "custody_breakdown": {
+                "primary_source_present": False,
+                "hosted_artifact_candidate": True,
+                "hosted_namespace_matched": False,
+                "hosted_ownership_status": "candidate_uncertain",
+                "hosted_first_party_artifact": False,
+                "source_url_provenance": "caller_supplied",
+            },
+        },
+    },
+    "primary_hf_fake_with_announcement.txt": {
+        # The self-certifying fake, plus first-person announcement
+        # language ("Today we are releasing..."). Before v1.8.4 the
+        # announcement voice counted as independent first-party
+        # evidence and LIFTED the hosted-ownership cap: the fake
+        # anchored at 0.90. Announcement voice is document-internal
+        # suggestion — the same self-certification the hosted repair
+        # distrusts — so the cap no longer lifts on it. The fake stays
+        # a capped candidate exactly as the unchanged fake does.
+        "source_type": "primary",
+        "source_url": "https://huggingface.co/randomuser/nova-7-base",
+        "checks": {
+            "source_type_in": ["primary"],
+            "source_type_confidence_max": 0.60,
+            "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
+            "flag_contains": ["uncertain ownership"],
+            "questions_contains": ["evidence would establish"],
+            "signal_brief_min": {"key_signals": 1},
+            "custody_breakdown": {
+                "primary_source_present": False,
+                "hosted_artifact_candidate": True,
+                "hosted_namespace_matched": False,
+                "hosted_ownership_status": "candidate_uncertain",
+                "hosted_first_party_artifact": False,
+                "source_url_provenance": "caller_supplied",
+            },
+        },
+    },
+    "primary_misleading_academic_host.txt": {
+        # A plain article hosted on stanford.edu.attacker.com. Before
+        # v1.8.4 the academic-host check was a substring match, so this
+        # host counted as Stanford: first-party evidence True, effective
+        # primary at 0.75. The host is not Stanford — it is an attacker
+        # domain that contains the string. Strict exact-or-subdomain
+        # matching leaves it unknown.
+        "source_type": "auto",
+        "source_url": "https://stanford.edu.attacker.com/paper.pdf",
+        "checks": {
+            "source_type_in": ["unknown"],
+            "action_in": ["treat_as_lead", "seek_receipts"],
+        },
+    },
+    "primary_misleading_academic_host_arxiv.txt": {
+        # Same shape, arxiv.org.evil.com: "arxiv.org" as a substring of
+        # an untrusted host is not arXiv.
+        "source_type": "auto",
+        "source_url": "https://arxiv.org.evil.com/paper/1234",
+        "checks": {
+            "source_type_in": ["unknown"],
+            "action_in": ["treat_as_lead", "seek_receipts"],
+        },
+    },
+    "primary_academic_host_genuine.txt": {
+        # Positive control for the strict host rule: the same plain
+        # article on www.stanford.edu. The host genuinely matches, so
+        # first-party evidence still fires (no custody-uncertain flag)
+        # — the strict rule keeps real academic hosts working. The
+        # effective type is secondary here only because the genre
+        # override reports a news-article genre as secondary; the
+        # evidence firing is what this fixture pins.
+        "source_type": "auto",
+        "source_url": "https://www.stanford.edu/news/benchmark",
+        "checks": {
+            "source_type_in": ["secondary"],
+            "flag_absent": ["Source custody uncertain"],
+            "action_in": ["treat_as_lead", "seek_receipts"],
+        },
+    },
+    "primary_edgar_mention.txt": {
+        # A document merely MENTIONING an EDGAR filing. Before v1.8.4
+        # the word "edgar" in the text was first-party evidence in
+        # itself (same family as the DOI): the inference ("edgar" /
+        # "methodology" / "sample size") plus the gate reported it
+        # primary at 0.75. Mentioning a source is reporting on it, not
+        # being it. The gate now drops it to secondary.
+        "source_type": "auto",
+        "checks": {
+            "source_type_in": ["secondary"],
+            "action_in": ["treat_as_lead", "seek_receipts", "drop", "reject"],
+            "flag_contains": ["Source custody uncertain"],
+            "questions_contains": ["closest primary source"],
+        },
+    },
+    "primary_research_voice_no_doi.txt": {
+        # The pinned trial abstract with its DOI stripped. The DOI is
+        # gone, but the gate still passes — on first-person research
+        # conduct ("We conducted a randomized controlled trial..."),
+        # which is what replaces the DOI as the gate's research
+        # evidence. The TYPE stays primary and no custody-uncertain
+        # flag fires: removing the DOI from the gate did not remove the
+        # abstract's standing. The ACTION stays treat_as_lead because
+        # the language guardrail wants the DOI as an evidence marker —
+        # that is the language layer's own judgment, not a custody
+        # verdict, and it is documented, not overridden.
+        "source_type": "auto",
+        "checks": {
+            "source_type_in": ["primary"],
+            "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
+            "flag_absent": ["Source custody uncertain"],
+        },
+    },
 }
 
 GREEN  = "\033[32m" if sys.stdout.isatty() else ""
