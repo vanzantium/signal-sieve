@@ -33,6 +33,7 @@ from app import (
 )
 from signal_compare import extract_numeric_claims
 from signal_sieve import _hosted_release_artifact
+from signal_sieve import _hosted_artifact_candidate, _hosted_ownership_verified
 
 client = app_module.app.test_client()
 
@@ -978,6 +979,11 @@ def _():
     assert not any("contradicts" in f for f in d["flags"]), f"no contradiction flag, got {d['flags']}"
     assert d["custody_breakdown"]["primary_source_present"] is True
     assert d["custody_breakdown"]["hosted_first_party_artifact"] is True
+    # v1.8.2: the Baidu card must STILL verify — namespace match is the
+    # independent signal — with the new breakdown fields to prove it.
+    assert d["custody_breakdown"]["hosted_artifact_candidate"] is True
+    assert d["custody_breakdown"]["hosted_ownership_status"] == "verified"
+    assert not any("uncertain ownership" in f for f in d["flags"]), f"no ownership flag for Baidu, got {d['flags']}"
     assert any("implementation dates" in q for q in d["questions_to_ask"]), \
         f"verified primary must get the adaptive question, got {d['questions_to_ask']}"
     assert not any("closest primary source" in q for q in d["questions_to_ask"])
@@ -1030,6 +1036,93 @@ def _():
         "a non-artifact host must not establish hosted ownership"
     # No URL at all: ownership cannot be established.
     assert not _hosted_release_artifact(card, "")[0]
+
+
+@test("Hosted-artifact candidate and ownership are separate questions (v1.8.2)")
+def _():
+    # Arch objection 2026-11-05: a document must not certify itself
+    # merely by looking sufficiently official. Q1 (behaves like a
+    # first-party release artifact) and Q2 (ownership independently
+    # established by hosting context) are separate functions, and the
+    # verified-only wrapper fires only when both hold.
+    baidu = (
+        "Baidu ERNIE Team — ERNIE-5.5-Flash-Base model card "
+        "(Hugging Face, baidu/ERNIE-5.5-Flash-Base, released 5 November 2026). "
+        "By releasing the weights, we let developers build on it. "
+        "License: provided under the ERNIE 5.5 Flash Base Model License "
+        "Agreement v1.0. Copyright 2026 Baidu."
+    )
+    fake = (
+        "Acme Nova Team — Nova-7-Base model card "
+        "(Hugging Face, randomuser/nova-7-base, released 5 November 2026). "
+        "By releasing the weights, we let developers build on it. "
+        "License: provided under the Acme Nova Model License Agreement v1.0. "
+        "Copyright 2026 Acme. For more information, visit https://www.acme.com/nova-7-base"
+    )
+    # Baidu: candidate AND verified (huggingface.co/baidu namespace).
+    cand, org, _r = _hosted_artifact_candidate(baidu, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base")
+    assert cand and org == "baidu", f"Baidu card must be a candidate claiming baidu, got {cand}, {org!r}"
+    ver, _r = _hosted_ownership_verified(baidu, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base", org)
+    assert ver, "Baidu namespace match must verify ownership"
+    assert _hosted_release_artifact(baidu, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base")[0]
+    # Fake: candidate fires (it behaves like a release artifact) but
+    # ownership does NOT (namespace 'randomuser' != claimed 'acme'),
+    # so the verified-only wrapper must stay silent.
+    cand, org, _r = _hosted_artifact_candidate(fake, "https://huggingface.co/randomuser/nova-7-base")
+    assert cand and org == "acme", f"fake must be a candidate claiming acme, got {cand}, {org!r}"
+    ver, _r = _hosted_ownership_verified(fake, "https://huggingface.co/randomuser/nova-7-base", org)
+    assert not ver, "an unrelated namespace must not verify ownership"
+    assert not _hosted_release_artifact(fake, "https://huggingface.co/randomuser/nova-7-base")[0], \
+        "a self-certifying fake must not establish hosted first-party evidence"
+    # Same fake, matching namespace: ownership verifies (the namespace
+    # is the independent signal, and it now points at the claimant).
+    assert _hosted_ownership_verified(fake, "https://huggingface.co/acme/nova-7-base", "acme")[0]
+    assert _hosted_release_artifact(fake, "https://huggingface.co/acme/nova-7-base")[0]
+    # Same fake, hosted on the org's own domain: ownership verifies
+    # via own-domain hosting.
+    assert _hosted_ownership_verified(fake, "https://acme.com/nova-7-base", "acme")[0]
+    # Bare org-name match: not even a candidate.
+    cand, _org, _r = _hosted_artifact_candidate(
+        "I love Baidu. Their models are great. Check out this page.",
+        "https://huggingface.co/baidu/ernie")
+    assert not cand, "a bare org-name match must not be a candidate"
+
+
+@test("POST /api/v1/analyze keeps a self-certifying fake as candidate primary with uncertain ownership")
+def _():
+    # Arch objection 2026-11-05, end to end: the Acme fake claims
+    # ownership with plausible metadata and a self-referential link,
+    # hosted under an unrelated namespace. It must stay a candidate
+    # primary with uncertain ownership — confidence capped below the
+    # 0.70 verified-primary bar, never an anchor, flagged by name,
+    # and the custody question asks what evidence would establish
+    # authorship.
+    text = (
+        "Acme Nova Team — Nova-7-Base model card "
+        "(Hugging Face, randomuser/nova-7-base, released 5 November 2026). "
+        "Nova-7-Base is a sparse Mixture-of-Experts model with 120B total "
+        "parameters and 8B activated per token, pre-trained from scratch on "
+        "18T tokens. By releasing the weights, we let developers build on it. "
+        "License: provided under the Acme Nova Model License Agreement v1.0. "
+        "Copyright 2026 Acme. For more information, visit https://www.acme.com/nova-7-base"
+    )
+    r = client.post("/api/v1/analyze", json={
+        "text": text,
+        "source_type": "primary",
+        "source_url": "https://huggingface.co/randomuser/nova-7-base",
+    })
+    d = r.get_json()
+    assert d["source_type"] == "primary", f"candidate primary must stay primary, got {d['source_type']}"
+    assert d["source_type_confidence"] <= 0.60, \
+        f"uncertain ownership must cap confidence at 0.60, got {d['source_type_confidence']}"
+    assert d["recommended_action"] != "use_as_anchor", "uncertain ownership must never anchor"
+    assert any("uncertain ownership" in f for f in d["flags"]), f"ownership flag missing, got {d['flags']}"
+    assert d["custody_breakdown"]["primary_source_present"] is False
+    assert d["custody_breakdown"]["hosted_artifact_candidate"] is True
+    assert d["custody_breakdown"]["hosted_ownership_status"] == "candidate_uncertain"
+    assert d["custody_breakdown"]["hosted_first_party_artifact"] is False
+    assert any("evidence would establish" in q for q in d["questions_to_ask"]), \
+        f"expected a custody question, got {d['questions_to_ask']}"
 
 
 @test("extract_numeric_claims never mints a claim from a shot count or a model name")
