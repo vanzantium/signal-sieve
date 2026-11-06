@@ -400,8 +400,10 @@ def build_custody_breakdown(
     hosted_first_party: bool = False,
     hosted_reason: str = "",
     hosted_candidate: bool = False,
+    hosted_namespace_matched: bool = False,
     hosted_ownership_status: str = "none",
     hosted_ownership_reason: str = "",
+    source_url_provenance: str = "none",
 ) -> Dict:
     """Return layered custody breakdown.
 
@@ -419,6 +421,18 @@ def build_custody_breakdown(
     hosting context. A candidate whose ownership is not established is
     NEVER primary_source_present: it is a candidate primary with
     uncertain ownership, not a verified primary.
+
+    v1.8.3 (Arch notes 2026-11-06): namespace matching is recorded
+    as its own fact (`hosted_namespace_matched`), independent of
+    ownership. A namespace match is stronger than a bare claim but
+    is NOT ownership verification: no trusted verification mechanism
+    exists in this system (no verified-org registry; source URLs are
+    caller-supplied with no authenticated retrieval record), so
+    `hosted_ownership_status` is "verified" only through a future
+    trusted channel. `source_url_provenance` records where the URL
+    came from — "caller_supplied" whenever one was given, "none"
+    otherwise — so a namespace match on a caller-supplied URL can
+    never silently pose as authenticated retrieval evidence.
     """
     data_providers = _find_data_providers(text)
     market_venues  = _find_market_venues(text)
@@ -444,8 +458,10 @@ def build_custody_breakdown(
         "hosted_first_party_artifact": hosted_first_party,
         "hosted_first_party_reason":   hosted_reason,
         "hosted_artifact_candidate":   hosted_candidate,
+        "hosted_namespace_matched":   hosted_namespace_matched,
         "hosted_ownership_status":     hosted_ownership_status,
         "hosted_ownership_reason":     hosted_ownership_reason,
+        "source_url_provenance":       source_url_provenance,
         "data_source_named":      bool(data_providers),
         "data_source_name":       data_providers[0] if data_providers else None,
         "named_data_providers":   data_providers,
