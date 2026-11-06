@@ -1,0 +1,5 @@
+Acme Nova Team — Nova-7-Base model card (Hugging Face, acme-official/nova-7-base, released 5 November 2026)
+
+Nova-7-Base is a sparse Mixture-of-Experts model with 120B total parameters and 8B activated per token, pre-trained from scratch on 18T tokens. By releasing the weights, we let developers build on the model's general capabilities and choose for themselves where to take it next.
+
+License: Nova-7-Base is provided under the Acme Nova Model License Agreement v1.0. Copyright 2026 Acme. All Rights Reserved.
