@@ -34,6 +34,7 @@ from app import (
 from signal_compare import extract_numeric_claims
 from signal_sieve import _hosted_release_artifact
 from signal_sieve import _hosted_artifact_candidate, _hosted_ownership_verified
+from signal_sieve import _hosted_namespace_matched
 
 client = app_module.app.test_client()
 
@@ -953,12 +954,20 @@ def _():
     assert trace, "the follow-up must carry its entity trace"
 
 
-@test("POST /api/v1/analyze recognizes a hosted release artifact as primary")
+@test("POST /api/v1/analyze keeps a namespace-matched model card as candidate primary with uncertain ownership (v1.8.3)")
 def _():
-    # Nov 5 gap 1 via the API: Baidu's model card on Hugging Face,
-    # declared primary. Ownership (org slug + "Baidu ERNIE Team" +
-    # release metadata) must hold the type at primary with no
-    # contradiction flag and primary_source_present true.
+    # Nov 5 gap 1 via the API, re-decided by Arch's notes 2026-11-06
+    # (v1.8.3): Baidu's model card on Hugging Face, declared primary.
+    # The huggingface.co/baidu namespace MATCHES the claimed
+    # publisher — that fact is recorded — but a namespace match is
+    # NOT independently verified organizational ownership, and no
+    # trusted verification mechanism exists yet (no verified-org
+    # registry; source URLs are caller-supplied). So the card is a
+    # candidate primary with uncertain ownership: confidence capped at
+    # 0.60, primary_source_present false, the uncertain-ownership
+    # flag present, and the custody question asked — never the
+    # adaptive verified-primary question. Effective type stays
+    # "primary" (declared); it is a lead, not an anchor.
     text = (
         "Baidu ERNIE Team — ERNIE-5.5-Flash-Base model card "
         "(Hugging Face, baidu/ERNIE-5.5-Flash-Base, released 5 November 2026). "
@@ -974,20 +983,24 @@ def _():
         "source_url": "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base",
     })
     d = r.get_json()
-    assert d["source_type"] == "primary", f"hosted artifact must stay primary, got {d['source_type']}"
-    assert d["source_type_confidence"] >= 0.70
-    assert not any("contradicts" in f for f in d["flags"]), f"no contradiction flag, got {d['flags']}"
-    assert d["custody_breakdown"]["primary_source_present"] is True
-    assert d["custody_breakdown"]["hosted_first_party_artifact"] is True
-    # v1.8.2: the Baidu card must STILL verify — namespace match is the
-    # independent signal — with the new breakdown fields to prove it.
+    assert d["source_type"] == "primary", f"candidate primary must stay primary, got {d['source_type']}"
+    assert d["source_type_confidence"] <= 0.60, \
+        f"uncertain ownership must cap confidence at 0.60, got {d['source_type_confidence']}"
+    assert d["recommended_action"] != "use_as_anchor", "uncertain ownership must never anchor"
+    assert d["custody_breakdown"]["primary_source_present"] is False
+    assert d["custody_breakdown"]["hosted_first_party_artifact"] is False
+    # v1.8.3: the namespace fact is recorded independently of ownership.
     assert d["custody_breakdown"]["hosted_artifact_candidate"] is True
-    assert d["custody_breakdown"]["hosted_ownership_status"] == "verified"
-    assert not any("uncertain ownership" in f for f in d["flags"]), f"no ownership flag for Baidu, got {d['flags']}"
-    assert any("implementation dates" in q for q in d["questions_to_ask"]), \
-        f"verified primary must get the adaptive question, got {d['questions_to_ask']}"
+    assert d["custody_breakdown"]["hosted_namespace_matched"] is True
+    assert d["custody_breakdown"]["hosted_ownership_status"] == "candidate_uncertain"
+    assert d["custody_breakdown"]["source_url_provenance"] == "caller_supplied"
+    assert any("uncertain ownership" in f for f in d["flags"]), f"ownership flag missing, got {d['flags']}"
+    assert any("namespace matched" in f for f in d["flags"]), \
+        f"flag must name the namespace match, got {d['flags']}"
+    assert any("evidence would establish" in q for q in d["questions_to_ask"]), \
+        f"expected a custody question, got {d['questions_to_ask']}"
+    assert not any("implementation dates" in q for q in d["questions_to_ask"])
     assert not any("closest primary source" in q for q in d["questions_to_ask"])
-    assert not any("evidence would establish" in q for q in d["questions_to_ask"])
 
 
 @test("POST /api/v1/analyze asks a custody question for a declared primary with uncertain custody")
@@ -1011,11 +1024,18 @@ def _():
     assert any("No supporting cue" in s for s in d["signal_brief"]["key_signals"])
 
 
-@test("Hosted-artifact evidence requires ownership, not a bare org-name match")
+@test("Hosted-artifact evidence requires trusted ownership, not a namespace match (v1.8.3)")
 def _():
-    # Arch's hierarchy (v1.8.1, gap 1): an org-name match alone is NOT
-    # sufficient. Level 1 (org named as releaser/author) AND level 2
-    # (official link) or level 3 (release metadata) must hold.
+    # Arch's hierarchy (v1.8.1, gap 1) as tightened by her notes
+    # 2026-11-06 (v1.8.3): an org-name match alone is NOT sufficient,
+    # and neither is a namespace match. Level 1 (org named as
+    # releaser/author) AND level 2 (official link) or level 3 (release
+    # metadata) make a candidate — but only TRUSTED ownership evidence
+    # verifies it, and no trusted mechanism exists in this system yet
+    # (no verified-org registry; source URLs are caller-supplied).
+    # So even the Baidu card — namespace matched — does NOT establish
+    # hosted first-party evidence today. The wrapper exists for the
+    # day a trusted channel lands.
     card = (
         "Baidu ERNIE Team — ERNIE-5.5-Flash-Base model card "
         "(Hugging Face, baidu/ERNIE-5.5-Flash-Base, released 5 November 2026). "
@@ -1024,7 +1044,9 @@ def _():
         "Agreement v1.0. Copyright 2026 Baidu."
     )
     fires, _reason = _hosted_release_artifact(card, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base")
-    assert fires, "the Baidu card must establish hosted first-party evidence"
+    assert not fires, "a namespace match alone must not establish hosted first-party evidence (v1.8.3)"
+    # The namespace fact itself is still recorded independently.
+    assert _hosted_namespace_matched(card, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base", "baidu")[0]
     # Bare org-name match: Baidu mentioned, but never as releaser/author,
     # and no release metadata.
     assert not _hosted_release_artifact(
@@ -1038,13 +1060,17 @@ def _():
     assert not _hosted_release_artifact(card, "")[0]
 
 
-@test("Hosted-artifact candidate and ownership are separate questions (v1.8.2)")
+@test("Hosted-artifact candidate, namespace match, and ownership are three separate questions (v1.8.3)")
 def _():
-    # Arch objection 2026-11-05: a document must not certify itself
-    # merely by looking sufficiently official. Q1 (behaves like a
-    # first-party release artifact) and Q2 (ownership independently
-    # established by hosting context) are separate functions, and the
-    # verified-only wrapper fires only when both hold.
+    # Arch objection 2026-11-05 + Arch notes 2026-11-06: a document
+    # must not certify itself merely by looking sufficiently official,
+    # and a namespace match is not proof of verified organizational
+    # control. Q1 (behaves like a first-party release artifact), Q2a
+    # (the hosting location matches the claimed identity) and Q2b
+    # (ownership independently established by trusted evidence) are
+    # separate functions. The verified-only wrapper fires only when
+    # Q1 and Q2b hold — and Q2b is currently unreachable, because no
+    # trusted verification mechanism exists in this system.
     baidu = (
         "Baidu ERNIE Team — ERNIE-5.5-Flash-Base model card "
         "(Hugging Face, baidu/ERNIE-5.5-Flash-Base, released 5 November 2026). "
@@ -1059,28 +1085,37 @@ def _():
         "License: provided under the Acme Nova Model License Agreement v1.0. "
         "Copyright 2026 Acme. For more information, visit https://www.acme.com/nova-7-base"
     )
-    # Baidu: candidate AND verified (huggingface.co/baidu namespace).
+    # Baidu: candidate AND namespace matched (huggingface.co/baidu) —
+    # but ownership NOT verified: a namespace match is not trusted
+    # evidence, and no trusted mechanism exists.
     cand, org, _r = _hosted_artifact_candidate(baidu, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base")
     assert cand and org == "baidu", f"Baidu card must be a candidate claiming baidu, got {cand}, {org!r}"
+    ns, _r = _hosted_namespace_matched(baidu, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base", org)
+    assert ns, "Baidu namespace must match"
     ver, _r = _hosted_ownership_verified(baidu, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base", org)
-    assert ver, "Baidu namespace match must verify ownership"
-    assert _hosted_release_artifact(baidu, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base")[0]
+    assert not ver, "a namespace match alone must not verify ownership (v1.8.3)"
+    assert not _hosted_release_artifact(baidu, "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base")[0]
     # Fake: candidate fires (it behaves like a release artifact) but
-    # ownership does NOT (namespace 'randomuser' != claimed 'acme'),
+    # the namespace does NOT match ('randomuser' != claimed 'acme'),
     # so the verified-only wrapper must stay silent.
     cand, org, _r = _hosted_artifact_candidate(fake, "https://huggingface.co/randomuser/nova-7-base")
     assert cand and org == "acme", f"fake must be a candidate claiming acme, got {cand}, {org!r}"
+    ns, _r = _hosted_namespace_matched(fake, "https://huggingface.co/randomuser/nova-7-base", org)
+    assert not ns, "an unrelated namespace must not match"
     ver, _r = _hosted_ownership_verified(fake, "https://huggingface.co/randomuser/nova-7-base", org)
     assert not ver, "an unrelated namespace must not verify ownership"
     assert not _hosted_release_artifact(fake, "https://huggingface.co/randomuser/nova-7-base")[0], \
         "a self-certifying fake must not establish hosted first-party evidence"
-    # Same fake, matching namespace: ownership verifies (the namespace
-    # is the independent signal, and it now points at the claimant).
-    assert _hosted_ownership_verified(fake, "https://huggingface.co/acme/nova-7-base", "acme")[0]
-    assert _hosted_release_artifact(fake, "https://huggingface.co/acme/nova-7-base")[0]
-    # Same fake, hosted on the org's own domain: ownership verifies
-    # via own-domain hosting.
-    assert _hosted_ownership_verified(fake, "https://acme.com/nova-7-base", "acme")[0]
+    # Same fake, matching namespace: the namespace matches — and
+    # ownership STILL does not verify (v1.8.3: the match is recorded,
+    # not promoted). The wrapper stays silent.
+    assert _hosted_namespace_matched(fake, "https://huggingface.co/acme/nova-7-base", "acme")[0]
+    assert not _hosted_ownership_verified(fake, "https://huggingface.co/acme/nova-7-base", "acme")[0]
+    assert not _hosted_release_artifact(fake, "https://huggingface.co/acme/nova-7-base")[0]
+    # Same fake, hosted on the org's own domain: the namespace matches
+    # via own-domain hosting — and ownership STILL does not verify.
+    assert _hosted_namespace_matched(fake, "https://acme.com/nova-7-base", "acme")[0]
+    assert not _hosted_ownership_verified(fake, "https://acme.com/nova-7-base", "acme")[0]
     # Bare org-name match: not even a candidate.
     cand, _org, _r = _hosted_artifact_candidate(
         "I love Baidu. Their models are great. Check out this page.",
@@ -1119,10 +1154,98 @@ def _():
     assert any("uncertain ownership" in f for f in d["flags"]), f"ownership flag missing, got {d['flags']}"
     assert d["custody_breakdown"]["primary_source_present"] is False
     assert d["custody_breakdown"]["hosted_artifact_candidate"] is True
+    assert d["custody_breakdown"]["hosted_namespace_matched"] is False
     assert d["custody_breakdown"]["hosted_ownership_status"] == "candidate_uncertain"
     assert d["custody_breakdown"]["hosted_first_party_artifact"] is False
+    assert d["custody_breakdown"]["source_url_provenance"] == "caller_supplied"
     assert any("evidence would establish" in q for q in d["questions_to_ask"]), \
         f"expected a custody question, got {d['questions_to_ask']}"
+
+
+@test("Namespace impersonation must not match: a lookalike slug is not the org (v1.8.3)")
+def _():
+    # Arch notes 2026-11-06: someone might register a plausible
+    # organization name without being authorized to represent that
+    # organization. A slug that merely contains the org name — or
+    # appends a plausible suffix — is not the org's namespace.
+    # Q1 still fires (the doc behaves like a release artifact), but
+    # the namespace must NOT match and ownership stays uncertain.
+    fake = (
+        "Acme Nova Team — Nova-7-Base model card "
+        "(Hugging Face, acme-official/nova-7-base, released 5 November 2026). "
+        "By releasing the weights, we let developers build on it. "
+        "License: provided under the Acme Nova Model License Agreement v1.0. "
+        "Copyright 2026 Acme. For more information, visit https://www.acme.com/nova-7-base"
+    )
+    cand, org, _r = _hosted_artifact_candidate(fake, "https://huggingface.co/acme-official/nova-7-base")
+    assert cand and org == "acme", f"impersonator must still be a candidate claiming acme, got {cand}, {org!r}"
+    assert not _hosted_namespace_matched(fake, "https://huggingface.co/acme-official/nova-7-base", "acme")[0], \
+        "a lookalike slug ('acme-official') must not match the org namespace"
+    assert not _hosted_namespace_matched(fake, "https://huggingface.co/xacme/nova-7-base", "acme")[0], \
+        "a slug merely containing the org name ('xacme') must not match"
+    assert not _hosted_namespace_matched(fake, "https://huggingface.co/acme2/nova-7-base", "acme")[0], \
+        "a slug with a trailing digit ('acme2') must not match"
+    assert not _hosted_ownership_verified(fake, "https://huggingface.co/acme-official/nova-7-base", "acme")[0]
+    assert not _hosted_release_artifact(fake, "https://huggingface.co/acme-official/nova-7-base")[0]
+    # End to end: the impersonator is a capped candidate, never an anchor.
+    r = client.post("/api/v1/analyze", json={
+        "text": fake,
+        "source_type": "primary",
+        "source_url": "https://huggingface.co/acme-official/nova-7-base",
+    })
+    d = r.get_json()
+    assert d["source_type_confidence"] <= 0.60
+    assert d["recommended_action"] != "use_as_anchor"
+    assert d["custody_breakdown"]["hosted_namespace_matched"] is False
+    assert d["custody_breakdown"]["hosted_ownership_status"] == "candidate_uncertain"
+    assert any("uncertain ownership" in f for f in d["flags"])
+
+
+@test("Misleading hostnames must not match the namespace or verify ownership (v1.8.3)")
+def _():
+    # Arch notes 2026-11-06: an organization-name match inside an
+    # arbitrary hostname is not sufficient to establish ownership of
+    # that hostname. The host must BE an artifact host (exact or a
+    # subdomain of it) or the org's own registrable domain — a
+    # hostname that merely mentions the org, or the artifact host,
+    # anywhere in it is not a match.
+    fake = (
+        "Acme Nova Team — Nova-7-Base model card "
+        "(Hugging Face, acme/nova-7-base, released 5 November 2026). "
+        "By releasing the weights, we let developers build on it. "
+        "License: provided under the Acme Nova Model License Agreement v1.0. "
+        "Copyright 2026 Acme."
+    )
+    # Artifact-host lookalikes: the host is not huggingface.co.
+    assert not _hosted_namespace_matched(fake, "https://huggingface.co.attacker.com/acme/nova-7-base", "acme")[0], \
+        "huggingface.co.attacker.com is not an artifact host"
+    assert not _hosted_namespace_matched(fake, "https://huggingface.co.evil.com/acme/nova-7-base", "acme")[0], \
+        "huggingface.co.evil.com is not an artifact host"
+    assert not _hosted_namespace_matched(fake, "https://acme.huggingface.co.evil/nova-7-base", "acme")[0], \
+        "an org-name label inside an arbitrary hostname is not the org's domain"
+    assert not _hosted_namespace_matched(fake, "https://evil.com/acme/nova-7-base", "acme")[0], \
+        "an arbitrary host with the org as a path segment is not a namespace match"
+    assert not _hosted_namespace_matched(fake, "https://notacme.com/nova-7-base", "acme")[0], \
+        "a domain merely containing the org name is not the org's domain"
+    # None of these verifies ownership either.
+    for url in (
+        "https://huggingface.co.attacker.com/acme/nova-7-base",
+        "https://huggingface.co.evil.com/acme/nova-7-base",
+        "https://acme.huggingface.co.evil/nova-7-base",
+        "https://evil.com/acme/nova-7-base",
+    ):
+        assert not _hosted_ownership_verified(fake, url, "acme")[0]
+        assert not _hosted_release_artifact(fake, url)[0]
+    # Positive controls for the tightened own-domain rule: the org slug
+    # must be the registrable-domain label (before the TLD, or before
+    # a known second-level public suffix).
+    assert _hosted_namespace_matched(fake, "https://acme.com/nova-7-base", "acme")[0]
+    assert _hosted_namespace_matched(fake, "https://www.acme.com/nova-7-base", "acme")[0]
+    assert _hosted_namespace_matched(fake, "https://research.acme.com/nova-7-base", "acme")[0]
+    assert _hosted_namespace_matched(fake, "https://acme.co.uk/nova-7-base", "acme")[0]
+    # ...and the own-domain match is still only a namespace fact, never
+    # ownership verification.
+    assert not _hosted_ownership_verified(fake, "https://acme.com/nova-7-base", "acme")[0]
 
 
 @test("extract_numeric_claims never mints a claim from a shot count or a model name")
