@@ -956,6 +956,193 @@ def _():
     assert trace, "the follow-up must carry its entity trace"
 
 
+# ── v1.8.5: Nov 6 comparator failures — variant identity, following-benchmark
+# guard, setting numbers, pricing tiers, found_in_docs dedup ─────────────
+
+@test("POST /api/v1/compare does not lump benchmark variants into one conflict (v1.8.5)")
+def _():
+    # Nov 6 gap 1, core: SWE-bench Pro 86.3% and SWE-bench Verified
+    # 82.2% are different benchmarks sharing a family name. They must
+    # land in a variant mismatch, never a conflict — while the Pro
+    # scores still align across docs.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "SWE-bench Pro v2: 86.3%. SWE-bench Verified: 82.2%.", "source_name": "A"},
+            {"text": "The model scored 86.3% on SWE-bench Pro v2 (Hard).", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"variants must not conflict, got {d.get('conflicts')}"
+    vm = [m for m in d.get("variant_mismatches", []) if m["entity_key"] == "swe-bench"]
+    assert vm, "expected a swe-bench variant mismatch"
+    assert vm[0]["variants"] == ["pro", "verified"], f"got variants {vm[0]['variants']}"
+    aligned = [c for c in d.get("alignment", []) if c["entity_key"] == "swe-bench"]
+    assert aligned and aligned[0]["variant"] == "pro", "Pro scores must still align within their variant"
+    assert [v["value"] for v in aligned[0]["values"]] == [86.3, 86.3]
+    unique = [(c["entity_key"], c["value"]) for c in d.get("unique_claims", [])]
+    assert ("swe-bench", 82.2) in unique, f"Verified 82.2 must be unique, got {unique}"
+
+
+@test("POST /api/v1/compare does not credit a score to the preceding benchmark (v1.8.5)")
+def _():
+    # Nov 6 gap 1, inline forward-grab: in "93.0% on GPQA Diamond,
+    # 82.2% on SWE-bench Verified, 44.1% on Humanity's Last Exam
+    # (text), 13.1% on Terminal-Bench 4.0", each number belongs to the
+    # benchmark AFTER it. The reverse pass mints them correctly; the
+    # forward pass must not claim 82.2% for GPQA or 13.1% for HLE.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "SWE-bench Pro v2 (Hard): 86.3%. GPQA Diamond: 93.0%.", "source_name": "A"},
+            {"text": ("On the model card, the lab posts 93.0% on GPQA Diamond, "
+                      "82.2% on SWE-bench Verified, 44.1% on Humanity's Last Exam (text), "
+                      "13.1% on Terminal-Bench 4.0."), "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"no false conflicts allowed, got {d.get('conflicts')}"
+    aligned = [c["entity_key"] for c in d.get("alignment", [])]
+    assert "gpqa" in aligned, "GPQA Diamond 93.0% must align across the two surface forms"
+    unique = [(c["entity_key"], c["value"]) for c in d.get("unique_claims", [])]
+    assert ("swe-bench", 82.2) in unique, f"Verified 82.2 must be unique, got {unique}"
+    assert ("hle", 44.1) in unique, f"HLE (text) 44.1 must be unique, got {unique}"
+    assert not any(v == 13.1 for _k, v in unique), "Terminal-Bench is unmapped — 13.1% must stay invisible"
+
+
+@test("POST /api/v1/compare does not mint a measurement setting as a score (v1.8.5)")
+def _():
+    # Nov 6 gap 1, setting number: "MMMU Pro (Standard 10)" — the 10
+    # is the setting; the score (81.6%) comes later in the same line.
+    # The rescan must mint the 81.6% and never the 10.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "MMMU Pro (Standard 10) reaches 81.6 percent.", "source_name": "A"},
+            {"text": "MMMU Pro: 81.6%.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"setting number must not conflict, got {d.get('conflicts')}"
+    aligned = [c for c in d.get("alignment", []) if c["entity_key"] == "mmmu"]
+    assert aligned, "MMMU Pro 81.6% must align"
+    assert [v["value"] for v in aligned[0]["values"]] == [81.6, 81.6]
+    all_vals = [v["value"] for c in d.get("shared_claims", []) + d.get("unique_claims", [])
+                for v in c.get("values", [c]) if isinstance(v, dict)]
+    assert 10.0 not in all_vals, f"the setting 10 must never be a claim, got {all_vals}"
+    claims = extract_numeric_claims("MMMU Pro (Standard 10) reaches 81.6 percent.")
+    assert len(claims) == 1 and claims[0]["numeric_value"] == 81.6, \
+        f"expected exactly one MMMU claim at 81.6, got {claims}"
+    assert claims[0]["variant"] == "pro"
+
+
+@test("POST /api/v1/compare keeps pricing tiers separate and aligns each (v1.8.5)")
+def _():
+    # Nov 6 gap 1, pricing tiers: input, output, cached and per-task
+    # are different claims. The same row in two docs must align tier
+    # by tier, never lump into one pricing conflict.
+    row = ("Pricing: $0.30 per million input tokens, $1.00 per million output tokens, "
+           "$0.03 cached input, $1.18 per task.")
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": row, "source_name": "A"},
+            {"text": row, "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"pricing tiers must not conflict, got {d.get('conflicts')}"
+    aligned = {c["entity_key"]: [v["value"] for v in c["values"]] for c in d.get("alignment", [])}
+    assert aligned.get("pricing-input") == [0.3, 0.3], f"input tier must align, got {aligned}"
+    assert aligned.get("pricing-output") == [1.0, 1.0], f"output tier must align, got {aligned}"
+    assert aligned.get("pricing-cached") == [0.03, 0.03], f"cached tier must align, got {aligned}"
+    assert aligned.get("pricing-per-task") == [1.18, 1.18], f"per-task tier must align, got {aligned}"
+
+
+@test("POST /api/v1/compare deduplicates found_in_docs in shared claims (v1.8.5)")
+def _():
+    # Nov 6 gap 5: a doc contributing two values to one shared group
+    # was listed twice in found_in_docs. The values stay; the doc
+    # list must not repeat.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "GPQA Diamond: 61.3%. GPQA Diamond: 61.35%.", "source_name": "A"},
+            {"text": "The model scored 61.3% on GPQA Diamond.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    shared = [c for c in d.get("shared_claims", []) if c["entity_key"] == "gpqa"]
+    assert shared, "expected a shared gpqa claim"
+    assert shared[0]["found_in_docs"] == ["A", "B"], \
+        f"found_in_docs must dedup, got {shared[0]['found_in_docs']}"
+
+
+@test("POST /api/v1/compare marks a stated-vs-unstated variant comparison provisional (v1.8.5)")
+def _():
+    # One stated variant against an unstated side still compares
+    # (this is the existing surface-forms alignment), but the
+    # comparison must carry its provisional variant note — mirroring
+    # the shot-count gate.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "GPQA Diamond: 61.3%.", "source_name": "A"},
+            {"text": "The model scored 61.3% on GPQA.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = [c for c in d.get("alignment", []) if c["entity_key"] == "gpqa"]
+    assert aligned, "GPQA Diamond vs plain GPQA must still align"
+    assert aligned[0]["variant"] == "diamond"
+    assert "provisional" in aligned[0].get("variant_conditions", ""), \
+        f"expected a provisional variant note, got {aligned[0].get('variant_conditions')}"
+    assert not d.get("conflicts")
+
+
+@test("POST /api/v1/compare treats HLE-Diamond and HLE (text) as different variants (v1.8.5)")
+def _():
+    # Nov 6: the HLE abbreviation makes "HLE-Diamond 28.7%" visible,
+    # and it must not compare with HLE (text) 44.1% — different
+    # variants, not a conflict.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "HLE-Diamond: 28.7%.", "source_name": "A"},
+            {"text": "HLE (text): 44.1%.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"HLE variants must not conflict, got {d.get('conflicts')}"
+    vm = [m for m in d.get("variant_mismatches", []) if m["entity_key"] == "hle"]
+    assert vm and vm[0]["variants"] == ["diamond", "text"], f"got {vm}"
+    unique = [(c["entity_key"], c["value"]) for c in d.get("unique_claims", [])]
+    assert ("hle", 28.7) in unique and ("hle", 44.1) in unique, f"got {unique}"
+
+
+@test("GET /openapi.json documents the variant_mismatches channel (v1.8.5)")
+def _():
+    r = client.get("/openapi.json")
+    spec = r.get_json()
+    props = spec["components"]["schemas"]["CompareResponse"]["properties"]
+    assert "variant_mismatches" in props, "CompareResponse missing variant_mismatches"
+
+
+@test("POST /api/v1/analyze keeps a model release out of the financial-market genre (v1.8.5)")
+def _():
+    # Nov 6 gap 4: the primary announcement and SiliconNoon were both
+    # typed financial_market_snapshot. Genre must follow the doc's
+    # main claim — a model release whose only financial word is
+    # "index" is news, not a market snapshot.
+    text = (
+        "Today we are introducing Inkling 2 Small, a 594B-parameter sparse "
+        "mixture-of-experts model with 17B active parameters. The model scores "
+        "31 on the AA Intelligence Index and 86.3% on SWE-bench Pro v2 (Hard). "
+        "Pricing is $0.30 per million input tokens and $1.00 per million output "
+        "tokens, with cached input at $0.03 per million tokens and $1.18 per task."
+    )
+    r = client.post("/api/v1/analyze", json={
+        "text": text, "source_type": "primary",
+        "source_url": "https://thinkingmachines.ai/news/inkling-2-small/",
+    })
+    d = r.get_json()
+    assert d.get("source_genre") != "financial_market_snapshot", \
+        f"model release must not type as a market snapshot, got {d.get('source_genre')}"
+
+
 @test("POST /api/v1/analyze keeps a namespace-matched model card as candidate primary with uncertain ownership (v1.8.3)")
 def _():
     # Nov 5 gap 1 via the API, re-decided by Arch's notes 2026-11-06
