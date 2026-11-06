@@ -1,0 +1,10 @@
+Acme Nova Team — Nova-7-Base model card (Hugging Face, randomuser/nova-7-base, released 5 November 2026)
+
+Nova-7-Base is an efficient sparse Mixture-of-Experts (MoE) language model with 120B total parameters and 8B activated per token, pre-trained from scratch on 18T tokens with a training context of up to 64K; fine-tuning and inference support a 512K-token context. By releasing the weights at the end of pre-training, we let developers build on the model's general capabilities and choose for themselves where to take it next.
+
+Evaluation (same pipeline, prompts and few-shot settings for all models):
+MMLU (EM) 5-shot: Nova-7 91.2, DeepSeek-V4-Flash 89.4.
+HumanEval+ (Pass@1) 1-shot: Nova-7 79.8, DeepSeek 69.5.
+
+License: Nova-7-Base is provided under the Acme Nova Model License Agreement v1.0. Copyright 2026 Acme. All Rights Reserved.
+For more information, visit https://www.acme.com/nova-7-base
