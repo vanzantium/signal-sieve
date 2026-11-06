@@ -14,6 +14,16 @@ without its relationship to a measurement, a word does not identify an
 entity without context, and a recommendation is not justified merely
 because an entity extractor produced a name.
 
+Comparator identity (Sieve gap 2026-11-06, v1.8.5): a benchmark claim is
+benchmark + variant + version + shot + metric + score + unit. A bare
+entity name is not an identity — "SWE-bench Pro" and "SWE-bench
+Verified" are different benchmarks that happen to share a family name,
+and pricing tiers (input / output / cached / per-task) are different
+claims. Differing versions, shots, or variants block comparison with a
+visible note instead of manufacturing a conflict; the same claim
+(same benchmark + variant + version + shot + unit + value) present in
+two or more docs aligns.
+
 Zero external dependencies.
 """
 from __future__ import annotations
@@ -71,6 +81,11 @@ _ENTITY_KEY_MAP: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r"\bMATH(?:[-\s]?500)?\b",                   re.I), "math",        "MATH"),
     (re.compile(r"\bARC[-\s]?AGI\b",                         re.I), "arc-agi",     "ARC-AGI"),
     (re.compile(r"\bHumanity'?s\s+Last\s+Exam\b",             re.I), "hle",         "Humanity's Last Exam"),
+    # v1.8.5 (Nov 6): the abbreviation HLE is the same benchmark — it
+    # also makes "HLE-Diamond 28.7%" visible, where the full name never
+    # appears. Terminal-Bench, PostTrainBench and the other table rows
+    # stay unmapped and invisible (documented limit).
+    (re.compile(r"\bHLE\b",                                  re.I), "hle",         "Humanity's Last Exam"),
     (re.compile(r"\bGDPx\b",                                 re.I), "gdpx",        "GDPx"),
     # Initial/jobless claims (keep last to not over-match)
     (re.compile(r"\b(?:initial\s+)?jobless\s+claims?\b|\binitial\s+claims?\b", re.I),
@@ -113,12 +128,12 @@ _INLINE_ENTITY_RE = re.compile(
     r"WTI(?:\s+crude)?|Brent(?:\s+crude)?|Gold|VIX|DXY|"
     r"CPI|PPI|PCE|PMI|GDPx|GDP|"
     r"GPQA(?:\s+Diamond)?|SWE[-\s]?bench(?:\s+Verified)?|HumanEval(?:\+)?|"
-    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|"
+    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|HLE|"
     r"(?:initial\s+)?jobless\s+claims?|retail\s+sales?)(?!\w)"
     r"[^.!?\n]{0,70}?"
     r"(?<![A-Za-z0-9@])([+-]?\$?\d[\d,\.]*"
     r"(?:%|\s*bps|\s*/bbl|\s*/oz|\s+per\s+(?:barrel|oz)|\s*,\d{3})*)"
-    r"(?!\s*-\s*shot\b)",
+    r"(?!\s*-?\s*shot\b)",
     re.I,
 )
 
@@ -127,7 +142,7 @@ _INLINE_ENTITY_RE = re.compile(
 # to benchmark names + a % value so prose percentages never match.
 _BENCHMARK_NAMES_RE = (
     r"GPQA(?:\s+Diamond)?|SWE[-\s]?bench(?:\s+Verified)?|HumanEval(?:\+)?|"
-    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|"
+    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|HLE|"
     r"GDPx"
 )
 _BENCHMARK_REVERSE_RE = re.compile(
@@ -141,9 +156,21 @@ _BENCHMARK_REVERSE_RE = re.compile(
 # ("WTI Crude: $68.43/bbl") never match. Input/output words split the
 # key so an input price and an output price are never conflated.
 _PRICING_WORDS_RE = re.compile(
-    r"\b(pric(?:e|ing)|per\s+(?:million|1M)\s+tokens?|tokens?)\b", re.I)
+    r"\b(pric(?:e|ing)|per\s+(?:million|1M)\s+tokens?|tokens?|per[-\s]?task)\b", re.I)
 _INPUT_WORD_RE = re.compile(r"\binput\b", re.I)
 _OUTPUT_WORD_RE = re.compile(r"\boutput\b", re.I)
+# v1.8.5 (Nov 6): "cached" and "per task" are their own pricing tiers —
+# $0.03 cached input is not an input price and $1.18/task is not an
+# output price, and "per task" must also count as a pricing word so a
+# per-task price mints at all. The per-task regex requires "per" so
+# "per index task" (a token count, not a price) never matches.
+_CACHED_WORD_RE = re.compile(r"\bcached\b", re.I)
+_PER_TASK_RE = re.compile(r"\bper[-\s]?task\b|\b/task\b", re.I)
+# v1.8.5 (Nov 6): a tier word immediately before a $ amount — "input
+# $15", "Input: $0.30" — is that amount's own label. Only whitespace
+# or a colon may sit between the word and the $, so "output and $0.03"
+# (the previous price's tier) never matches.
+_BACKWARD_TIER_RE = re.compile(r"\b(input|output|cached)\b\s*:?\s*$", re.I)
 _DOLLAR_RE = re.compile(r"\$\s?(\d[\d,\.]*)")
 
 # ── Date claims (Sieve gap 2026-11-02: rollout stories live on dates) ──────
@@ -173,11 +200,51 @@ _YEAR_RE = re.compile(
 )
 
 
-def _normalize_entity_key(fragment: str) -> Optional[Tuple[str, str]]:
-    """Return (canonical_key, display_label) for the first matching entity pattern."""
+# Benchmark variant identity (Sieve gap 2026-11-06, v1.8.5): a benchmark
+# claim is benchmark + variant + version + shot + metric + score + unit.
+# "SWE-bench Pro" and "SWE-bench Verified" are different benchmarks that
+# happen to share a family name — comparing their scores manufactures a
+# conflict. The variant is the first qualifier token after the base
+# benchmark name ("Pro", "Verified", "Diamond", "Standard", "Hard",
+# "text", ...); "HumanEval+" carries its "+" as the variant. A claim
+# that names no variant is variant "" and is compared provisionally,
+# mirroring the shot-count gate. MATH vs MATH-500 stay one series (no
+# "500" variant token); AIME year-variants (2024/2025) are not yet
+# distinguished — both are documented limits.
+_VARIANT_TOKENS = (
+    "pro", "verified", "diamond", "standard", "hard", "text", "plus",
+    "lite", "flash", "mini", "base", "instruct", "chat", "reasoning",
+)
+_VARIANT_RE = re.compile(r"\b(" + "|".join(_VARIANT_TOKENS) + r")\b", re.I)
+
+
+def _benchmark_variant(key: str, match_text: str, between_text: str = "", after_text: str = "") -> str:
+    """Variant qualifier for a benchmark claim, or "" when unstated.
+
+    match_text is the entity pattern's matched text ("GPQA Diamond",
+    "SWE-bench Verified", "MMLU-Pro", "HumanEval+"); between_text is
+    the fragment between the entity match and the value (inline/colon
+    passes); after_text is up to ~20 chars after the entity match
+    (reverse pass, where "(text)" follows the name). The FIRST qualifier
+    token wins — it is the one attached to this benchmark's name, not a
+    neighbour's. "+" in the match text means the "+" variant
+    (HumanEval+ is a different test set from HumanEval). Non-benchmark
+    keys have no variant.
+    """
+    if key not in _BENCHMARK_KEYS:
+        return ""
+    if "+" in match_text:
+        return "+"
+    m = _VARIANT_RE.search(match_text + between_text + after_text[:20])
+    return m.group(1).lower() if m else ""
+
+
+def _normalize_entity_key(fragment: str) -> Optional[Tuple[str, str, "re.Match[str]"]]:
+    """Return (canonical_key, display_label, match) for the first matching entity pattern."""
     for pattern, key, label in _ENTITY_KEY_MAP:
-        if pattern.search(fragment):
-            return key, label
+        m = pattern.search(fragment)
+        if m:
+            return key, label, m
     return None
 
 
@@ -317,6 +384,55 @@ def _shot_count_for_match(text: str, m: "re.Match[str]", num_group: int) -> Opti
     return best
 
 
+# A bare number with an optional unit, for the setting-number rescan
+# (v1.8.5): the same shape as the inline pass's value group, minus the
+# entity prefix. The trailing lookahead blocks shot counts ("5-shot",
+# "5 shot") so a rescan never mints a shot count as a score.
+_RESCAN_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9@])([+-]?\$?\d[\d,\.]*(?:%|\s*bps|\s*/bbl|\s*/oz|\s+per\s+(?:barrel|oz)|\s*,\d{3})*)(?!\s*-?\s*shot\b)"
+)
+
+
+def _rescan_inline_score(text: str, m: "re.Match[str]", key: str, label: str, variant: str, _add) -> None:
+    """After a setting number, find the real score later in the same line.
+
+    "MMMU Pro (Standard 10) reaches 81.6 percent" — the inline pass
+    meets the 10 first; the 81.6% is the score. Scan the rest of the
+    line (up to 80 chars) for the next number that is not itself a
+    setting or version number and not a following-benchmark score, and
+    mint it under this entity and variant. At most 3 candidates; if
+    none qualifies, the score stays invisible rather than manufacturing
+    a claim.
+    """
+    line_end = text.find("\n", m.end())
+    limit = m.end() + 80 if line_end == -1 else min(line_end, m.end() + 80)
+    window = text[m.end():limit]
+    tried = 0
+    for nm in _RESCAN_NUMBER_RE.finditer(window):
+        if tried >= 3:
+            return
+        tried += 1
+        num_start = m.end() + nm.start(1)
+        num_end = m.end() + nm.end(1)
+        raw_val = nm.group(1).strip()
+        if not raw_val or raw_val == ".":
+            continue
+        if _is_version_number(text, num_start):
+            continue
+        if _is_setting_number(text, num_start):
+            continue
+        if key in _BENCHMARK_KEYS and _is_following_benchmark_score(text, num_end):
+            continue
+        bare = _unit_of(raw_val) == ""
+        count_after = bare and _count_after(text, num_end)
+        _add(key, label, raw_val, text[m.start():num_end],
+             unit_override="count" if count_after else "",
+             version=_benchmark_version(key, text[m.start():num_end]),
+             shot_count=_shot_count_in_window(text[m.start():num_end]),
+             variant=variant)
+        return
+
+
 # Market entities (Arch review 2026-11-05, v1.8.1): a market entity must
 # have positive market context before it fires. Whole-word matching
 # alone is not sufficient evidence of entity identity — a document
@@ -351,6 +467,44 @@ def _is_version_number(text: str, num_start: int) -> bool:
     injects a spurious 1.0/2.0 claim into the comparison.
     """
     return bool(_VERSION_PREFIX_RE.search(text[max(0, num_start - 10):num_start]))
+
+
+# v1.8.5 (Nov 6): a number that is the score OF a following benchmark
+# ("82.2% on SWE-bench Verified", "44.1% on Humanity's Last Exam",
+# "13.1% on Terminal-Bench 4.0") belongs to that following name, not
+# to the entity the forward scan started from. The reverse pass mints
+# it correctly (or it stays invisible when the following benchmark is
+# unmapped) — the forward pass must not claim it for the wrong
+# benchmark. Benchmark keys only, and scoped to the demonstrated
+# failure: day/month names after "on" are excluded (a date is not a
+# benchmark), "on the…" never triggers, and a sentence break between
+# the number and the "on" blocks the guard (only spaces/tabs may
+# intervene, no period or newline).
+_FOLLOWING_BENCH_RE = re.compile(
+    r"[ \t]*(?:percent[ \t]+)?on[ \t]+"
+    r"(?!Monday\b|Tuesday\b|Wednesday\b|Thursday\b|Friday\b|Saturday\b|Sunday\b"
+    r"|January\b|February\b|March\b|April\b|May\b|June\b|July\b|August\b"
+    r"|September\b|October\b|November\b|December\b)"
+    r"[A-Z]"
+)
+
+
+def _is_following_benchmark_score(text: str, num_end: int) -> bool:
+    """True when a matched number is the score of a following benchmark."""
+    return bool(_FOLLOWING_BENCH_RE.match(text, num_end))
+
+
+# v1.8.5 (Nov 6): a bare number that is a measurement setting, not a
+# result — "MMMU Pro (Standard 10)" — the 10 is the setting, and the
+# score (81.6%) comes later in the same line. Minting the 10 as a
+# claim manufactures a conflict with the real score. A number
+# immediately preceded by a setting word is a setting, not a value.
+_SETTING_WORD_BEFORE_RE = re.compile(r"(standard|example|sample)\s*$", re.I)
+
+
+def _is_setting_number(text: str, num_start: int) -> bool:
+    """True when a number is a measurement setting, not a score."""
+    return bool(_SETTING_WORD_BEFORE_RE.search(text[max(0, num_start - 24):num_start]))
 
 
 def _label_regex(label: str) -> str:
@@ -531,13 +685,15 @@ def extract_numeric_claims(
           "numeric_value": 4.61,
           "unit":          "%",
           "shot_count":    5,        # benchmark claims only; None when unstated
+          "variant":       "",       # benchmark variant ("pro", "verified", ...); "" when unstated (v1.8.5)
           "context":       "10-Year Treasury Yield: 4.61%",
         }
 
-    Deduplicates on (entity_key, numeric_value) pairs. When the same
-    entity + value is mentioned twice and only one mention states a shot
-    count, the surviving claim keeps the stated count — the condition is
-    evidence, not a second claim.
+    Deduplicates on (entity_key, numeric_value, variant) pairs (v1.8.5:
+    the same key and value in different variants are different claims).
+    When the same entity + value is mentioned twice and only one
+    mention states a shot count, the surviving claim keeps the stated
+    count — the condition is evidence, not a second claim.
 
     Market claims dropped by the context gate (v1.8.1) are appended to
     *dropped_out* when the caller passes a list, so the caller can
@@ -548,11 +704,11 @@ def extract_numeric_claims(
     its decisions).
     """
     claims: List[Dict] = []
-    seen: Dict[Tuple[str, float], int] = {}  # (entity_key, numeric_value) -> index into claims
+    seen: Dict[Tuple[str, float, str], int] = {}  # (entity_key, numeric_value, variant) -> index into claims
     dropped: List[Dict] = []
 
     def _add(key: str, label: str, raw_val: str, context: str, unit_override: str = "",
-             version: str = "", shot_count: Optional[int] = None) -> None:
+             version: str = "", shot_count: Optional[int] = None, variant: str = "") -> None:
         numeric = _parse_value(raw_val)
         if numeric is None:
             return
@@ -568,7 +724,10 @@ def extract_numeric_claims(
             })
             return
         unit    = unit_override or _unit_of(raw_val)
-        dedup   = (key, numeric)
+        # v1.8.5: a claim is key + value + variant. Two claims for the
+        # same key and value in different variants are DIFFERENT claims
+        # (Pro vs Verified) and must not dedup into one.
+        dedup   = (key, numeric, variant)
         if dedup in seen:
             idx = seen[dedup]
             if claims[idx].get("shot_count") is None and shot_count is not None:
@@ -583,6 +742,7 @@ def extract_numeric_claims(
             "unit":          unit,
             "version":       version,
             "shot_count":    shot_count,
+            "variant":       variant,
             "context":       context[:120],
         })
 
@@ -593,7 +753,7 @@ def extract_numeric_claims(
         entity = _normalize_entity_key(label_fragment)
         if entity is None:
             continue
-        key, label = entity
+        key, label, ematch = entity
         # A bare number followed by a count word ("GPQA: 94 problems") is
         # a count, not an unspecified unit — without this, a count and a
         # percentage on the same entity read as one comparable series.
@@ -604,7 +764,8 @@ def extract_numeric_claims(
         _add(key, label, raw_val, m.group(0),
              unit_override="count" if count_after else "",
              version=_benchmark_version(key, m.group(0)),
-             shot_count=_shot_count_for_match(text, m, 2))
+             shot_count=_shot_count_for_match(text, m, 2),
+             variant=_benchmark_variant(key, ematch.group(0), label_fragment[ematch.end():]))
 
     # Pass 2 — inline patterns (catches prose and snapshot lines)
     for m in _INLINE_ENTITY_RE.finditer(text):
@@ -617,7 +778,26 @@ def extract_numeric_claims(
         entity = _normalize_entity_key(entity_frag)
         if entity is None:
             continue
-        key, label = entity
+        key, label, ematch = entity
+        # Variant identity: first qualifier after the base name, in the
+        # entity match text + the span up to the value. ("SWE-bench Pro
+        # v2" matches only "SWE-bench" in the alternation, so the "Pro"
+        # lives in the span — the search covers both.)
+        frag = text[m.start():m.end()]
+        between = frag[ematch.end():m.start(2) - m.start()]
+        variant = _benchmark_variant(key, ematch.group(0), between)
+        if key in _BENCHMARK_KEYS and _is_setting_number(text, m.start(2)):
+            # The number is a measurement setting, not a score — look
+            # for the real score later in the same line instead of
+            # minting the setting as a claim (v1.8.5, Nov 6: "MMMU Pro
+            # (Standard 10)" must not mint a claim of 10).
+            _rescan_inline_score(text, m, key, label, variant, _add)
+            continue
+        if key in _BENCHMARK_KEYS and _is_following_benchmark_score(text, m.end()):
+            # The number is the score of a following benchmark — the
+            # reverse pass mints it under its own name (v1.8.5, Nov 6:
+            # "82.2% on SWE-bench Verified" is not GPQA's score).
+            continue
         # Same bare-number count rule as the colon pass (Sieve gap
         # 2026-11-03: inline counts had no unit and "compared" with %).
         bare = _unit_of(raw_val) == ""
@@ -625,7 +805,8 @@ def extract_numeric_claims(
         _add(key, label, raw_val, m.group(0),
              unit_override="count" if count_after else "",
              version=_benchmark_version(key, m.group(0)),
-             shot_count=_shot_count_for_match(text, m, 2))
+             shot_count=_shot_count_for_match(text, m, 2),
+             variant=variant)
 
     # Pass 3 — benchmark-reverse: "61.3% on GPQA" (score precedes the name)
     for m in _BENCHMARK_REVERSE_RE.finditer(text):
@@ -635,31 +816,77 @@ def extract_numeric_claims(
         entity = _normalize_entity_key(m.group(2).strip())
         if entity is None:
             continue
-        key, label = entity
+        key, label, ematch = entity
         _add(key, label, raw_val, m.group(0),
              version=_benchmark_version(key, m.group(0)),
-             shot_count=_shot_count_for_match(text, m, 1))
+             shot_count=_shot_count_for_match(text, m, 1),
+             variant=_benchmark_variant(key, ematch.group(0), "", text[m.end():m.end() + 20]))
 
     # Pass 4 — pricing rows: a $ amount is a pricing claim only when
     # pricing words sit within ~60 chars, so market prices never match.
-    # Input vs output is decided by the NEAREST input/output word, not
-    # mere presence — a line naming both must not key every amount input.
+    # The tier is decided by ownership, not mere nearest-word distance:
+    # in a pricing row each $ amount owns the tier word that FOLLOWS it
+    # ("$0.30 per million input tokens") or IMMEDIATELY PRECEDES it
+    # ("Input: $0.30") — never a tier word that belongs to a
+    # neighbouring price. The old nearest-word rule keyed "$1.00 per
+    # million output tokens" as input, because the previous price's
+    # "input" was 14 chars before it and its own "output" 18 chars
+    # after it (v1.8.5, Nov 6). So: a tier word immediately before the
+    # amount (nothing but space/colon between) wins; otherwise the
+    # nearest tier word after the amount within the same sentence (up
+    # to the next $). The minting check above stays whole-window: a
+    # pricing word anywhere nearby means it is a price; only the tier
+    # is direction-scoped.
     for m in _DOLLAR_RE.finditer(text):
         window_start = max(0, m.start() - 60)
         window = text[window_start:m.end() + 60]
         if not _PRICING_WORDS_RE.search(window):
             continue
         dollar_pos = m.start() - window_start
-        nearest, nearest_dist = "", None
-        for word_re, word_key in ((_INPUT_WORD_RE, "input"), (_OUTPUT_WORD_RE, "output")):
-            for wm in word_re.finditer(window):
-                dist = abs(wm.start() - dollar_pos)
-                if nearest_dist is None or dist < nearest_dist:
-                    nearest, nearest_dist = word_key, dist
+        # The amount itself ends after its digits (and any decimal
+        # point): sentence/forward scans start there, not at the $
+        # sign — the "." in "$0.30" is a decimal point, not a
+        # sentence break.
+        amount_end = dollar_pos + len(m.group(0))
+        seg_end = len(window)
+        next_dollar = window.find("$", amount_end)
+        if next_dollar != -1:
+            seg_end = next_dollar
+        for ch in (".", "!", "?", "\n"):
+            p = window.find(ch, amount_end, seg_end)
+            if p != -1:
+                seg_end = min(seg_end, p)
+        # Tier ownership (v1.8.5): a tier word belongs to an amount
+        # only when it is that amount's own label — immediately before
+        # it ("input $15", "Input: $0.30", nothing but space/colon
+        # between) or following it in the same sentence ("$0.30 per
+        # million input tokens", "$0.03 cached", "$1.18 per task").
+        # Backward-adjacent wins: in "input $15 per million tokens,
+        # output $75", the "output" after $15 is the NEXT price's
+        # tier, not $15's. And a tier word across a neighbouring $
+        # never counts — "$1.00 per million output tokens" must not
+        # key as input because the previous price's "input" sits
+        # 14 chars before it.
+        nearest = ""
+        back = _BACKWARD_TIER_RE.search(window[max(0, dollar_pos - 16):dollar_pos])
+        if back:
+            nearest = back.group(1).lower()
+        else:
+            nearest_dist = None
+            for word_re, word_key in ((_INPUT_WORD_RE, "input"), (_OUTPUT_WORD_RE, "output"),
+                                      (_CACHED_WORD_RE, "cached"), (_PER_TASK_RE, "per-task")):
+                for wm in word_re.finditer(window, amount_end, seg_end):
+                    dist = wm.start() - dollar_pos
+                    if dist <= 30 and (nearest_dist is None or dist < nearest_dist):
+                        nearest, nearest_dist = word_key, dist
         if nearest == "input":
             key, label = "pricing-input", "Pricing (input)"
         elif nearest == "output":
             key, label = "pricing-output", "Pricing (output)"
+        elif nearest == "cached":
+            key, label = "pricing-cached", "Pricing (cached)"
+        elif nearest == "per-task":
+            key, label = "pricing-per-task", "Pricing (per task)"
         else:
             key, label = "pricing", "Pricing"
         _add(key, label, m.group(1), window.strip()[:120], unit_override="$")
@@ -688,6 +915,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
           "unit_mismatches":   [...],   # same entity, different units
           "version_mismatches": [...],  # same benchmark, different versions
           "evaluation_setting_mismatches": [...],  # same benchmark, different shot counts
+          "variant_mismatches": [...],  # same benchmark, different variants (v1.8.5)
           "timeline_reconciliation": [...],  # shared-year date/precision notes
           "agreement_status":  str,     # aligned | conflicts_present | not_established
           "comparable_claims": int,     # claims that actually went through comparison
@@ -716,6 +944,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "unit_mismatches":   [],
             "version_mismatches": [],
             "evaluation_setting_mismatches": [],
+            "variant_mismatches": [],
             "shared_dates":      [],
             "shared_years":      [],
             "unique_dates":      [],
@@ -764,6 +993,10 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     version_mismatches: List[Dict] = []
     evaluation_setting_mismatches: List[Dict] = []
     presence_absence_mismatches: List[Dict] = []
+    variant_mismatches: List[Dict] = []
+    # Provisional variant comparisons (v1.8.5): one stated variant
+    # compared against unstated sides — counted for the triage summary.
+    provisional_variant_comparisons: List[str] = []
 
     # WTI vs Brent: note their presence but don't call it a conflict
     has_wti   = "wti-crude"   in entity_map
@@ -823,7 +1056,51 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             ),
         }
 
+    # Variant partitions (v1.8.5, Nov 6): benchmark claims compare
+    # within their variant, never across it. Two or more STATED variants
+    # for one key → the variants are not comparable at all: record a
+    # variant mismatch and compare within each stated partition
+    # separately (each partition becomes its own work item below).
+    # Zero or one stated variant → compare the whole group as before,
+    # with a provisional note when some sides state a variant and
+    # others don't. The work list carries the group's variant so the
+    # loop body can tag every entry it emits.
+    grouped: List[Tuple[str, List[Dict], str]] = []
     for key, entries in entity_map.items():
+        partitions: Dict[str, List[Dict]] = {}
+        for e in entries:
+            partitions.setdefault(e["claim"].get("variant", ""), []).append(e)
+        stated_variants = {v for v in partitions if v}
+        if len(stated_variants) > 1:
+            variant_mismatches.append({
+                "entity_key":   key,
+                "entity_label": entries[0]["claim"]["entity_label"],
+                "variants":     sorted(stated_variants),
+                "values":       [
+                    {"source": _doc_name(e["doc_idx"]), "value": e["claim"]["numeric_value"],
+                     "unit": e["claim"]["unit"], "raw": e["claim"]["raw_value"],
+                     "version": e["claim"].get("version", ""),
+                     "shot_count": e["claim"].get("shot_count"),
+                     "variant": e["claim"].get("variant", "")}
+                    for e in entries
+                ],
+                "note": (
+                    "Same benchmark reported in different variants across sources "
+                    "(e.g. Pro vs Verified) — scores from different variants are not "
+                    "directly comparable. Each variant was compared within itself; "
+                    "do not read as a conflict or an alignment."
+                ),
+            })
+            for variant, part in partitions.items():
+                grouped.append((key, part, variant))
+        else:
+            grouped.append((key, entries, next(iter(stated_variants), "")))
+
+    # A presence/absence mismatch is recorded once per key, even when
+    # the key was split into several variant partitions.
+    _presence_mismatch_done: set = set()
+
+    for key, entries, variant in grouped:
         label      = entries[0]["claim"]["entity_label"]
         doc_names  = [_doc_name(e["doc_idx"]) for e in entries]
         values     = [e["claim"]["numeric_value"] for e in entries]
@@ -831,20 +1108,23 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         raws       = [e["claim"]["raw_value"]      for e in entries]
 
         val_objs = [
-            {"source": n, "value": v, "unit": u, "raw": r, "version": ver, "shot_count": sh}
-            for n, v, u, r, ver, sh in zip(
+            {"source": n, "value": v, "unit": u, "raw": r, "version": ver, "shot_count": sh, "variant": va}
+            for n, v, u, r, ver, sh, va in zip(
                 doc_names, values, units, raws,
                 [e["claim"].get("version", "") for e in entries],
-                [e["claim"].get("shot_count") for e in entries])
+                [e["claim"].get("shot_count") for e in entries],
+                [e["claim"].get("variant", "") for e in entries])
         ]
 
         if len(entries) == 1:
             # A lone claim where another doc EXPLICITLY lacks the entity
             # is a presence/absence mismatch, not a merely unique claim.
             if any(s == "EXPLICITLY_ABSENT" for s in presence_status[key].values()):
-                presence_absence_mismatches.append(
-                    _mismatch_entry(key, label, doc_names)
-                )
+                if key not in _presence_mismatch_done:
+                    presence_absence_mismatches.append(
+                        _mismatch_entry(key, label, doc_names)
+                    )
+                    _presence_mismatch_done.add(key)
                 continue
             unique_claims.append({
                 "entity_key":   key,
@@ -853,23 +1133,27 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                 "value":        values[0],
                 "unit":         units[0],
                 "raw":          raws[0],
+                "variant":      variant,
             })
             continue
 
         shared_claims.append({
             "entity_key":    key,
             "entity_label":  label,
-            "found_in_docs": doc_names,
+            "found_in_docs": list(dict.fromkeys(doc_names)),
             "values":        val_objs,
+            "variant":       variant,
         })
 
         # Shared key, but some compared doc explicitly lacks the entity:
         # record the mismatch alongside (not instead of) numeric comparison
         # of the PRESENT sides.
         if any(s == "EXPLICITLY_ABSENT" for s in presence_status[key].values()):
-            presence_absence_mismatches.append(
-                _mismatch_entry(key, label, doc_names)
-            )
+            if key not in _presence_mismatch_done:
+                presence_absence_mismatches.append(
+                    _mismatch_entry(key, label, doc_names)
+                )
+                _presence_mismatch_done.add(key)
 
         # Skip crude benchmark conflict check — already noted as different contracts
         if key in _CRUDE_KEYS and crude_note:
@@ -889,6 +1173,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                 "entity_label": label,
                 "units":        sorted(specified_units),
                 "values":       val_objs,
+                "variant":      variant,
                 "note": (
                     "Same entity reported in different units across sources "
                     "(e.g. a count vs a percentage) — values are not directly "
@@ -908,6 +1193,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                 "entity_label": label,
                 "versions":     sorted(named_versions),
                 "values":       val_objs,
+                "variant":      variant,
                 "note": (
                     "Same benchmark reported in different versions across "
                     "sources — scores from different versions are not directly "
@@ -937,6 +1223,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                     "entity_label": label,
                     "shot_counts":  sorted(named_shots),
                     "values":       val_objs,
+                    "variant":      variant,
                     "note": (
                         "Same benchmark evaluated under different shot counts "
                         f"({', '.join(str(s) + '-shot' for s in sorted(named_shots))}) — "
@@ -964,6 +1251,20 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         vals_sorted = sorted(values)
         spread      = vals_sorted[-1] - vals_sorted[0]
 
+        # Variant conditions (v1.8.5): when one stated variant is
+        # compared against unstated sides, the comparison is
+        # provisional — the unstated side may be a different variant.
+        # (Within a stated partition every side states the same variant,
+        # so this only fires for the whole-group provisional case.)
+        variant_conditions = ""
+        if key in _BENCHMARK_KEYS:
+            named_variants = {e["claim"].get("variant", "") for e in entries} - {""}
+            if len(named_variants) == 1 and any(e["claim"].get("variant", "") == "" for e in entries):
+                variant_conditions = (
+                    f"Variant stated in some sources ({next(iter(named_variants))}) and unstated "
+                    "elsewhere — comparison is provisional; the unstated side may be a different variant."
+                )
+
         # Tolerance: for rate/yield/% values (<20) use 0.15 pp;
         # for price levels (>=20) use 2% relative.
         if all(abs(v) < 20 for v in values):
@@ -977,10 +1278,14 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "entity_label": label,
             "spread":       round(spread, 5),
             "values":       val_objs,
+            "variant":      variant,
         }
         if key in _BENCHMARK_KEYS:
             entry["shot_count"] = next(iter(named_shots), None) if named_shots else None
             entry["evaluation_conditions"] = evaluation_note
+        if variant_conditions:
+            entry["variant_conditions"] = variant_conditions
+            provisional_variant_comparisons.append(key)
 
         if is_conflict:
             entry["note"] = (
@@ -1040,6 +1345,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         | {m["entity_key"] for m in unit_mismatches}
         | {m["entity_key"] for m in version_mismatches}
         | {m["entity_key"] for m in evaluation_setting_mismatches}
+        | {m["entity_key"] for m in variant_mismatches}
     )
     follow_up: List[str] = []
     follow_up_trace: List[Dict] = []
@@ -1067,6 +1373,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     n_unit_mismatches = len(unit_mismatches)
     n_version_mismatches = len(version_mismatches)
     n_setting_mismatches = len(evaluation_setting_mismatches)
+    n_variant_mismatches = len(variant_mismatches)
     n_shared_dates = len(shared_dates) + len(shared_years)
     timeline_notes = reconcile_timelines(analyzed_docs)
     # Agreement status (Arch review 2026-11-04): zero conflicts must not
@@ -1117,6 +1424,11 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             f" {n_setting_mismatches} evaluation-setting mismatch(es): same benchmark "
             "evaluated under different shot counts — not comparable, not a conflict."
         )
+    if n_variant_mismatches > 0:
+        triage_summary += (
+            f" {n_variant_mismatches} variant mismatch(es): same benchmark in "
+            "different variants across sources — not comparable, not a conflict."
+        )
     n_provisional = sum(
         1 for c in alignment + conflicts
         if "provisional" in c.get("evaluation_conditions", "")
@@ -1125,6 +1437,12 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         triage_summary += (
             f" {n_provisional} provisional comparison(s): shot counts unstated on "
             "one or both sides — see evaluation_conditions on the entries."
+        )
+    if provisional_variant_comparisons:
+        triage_summary += (
+            f" {len(provisional_variant_comparisons)} provisional variant comparison(s): "
+            "variant stated on one side and unstated on the other — see "
+            "variant_conditions on the entries."
         )
     if dropped_market_claims:
         triage_summary += (
@@ -1157,6 +1475,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         "unit_mismatches":   unit_mismatches,
         "version_mismatches": version_mismatches,
         "evaluation_setting_mismatches": evaluation_setting_mismatches,
+        "variant_mismatches": variant_mismatches,
         "shared_dates":      shared_dates,
         "shared_years":      shared_years,
         "unique_dates":      unique_dates,
