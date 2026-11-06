@@ -245,7 +245,12 @@ _FINANCIAL_SECONDARY_GENRES = {
 }
 INSTITUTIONAL_DOMAINS = (".gov", ".edu", ".mil", ".int")
 ACADEMIC_HOSTS = (
-    "doi.org", "arxiv.org", "pubmed.ncbi", "ncbi.nlm.nih",
+    # v1.8.4 (Arch review 2026-11-06): these must be complete hostnames,
+    # not fragments — matching is exact-or-subdomain (see
+    # _host_is_or_subdomain), so the old partial entries "pubmed.ncbi"
+    # and "ncbi.nlm.nih" are written out in full. A partial entry would
+    # silently stop matching under strict matching.
+    "doi.org", "arxiv.org", "pubmed.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov",
     "jstor.org", "nature.com", "science.org", "ssrn.com", "stanford.edu",
 )
 SOCIAL_HOSTS = (
@@ -376,6 +381,20 @@ def looks_non_english(text: str) -> bool:
 # Source-type inference and resolution
 # ---------------------------------------------------------------------------
 
+def _host_is_or_subdomain(host: str, trusted: str) -> bool:
+    """True when host IS the trusted host or a subdomain of it.
+
+    v1.8.4 (Arch review 2026-11-06): the old check was a substring
+    match (`trusted in host`), so "stanford.edu.attacker.com",
+    "notnature.com" and "arxiv.org.evil.com" all counted as academic
+    hosts — an untrusted hostname merely containing a recognizable
+    academic string was treated as first-party evidence. A substring
+    is not a domain relationship: the trusted name must be the whole
+    host or its suffix after a label boundary.
+    """
+    return host == trusted or host.endswith("." + trusted)
+
+
 def _infer_source_type_from_signals(text: str, source_url: str = "") -> str:
     """Infer source type from text content and URL signals only."""
     t = text.lower()
@@ -384,7 +403,7 @@ def _infer_source_type_from_signals(text: str, source_url: str = "") -> str:
         return "social"
     if any(host.endswith(d) for d in INSTITUTIONAL_DOMAINS):
         return "official"
-    if any(h in host for h in ACADEMIC_HOSTS):
+    if any(_host_is_or_subdomain(host, h) for h in ACADEMIC_HOSTS):
         return "primary"
     if any(x in t for x in ["anonymous source", "source familiar", "unnamed source", "rumor", "leaked"]):
         return "anonymous"
@@ -469,7 +488,42 @@ _THIRD_PARTY_ATTRIBUTION_CUES = (
     "according to", "announced by", "researchers found", "researchers at",
     "a study by", "study conducted by", "research conducted by",
 )
-_DOI_RE = re.compile(r"\bdoi\s*:\s*10\.\d{4,}/", re.I)
+# First-person research conduct: the authors speaking about work THEY did
+# ("we conducted / enrolled / randomized / measured ...", "our study /
+# trial / research ..."). This is authorship evidence — the document's
+# own voice claiming the work — where a bare DOI is only a citation.
+# Same vetoes as the announcement voice: a third party quoting the
+# researchers, or reporting on them, does not inherit their voice.
+# v1.8.4 (Arch review 2026-11-06): this replaces the DOI as the gate's
+# research evidence. A DOI proves the cited work exists; it does not
+# prove THIS document authored it. The pinned trial abstract
+# (primary_abstract_auto) passes through this route, not its DOI.
+_RESEARCH_CONDUCT_RE = re.compile(
+    r"\bwe\s+(?:conducted|enrolled|randomi[sz]ed|measured|analy[sz]ed|tested|evaluated|recruited|treated)\b"
+    r"|"
+    r"\bour\s+(?:study|trial|research|experiment|cohort)\b",
+    re.I,
+)
+
+
+def _first_person_research(text: str) -> Tuple[bool, str]:
+    """Return (fires, reason) for first-person research-conduct voice.
+
+    Fires only when the authors speak in the first person about work
+    they themselves did, AND no cue attributes the work to another
+    party. The reason names the deciding evidence so a downgrade flag
+    can explain itself instead of citing vague "cues in text and URL".
+    """
+    low = text.lower()
+    for cue in _THIRD_PARTY_ATTRIBUTION_CUES:
+        if cue in low:
+            return False, f"third-party attribution cue present ({cue!r})"
+    for cue in _SECONDARY_REPORTING_CUES:
+        if cue in low:
+            return False, f"secondary-reporting cue present ({cue!r})"
+    if _RESEARCH_CONDUCT_RE.search(text):
+        return True, "first-person research-conduct voice about the authors' own work"
+    return False, "no first-person research-conduct voice found"
 
 
 def _first_party_announcement(text: str) -> Tuple[bool, str]:
@@ -498,29 +552,38 @@ def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
     An inferred primary is an upgrade: it must be earned, not assumed
     from passing evidence-marker mentions (Arch review 2026-11-04,
     Dealroom case). Evidence is one of: first-party announcement voice;
-    an academic/institutional host; the document carrying its own
-    primary identifiers (DOI, arXiv, SEC/EDGAR references); or a
-    hosted release artifact whose ownership is independently
-    established by trusted evidence (Arch objection 2026-11-05,
-    v1.8.2: a candidate whose ownership is not established does NOT
-    count as first-party evidence; Arch notes 2026-11-06, v1.8.3: a
-    namespace match alone does not count either — no trusted
-    verification mechanism is available to this system yet, so the
-    hosted path is currently unreachable).
+    first-person research-conduct voice; an academic/institutional host
+    (matched exactly or as a subdomain — v1.8.4, substring matching
+    let "stanford.edu.attacker.com" count as Stanford); or a hosted
+    release artifact whose ownership is independently established by
+    trusted evidence (Arch objection 2026-11-05, v1.8.2: a candidate
+    whose ownership is not established does NOT count as first-party
+    evidence; Arch notes 2026-11-06, v1.8.3: a namespace match alone
+    does not count either — no trusted verification mechanism is
+    available to this system yet, so the hosted path is currently
+    unreachable).
+
+    v1.8.4 (Arch review 2026-11-06): a quoted DOI and in-text mentions
+    of arxiv.org / sec.gov / EDGAR are NO LONGER evidence here. A DOI
+    proves the cited work exists; it does not prove this document
+    authored it — a blog summary quoting somebody else's DOI anchored
+    as a primary source (use_as_anchor) on the DOI alone. Likewise a
+    document merely mentioning EDGAR or arxiv.org is reporting on a
+    source, not being one. What replaces the DOI is first-person
+    research conduct: the authors saying what THEY did. A citation
+    suggests the document is ABOUT primary research; only the authors'
+    own voice (or a verified host) suggests the document IS it.
     """
     if _first_party_announcement(text)[0]:
+        return True
+    if _first_person_research(text)[0]:
         return True
     if _hosted_release_artifact(text, source_url)[0]:
         return True
     host = urlparse(source_url).netloc.lower() if source_url else ""
-    if any(h in host for h in ACADEMIC_HOSTS):
+    if any(_host_is_or_subdomain(host, h) for h in ACADEMIC_HOSTS):
         return True
     if any(host.endswith(d) for d in INSTITUTIONAL_DOMAINS):
-        return True
-    low = text.lower()
-    if _DOI_RE.search(text):
-        return True
-    if "arxiv.org" in low or "sec.gov" in low or "edgar" in low:
         return True
     return False
 
@@ -866,8 +929,21 @@ def resolve_source_type_v2(
     # reported as primary at all. It drops to secondary — the safe
     # default for an article-form document — and the caller flags it
     # with Arch's custody-uncertain wording.
+    # v1.8.4 (Arch review 2026-11-06): the downgrade used to apply
+    # only when the caller declared a FORM type ("article"). An
+    # auto-declared feed — how most daily-run feeds arrive — kept the
+    # inferred primary as its EFFECTIVE type with the flag attached,
+    # and the custody layer would still anchor it: a blog summary
+    # quoting somebody else's DOI anchored (use_as_anchor) because the
+    # gate fired on paper and changed nothing the verdict reads. The
+    # gate now downgrades the effective type whenever it fires and the
+    # type came from inference (auto/unknown/blank) or from a declared
+    # form. A caller-DECLARED high-trust type is still reported as
+    # declared — the declaration is the caller's claim, and the
+    # custody-uncertain flag plus the language guardrail carry the
+    # doubt — but no inferred primary survives the gate.
     inferred, gated = _gate_inferred_primary(declared_norm, inferred, text, source_url)
-    if gated and declared_norm in _FORM_TYPES:
+    if gated and (declared_norm in _FORM_TYPES or declared_norm in ("auto", "unknown", "")):
         effective = "secondary"
         confidence = max(confidence, 0.70)
 
@@ -1235,7 +1311,11 @@ def analyze(
             resolve_source_type(source_type, raw, source_url)
         genre_mismatch = False
         inferred_st, gated_fallback = _gate_inferred_primary(declared_st, inferred_st, raw, source_url)
-        if gated_fallback and declared_st in _FORM_TYPES:
+        # v1.8.4: same gate-downgrade scope as resolve_source_type_v2 —
+        # an inferred primary with no first-party evidence drops the
+        # effective type whenever the type came from inference, not
+        # only for declared form types.
+        if gated_fallback and (declared_st in _FORM_TYPES or declared_st in ("auto", "unknown", "")):
             effective_st = "secondary"
             st_confidence = max(st_confidence, 0.70)
         resolve_notes = {
@@ -1258,10 +1338,17 @@ def analyze(
     # verified-primary bar (0.70) so it can never anchor and gets the
     # custody question, and it is flagged by name below. It is NOT
     # silently demoted to secondary — the candidacy itself is evidence
-    # worth keeping visible. The cap does not apply when independent
-    # first-party evidence exists (DOI, announcement voice,
-    # academic/institutional host): then the primary standing does not
-    # rest on the hosted claim at all.
+    # worth keeping visible.
+    # v1.8.4 (Arch review 2026-11-06): the cap used to lift when
+    # independent first-party evidence existed — but the only evidence
+    # that could ever lift it for a hosted document was
+    # document-internal suggestion (announcement voice, a quoted DOI),
+    # which is exactly the self-certification the hosted repair was
+    # built to distrust: the Acme fake plus one "Today we are
+    # releasing..." sentence escaped the cap and anchored. A verified
+    # academic/institutional host cannot coincide with an artifact-host
+    # URL, so no legitimate escape exists. The cap now lifts ONLY on
+    # verified ownership (Q2b) — currently unreachable, by design.
     hosted_candidate, hosted_claimed_org, hosted_candidate_reason = \
         _hosted_artifact_candidate(raw, source_url)
     hosted_namespace_matched, hosted_namespace_reason = \
@@ -1271,7 +1358,6 @@ def analyze(
     hosted_ownership_uncertain = bool(
         hosted_candidate
         and not hosted_verified
-        and not _has_first_party_primary_evidence(raw, source_url)
     )
     if hosted_ownership_uncertain:
         st_confidence = min(st_confidence, 0.60)
