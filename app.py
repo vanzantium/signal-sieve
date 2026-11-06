@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.8.4"
+ANALYSIS_VERSION  = "v1.8.5"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -660,6 +660,8 @@ _OPENAPI_SPEC: dict = {
                                         "description": "Same benchmark in different versions — not comparable, not conflicts."},
                     "evaluation_setting_mismatches": {"type": "array", "items": {"type": "object"},
                                         "description": "Same benchmark in different shot counts — not comparable, not conflicts."},
+                    "variant_mismatches": {"type": "array", "items": {"type": "object"},
+                                        "description": "Same benchmark in different variants (Pro vs Verified) — not comparable, not conflicts."},
                     "timeline_reconciliation": {"type": "array", "items": {"type": "object"},
                                         "description": "Shared-year date/precision notes — needs clarification, not conflicts."},
                     "agreement_status": {"type": "string",
@@ -1010,6 +1012,13 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
             lines.append(
                 f"  · {m['entity_label']}: shot counts "
                 f"{', '.join(str(s) + '-shot' for s in m.get('shot_counts', []))}"
+            )
+
+    if cmp_result.get("variant_mismatches"):
+        lines.append("VARIANT MISMATCHES (not comparable, not conflicts):")
+        for m in cmp_result["variant_mismatches"][:5]:
+            lines.append(
+                f"  · {m['entity_label']}: variants {', '.join(m.get('variants', []))}"
             )
 
     if cmp_result.get("timeline_reconciliation"):
