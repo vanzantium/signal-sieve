@@ -35,6 +35,8 @@ from signal_compare import extract_numeric_claims
 from signal_sieve import _hosted_release_artifact
 from signal_sieve import _hosted_artifact_candidate, _hosted_ownership_verified
 from signal_sieve import _hosted_namespace_matched
+from signal_sieve import _has_first_party_primary_evidence, _first_person_research
+from signal_sieve import _host_is_or_subdomain
 
 client = app_module.app.test_client()
 
@@ -1246,6 +1248,188 @@ def _():
     # ...and the own-domain match is still only a namespace fact, never
     # ownership verification.
     assert not _hosted_ownership_verified(fake, "https://acme.com/nova-7-base", "acme")[0]
+
+
+# ── v1.8.4: adjacent-window routes (Arch review 2026-11-06) ─────────────
+
+@test("A quoted DOI is not first-party evidence (v1.8.4)")
+def _():
+    # Arch review 2026-11-06: a document could contain a valid DOI
+    # referring to somebody else's research. A DOI proves the cited
+    # work exists; it does not prove this document authored it. The
+    # same holds for in-text mentions of arxiv.org / sec.gov / EDGAR:
+    # mentioning a source is reporting on it, not being it. None of
+    # these may satisfy _has_first_party_primary_evidence.
+    doi_quote = (
+        "A new study (doi:10.1038/s41586-024-12345-6) reports that a novel "
+        "catalyst doubles reaction efficiency. The paper's abstract describes "
+        "the methodology and a sample size of 240 participants."
+    )
+    assert not _has_first_party_primary_evidence(doi_quote, ""), \
+        "a quoted DOI must not count as first-party evidence"
+    assert not _has_first_party_primary_evidence(
+        "For the full results see doi:10.1038/s41586-024-12345-6.", ""), \
+        "a bare DOI citation must not count as first-party evidence"
+    edgar = (
+        "According to the EDGAR filing, the company reported revenue of $4.2 "
+        "billion. The filing describes the methodology and the sample size."
+    )
+    assert not _has_first_party_primary_evidence(edgar, ""), \
+        "mentioning an EDGAR filing must not count as first-party evidence"
+    assert not _has_first_party_primary_evidence(
+        "The preprint is available on arxiv.org. The abstract describes a new methodology.", ""), \
+        "mentioning arxiv.org must not count as first-party evidence"
+    assert not _has_first_party_primary_evidence(
+        "The sec.gov filing shows the fund held 42 positions.", ""), \
+        "mentioning sec.gov must not count as first-party evidence"
+    # What DOES count as research evidence: the authors speaking in
+    # the first person about work they did. The pinned trial abstract
+    # passes through this route, not its DOI.
+    abstract = (
+        "Abstract. We conducted a randomized controlled trial of 214 participants "
+        "(n=214) to evaluate the effect of the intervention. The primary "
+        "endpoint changed by 4.2 points (95% CI 2.1-6.3, p=0.003) at 12 weeks."
+    )
+    assert _first_person_research(abstract)[0], \
+        "first-person research conduct must count as authorship evidence"
+    assert _has_first_party_primary_evidence(abstract, ""), \
+        "the trial abstract must still pass the gate via research voice"
+    abstract_no_doi = abstract  # no DOI in this text at all
+    assert _has_first_party_primary_evidence(abstract_no_doi, ""), \
+        "the abstract must pass the gate with no DOI present"
+    # A third party describing the same trial does NOT inherit the voice.
+    summary = (
+        "A new study reports a randomized controlled trial of 214 participants. "
+        "According to the paper, the primary endpoint changed by 4.2 points."
+    )
+    assert not _first_person_research(summary)[0], \
+        "third-party attribution must veto the research voice"
+    assert not _has_first_party_primary_evidence(summary, ""), \
+        "a third-party summary must not pass the gate"
+
+
+@test("Academic hosts match exactly or as subdomains, never as substrings (v1.8.4)")
+def _():
+    # Arch review 2026-11-06: the academic-host check used substring
+    # matching, so an untrusted hostname merely containing a
+    # recognizable academic string counted as that institution.
+    assert _host_is_or_subdomain("stanford.edu", "stanford.edu")
+    assert _host_is_or_subdomain("www.stanford.edu", "stanford.edu")
+    assert _host_is_or_subdomain("arxiv.org", "arxiv.org")
+    assert _host_is_or_subdomain("www.ncbi.nlm.nih.gov", "ncbi.nlm.nih.gov")
+    assert _host_is_or_subdomain("pubmed.ncbi.nlm.nih.gov", "pubmed.ncbi.nlm.nih.gov")
+    assert not _host_is_or_subdomain("stanford.edu.attacker.com", "stanford.edu"), \
+        "stanford.edu.attacker.com is not Stanford"
+    assert not _host_is_or_subdomain("notnature.com", "nature.com"), \
+        "notnature.com is not Nature"
+    assert not _host_is_or_subdomain("arxiv.org.evil.com", "arxiv.org"), \
+        "arxiv.org.evil.com is not arXiv"
+    assert not _host_is_or_subdomain("pubmed.ncbi.evil.com", "pubmed.ncbi.nlm.nih.gov"), \
+        "a lookalike NCBI prefix on an untrusted host is not NCBI"
+    # End to end through the evidence function: attacker hosts must
+    # not satisfy first-party evidence, genuine ones must.
+    plain = (
+        "A new benchmark for frontier models was released this week. The report "
+        "covers 206 tasks across 11 domains."
+    )
+    assert not _has_first_party_primary_evidence(plain, "https://stanford.edu.attacker.com/paper.pdf")
+    assert not _has_first_party_primary_evidence(plain, "https://notnature.com/article")
+    assert not _has_first_party_primary_evidence(plain, "https://arxiv.org.evil.com/paper")
+    assert _has_first_party_primary_evidence(plain, "https://www.stanford.edu/news/benchmark"), \
+        "a genuine academic host must still count as first-party evidence"
+
+
+@test("POST /api/v1/analyze: a quoted DOI must not anchor an unverified document (v1.8.4)")
+def _():
+    # End to end: the DOI-quote case that anchored (use_as_anchor)
+    # before v1.8.4. The inference drops to secondary with the
+    # custody-uncertain flag, and the generic question is asked.
+    text = (
+        "A new study (doi:10.1038/s41586-024-12345-6) reports that a novel "
+        "catalyst doubles reaction efficiency. The paper's abstract describes "
+        "the methodology and a sample size of 240 participants, with results "
+        "significant at p=0.01."
+    )
+    r = client.post("/api/v1/analyze", json={"text": text, "source_type": "auto"})
+    d = r.get_json()
+    assert d["source_type"] == "secondary", \
+        f"a DOI quote must not report as primary, got {d['source_type']}"
+    assert d["recommended_action"] != "use_as_anchor", "a DOI quote must never anchor"
+    assert any("Source custody uncertain" in f for f in d["flags"]), \
+        f"custody-uncertain flag missing, got {d['flags']}"
+    assert any("closest primary source" in q for q in d["questions_to_ask"]), \
+        f"expected the generic primary-source question, got {d['questions_to_ask']}"
+
+
+@test("POST /api/v1/analyze: a hosted fake stays capped when a DOI or announcement voice is added (v1.8.4)")
+def _():
+    # End to end: before v1.8.4, one quoted DOI sentence — or one
+    # "Today we are releasing..." sentence — counted as independent
+    # first-party evidence and LIFTED the hosted-ownership cap, so the
+    # Acme fake anchored at 0.90. The cap now lifts only on verified
+    # ownership (Q2b, currently unreachable). Both variants stay capped
+    # candidates exactly like the unchanged fake.
+    base = (
+        "Acme Nova Team — Nova-7-Base model card "
+        "(Hugging Face, randomuser/nova-7-base, released 5 November 2026). "
+        "Nova-7-Base is a sparse Mixture-of-Experts model with 120B total "
+        "parameters and 8B activated per token, pre-trained from scratch on "
+        "18T tokens. By releasing the weights, we let developers build on it. "
+        "License: provided under the Acme Nova Model License Agreement v1.0. "
+        "Copyright 2026 Acme. For more information, visit https://www.acme.com/nova-7-base"
+    )
+    for extra in (
+        "\n\nFor the full evaluation protocol see doi:10.48550/arXiv.2601.00001.",
+        "\n\nToday we are releasing Nova-7-Base. We are announcing the weights "
+        "are available now, and we are publishing the full evaluation results "
+        "alongside the model card.",
+    ):
+        r = client.post("/api/v1/analyze", json={
+            "text": base + extra,
+            "source_type": "primary",
+            "source_url": "https://huggingface.co/randomuser/nova-7-base",
+        })
+        d = r.get_json()
+        assert d["source_type_confidence"] <= 0.60, \
+            f"fake+extra must stay capped at 0.60, got {d['source_type_confidence']}"
+        assert d["recommended_action"] != "use_as_anchor", \
+            "fake+extra must never anchor"
+        assert any("uncertain ownership" in f for f in d["flags"]), \
+            f"ownership flag missing, got {d['flags']}"
+        assert d["custody_breakdown"]["hosted_ownership_status"] == "candidate_uncertain"
+        assert d["custody_breakdown"]["primary_source_present"] is False
+
+
+@test("POST /api/v1/analyze: a misleading academic hostname must not earn primary type (v1.8.4)")
+def _():
+    # End to end: the same plain article on stanford.edu.attacker.com
+    # reported as primary at 0.75 before v1.8.4. Strict host matching
+    # leaves it unknown — and it must never anchor.
+    text = (
+        "A new benchmark for frontier models was released this week. The report "
+        "covers 206 tasks across 11 domains and finds the best agent scores just "
+        "12 percent. Coverage of the launch continues across the trade press."
+    )
+    for url in (
+        "https://stanford.edu.attacker.com/paper.pdf",
+        "https://arxiv.org.evil.com/paper/1234",
+    ):
+        r = client.post("/api/v1/analyze", json={
+            "text": text, "source_type": "auto", "source_url": url,
+        })
+        d = r.get_json()
+        assert d["source_type"] == "unknown", \
+            f"attacker host {url} must not earn a type, got {d['source_type']}"
+        assert d["recommended_action"] != "use_as_anchor"
+    # Positive control: the genuine host still counts as evidence
+    # (the gate passes, so no custody-uncertain flag fires).
+    r = client.post("/api/v1/analyze", json={
+        "text": text, "source_type": "auto",
+        "source_url": "https://www.stanford.edu/news/benchmark",
+    })
+    d = r.get_json()
+    assert not any("Source custody uncertain" in f for f in d["flags"]), \
+        f"genuine academic host must pass the gate, got {d['flags']}"
 
 
 @test("extract_numeric_claims never mints a claim from a shot count or a model name")
