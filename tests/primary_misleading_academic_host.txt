@@ -1,0 +1,1 @@
+A new benchmark for frontier models was released this week. The report covers 206 tasks across 11 domains and finds the best agent scores just 12 percent. Coverage of the launch continues across the trade press.
