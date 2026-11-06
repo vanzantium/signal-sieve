@@ -395,7 +395,10 @@ def _infer_source_type_from_signals(text: str, source_url: str = "") -> str:
     # model card on Hugging Face, a release on GitHub) is the
     # publisher's own document. Ownership is established by the
     # hierarchy in _hosted_release_artifact — an org-name match alone
-    # never fires this. Checked here, after the rumor veto above but
+    # never fires this, and (v1.8.3, Arch notes 2026-11-06) a
+    # namespace match alone never fires it either: only trusted
+    # ownership evidence does, and none is available to this system
+    # yet. Checked here, after the rumor veto above but
     # before the weak secondary cues ("reported", "according to"),
     # which misfire on release tables ("results reported alongside...").
     if _hosted_release_artifact(text, source_url)[0]:
@@ -498,9 +501,12 @@ def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
     an academic/institutional host; the document carrying its own
     primary identifiers (DOI, arXiv, SEC/EDGAR references); or a
     hosted release artifact whose ownership is independently
-    established by hosting context (Arch objection 2026-11-05,
+    established by trusted evidence (Arch objection 2026-11-05,
     v1.8.2: a candidate whose ownership is not established does NOT
-    count as first-party evidence).
+    count as first-party evidence; Arch notes 2026-11-06, v1.8.3: a
+    namespace match alone does not count either — no trusted
+    verification mechanism is available to this system yet, so the
+    hosted path is currently unreachable).
     """
     if _first_party_announcement(text)[0]:
         return True
@@ -519,12 +525,17 @@ def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
     return False
 
 
-# Hosted release artifacts — v1.8.2 (Arch objection 2026-11-05): TWO
+# Hosted release artifacts — v1.8.3 (Arch notes 2026-11-06): THREE
 # SEPARATE questions, because a document must not certify itself merely
-# by looking sufficiently official. The v1.8.1 implementation mixed
-# them: its authorship phrasing, release metadata, and in-text links
-# all originate from the document being evaluated, so a convincing
-# fake could establish its own ownership.
+# by looking sufficiently official, and a namespace match is not proof
+# of verified organizational control. The v1.8.1 implementation mixed
+# them; v1.8.2 separated candidacy from ownership but let a platform
+# namespace match count as independently verified ownership. Arch's
+# correction: a matching namespace is stronger evidence than the
+# document merely saying it belongs to an org, but someone can
+# register a plausible org name without being authorized to represent
+# it — and the source URL itself is caller-supplied, so comparing it
+# against the text does not independently authenticate the document.
 #
 # Q1 — CANDIDATE: does the document BEHAVE like a first-party release
 # artifact? Document-internal signals only: an authorship construction
@@ -534,28 +545,42 @@ def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
 # A candidate is NOT a verified primary; it is a first-party claim
 # awaiting independent corroboration.
 #
-# Q2 — OWNERSHIP: can we INDEPENDENTLY establish that the claimed
-# publisher controls the artifact? Only hosting-context signals count
-# — signals the document cannot write for itself:
-#   (a) platform namespace: the source URL is on a known artifact
-#       host (huggingface.co, github.com, gitlab.com) and its first
-#       path segment IS the claimed org slug. The platform assigned
-#       that namespace; the document cannot choose where it is hosted.
-#   (b) own-domain hosting: the source URL's host is the claimed
-#       org's own domain (the org slug appears as a non-TLD label of
-#       the host). The org controls its domain; the document does not
-#       control where it was fetched from.
-# A verified organization association (e.g. a platform's verified-org
-# badge) would be a third Q2 signal, but no registry is available to
-# this system — it is a documented future extension, never silently
-# approximated from text. A namespace squatter (an attacker who
-# controls an org namespace named after a real company) is likewise
-# out of scope for this pass; the namespace check is the independent
-# signal available here, and its limits are stated, not hidden.
+# Q2a — NAMESPACE MATCH: does the hosting location match the claimed
+# identity? A hosting-context fact, recorded independently of
+# ownership: (a) platform namespace — the source URL is on a known
+# artifact host (huggingface.co, github.com, gitlab.com) and its first
+# path segment IS the claimed org slug; (b) own-domain hosting — the
+# source URL's host is the claimed org's own domain, where "own
+# domain" means the org slug is the registrable-domain label (the
+# label immediately before the TLD, or before a known second-level
+# public suffix such as .co.uk). An org-name match inside an arbitrary
+# hostname (baidu.huggingface.co.evil, huggingface.co.attacker.com)
+# is NOT a namespace match. This fact is worth recording — it is
+# stronger than a bare claim — but it verifies nothing on its own.
 #
-# If Q1 holds and Q2 does not, the document is preserved as a
+# Q2b — OWNERSHIP VERIFIED: does INDEPENDENT evidence establish that
+# the claimed publisher controls the artifact? Trusted channels only:
+# a verified org association (e.g. a platform's verified-org badge,
+# via a registry) or a trusted official link pointing to the specific
+# artifact from a trustworthy retrieval record. NEITHER channel exists
+# in this system: no verified-org registry is available, and every
+# source URL the Sieve sees was supplied by the API caller alongside
+# the text — there is no authenticated retrieval record, so a namespace
+# match on a caller-supplied URL is a consistency check between two
+# caller-supplied values, not independent authentication. Until a
+# trusted mechanism exists, ownership is NEVER "verified" here; a
+# namespace match yields namespace_matched=true with ownership
+# "candidate_uncertain". The "verified" value stays in the enum for
+# the day a trusted channel lands — it is a reserved slot, not a
+# reachable state, and the code says so rather than pretending.
+#
+# If Q1 holds and Q2b does not, the document is preserved as a
 # candidate primary source with uncertain ownership — never promoted
-# to verified primary, never allowed to anchor.
+# to verified primary, never allowed to anchor. A namespace squatter
+# (an attacker who controls an org namespace named after a real
+# company) is likewise out of scope for this pass; the namespace
+# check is the independent signal available here, and its limits are
+# stated, not hidden.
 _ARTIFACT_HOSTS = ("huggingface.co", "github.com", "gitlab.com")
 _RELEASE_METADATA_MARKERS = (
     "model card", "license", "release", "version", "parameters",
@@ -659,32 +684,45 @@ def _hosted_artifact_candidate(text: str, source_url: str = "") -> Tuple[bool, s
     )
 
 
-def _hosted_ownership_verified(
+# Second-level public suffixes: when the label before the TLD is one
+# of these, the registrable-domain label is one further left
+# (baidu.co.uk -> "baidu"). Kept small and explicit — this is a
+# guardrail against org-name matches inside arbitrary hostnames, not
+# a public-suffix list.
+_SECOND_LEVEL_SUFFIXES = ("co", "com", "org", "net", "ac", "gov", "edu")
+
+
+def _hosted_namespace_matched(
     text: str, source_url: str = "", claimed_org: str = ""
 ) -> Tuple[bool, str]:
-    """Q2 — can we INDEPENDENTLY establish that the claimed publisher
-    controls the artifact?
+    """Q2a — does the HOSTING LOCATION match the claimed identity?
 
-    Only hosting-context signals count: the platform namespace (the
-    source URL's first path segment on a known artifact host IS the
-    claimed org slug) or own-domain hosting (the source URL's host is
-    the claimed org's own domain). Both are facts about where the
-    document was fetched from, not things the document says about
-    itself. Document-internal signals — authorship phrasing, metadata,
-    links inside the text — can NEVER establish this on their own.
-    Returns (verified, reason).
+    A hosting-context fact, recorded independently of ownership. Two
+    shapes, both exact — a slug that merely contains the org name
+    ("baidu-official", "xbaidu") never matches, and an org-name match
+    inside an arbitrary hostname ("baidu.huggingface.co.evil",
+    "huggingface.co.attacker.com") never matches:
+      (a) platform namespace: the source URL is on a known artifact
+          host and its first path segment IS the claimed org slug;
+      (b) own-domain hosting: the claimed org slug is the
+          registrable-domain label of the source URL's host — the
+          label immediately before the TLD (acme.com, www.acme.com,
+          research.baidu.com), or before a known second-level public
+          suffix (baidu.co.uk).
+    For artifact hosts the namespace check decides outright, so a doc
+    claiming "Hugging Face" under somebody else's namespace cannot
+    ride on the huggingface.co host. A match here is stronger than a
+    bare claim — and it verifies nothing on its own (see Q2b).
+    Returns (matched, reason).
     """
     org = (claimed_org or _extract_claimed_org(text)).lower()
     if not org:
         return False, "no claimed publisher named in the text"
     if not source_url:
-        return False, "no source URL: ownership cannot be established independently"
+        return False, "no source URL: namespace cannot be checked"
     parts = [p for p in urlparse(source_url).path.split("/") if p]
     host = urlparse(source_url).netloc.lower()
     # (a) Platform namespace: the artifact host assigned this org slug.
-    # This check decides for artifact hosts — own-domain hosting below
-    # never runs for them, so a doc claiming "Hugging Face" under
-    # somebody else's namespace cannot ride on the huggingface.co host.
     if any(host == h or host.endswith("." + h) for h in _ARTIFACT_HOSTS):
         if parts and parts[0].lower() == org:
             return True, (
@@ -696,9 +734,17 @@ def _hosted_ownership_verified(
             f"source URL namespace {slug!r} does not match claimed "
             f"publisher {org!r}"
         )
-    # (b) Own-domain hosting: the claimed org's own domain.
+    # (b) Own-domain hosting: the org slug must be the
+    # registrable-domain label — immediately before the TLD, or before
+    # a known second-level public suffix. "org in labels" is NOT
+    # enough: baidu.huggingface.co.evil carries "baidu" as a label
+    # without Baidu owning anything about that hostname.
     labels = host.split(".")
-    if org in labels[:-1]:
+    if len(labels) >= 2 and labels[-2] == org:
+        return True, (
+            f"source URL host {host} is the claimed publisher's own domain"
+        )
+    if len(labels) >= 3 and labels[-2] in _SECOND_LEVEL_SUFFIXES and labels[-3] == org:
         return True, (
             f"source URL host {host} is the claimed publisher's own domain"
         )
@@ -708,30 +754,77 @@ def _hosted_ownership_verified(
     )
 
 
+def _hosted_ownership_verified(
+    text: str, source_url: str = "", claimed_org: str = ""
+) -> Tuple[bool, str]:
+    """Q2b — does INDEPENDENT evidence establish that the claimed
+    publisher controls the artifact?
+
+    Trusted channels only: (i) a verified org association (a
+    platform's verified-org badge, via a registry) or (ii) a trusted
+    official link pointing to the specific artifact from a trustworthy
+    retrieval record. NEITHER channel exists in this system: no
+    verified-org registry is available to it, and every source URL it
+    sees was supplied by the API caller alongside the text — there is
+    no authenticated retrieval record, so a namespace match on a
+    caller-supplied URL is a consistency check between two
+    caller-supplied values, not independent authentication.
+
+    Until a trusted mechanism exists this ALWAYS returns False, and
+    says why. That is the honest state, not a stub to be worked
+    around: a namespace match is recorded separately by
+    _hosted_namespace_matched() and must never be re-described here
+    as verified ownership. The "verified" ownership status stays
+    reachable only through a future trusted channel; when one lands,
+    it plugs in here and nowhere else.
+    Returns (verified, reason).
+    """
+    org = (claimed_org or _extract_claimed_org(text)).lower()
+    if not org:
+        return False, "no claimed publisher named in the text"
+    return False, (
+        "no trusted verification mechanism is available: no verified-org "
+        "registry, and the source URL is caller-supplied with no "
+        "authenticated retrieval record, so a namespace match cannot "
+        "independently establish organizational ownership"
+    )
+
+
 def _hosted_release_artifact(text: str, source_url: str = "") -> Tuple[bool, str]:
     """Verified hosted first-party evidence: the document behaves like a
     first-party release artifact (Q1, candidate) AND its ownership is
-    independently established by hosting context (Q2, verified).
+    independently established by trusted evidence (Q2b, verified).
 
     Returns (fires, reason). A candidate whose ownership is not
     established does NOT fire here — it is preserved as a candidate
     primary with uncertain ownership by the caller, never promoted.
     The reason names both stages, so a custody decision can explain
     itself instead of citing vague "cues".
+
+    v1.8.3 (Arch notes 2026-11-06): Q2b is currently unreachable — no
+    trusted verification mechanism exists — so this wrapper does not
+    fire for any hosted artifact today. That is deliberate: a
+    namespace match (Q2a) is recorded separately and is not ownership
+    verification. When a trusted channel lands, it plugs into
+    _hosted_ownership_verified() and this wrapper starts firing
+    again without other changes.
     """
     candidate, org, cand_reason = _hosted_artifact_candidate(text, source_url)
     if not candidate:
         return False, f"not a hosted release artifact candidate: {cand_reason}"
+    namespace_matched, ns_reason = _hosted_namespace_matched(text, source_url, org)
     verified, ver_reason = _hosted_ownership_verified(text, source_url, org)
     if not verified:
         return False, (
             f"hosted artifact candidate (claimed publisher {org!r}: "
-            f"{cand_reason}) but ownership not independently established: "
+            f"{cand_reason}); namespace "
+            f"{'matched' if namespace_matched else 'did not match'} "
+            f"({ns_reason}) but ownership not independently established: "
             f"{ver_reason}"
         )
     return True, (
-        f"hosted release artifact: {cand_reason}; ownership independently "
-        f"established: {ver_reason}"
+        f"hosted release artifact: {cand_reason}; namespace matched "
+        f"({ns_reason}); ownership independently established: {ver_reason}"
     )
 
 
@@ -1152,20 +1245,27 @@ def analyze(
         }
 
     # Hosted-artifact ownership separation (Arch objection 2026-11-05,
-    # v1.8.2): Q1 (behaves like a first-party release artifact) and Q2
-    # (ownership independently established by hosting context) are
-    # separate questions. A candidate whose ownership is NOT established
-    # is preserved as a candidate primary with uncertain ownership: its
-    # source-type confidence is capped below the verified-primary bar
-    # (0.70) so it can never anchor and gets the custody question, and
-    # it is flagged by name below. It is NOT silently demoted to
-    # secondary — the candidacy itself is evidence worth keeping
-    # visible. The cap does not apply when independent first-party
-    # evidence exists (DOI, announcement voice, academic/institutional
-    # host): then the primary standing does not rest on the hosted
-    # claim at all.
+    # v1.8.2; Arch notes 2026-11-06, v1.8.3): Q1 (behaves like a
+    # first-party release artifact), Q2a (the hosting location matches
+    # the claimed identity — recorded independently), and Q2b
+    # (ownership independently established by TRUSTED evidence) are
+    # separate questions. A namespace match is not ownership
+    # verification: the source URL is caller-supplied, so the match
+    # is a consistency check between two caller-supplied values, not
+    # independent authentication. A candidate whose ownership is NOT
+    # established is preserved as a candidate primary with uncertain
+    # ownership: its source-type confidence is capped below the
+    # verified-primary bar (0.70) so it can never anchor and gets the
+    # custody question, and it is flagged by name below. It is NOT
+    # silently demoted to secondary — the candidacy itself is evidence
+    # worth keeping visible. The cap does not apply when independent
+    # first-party evidence exists (DOI, announcement voice,
+    # academic/institutional host): then the primary standing does not
+    # rest on the hosted claim at all.
     hosted_candidate, hosted_claimed_org, hosted_candidate_reason = \
         _hosted_artifact_candidate(raw, source_url)
+    hosted_namespace_matched, hosted_namespace_reason = \
+        _hosted_namespace_matched(raw, source_url, hosted_claimed_org)
     hosted_verified, hosted_verified_reason = \
         _hosted_ownership_verified(raw, source_url, hosted_claimed_org)
     hosted_ownership_uncertain = bool(
@@ -1293,14 +1393,19 @@ def analyze(
             "that this publisher originated the claim. Treat as a lead pending verification."
         )
     if hosted_ownership_uncertain:
-        # Arch objection 2026-11-05 (v1.8.2): a document that behaves
-        # like a first-party release artifact but whose ownership is
-        # not independently established must not certify itself. It is
-        # preserved as a candidate primary with uncertain ownership.
+        # Arch objection 2026-11-05 (v1.8.2) + Arch notes 2026-11-06
+        # (v1.8.3): a document that behaves like a first-party release
+        # artifact but whose ownership is not independently established
+        # must not certify itself. The flag names both facts — the
+        # namespace match (or mismatch) AND why that does not verify
+        # ownership — so a reader can see the trust distinction instead
+        # of a bare "uncertain".
         flags.append(
             "Hosted release artifact claims first-party ownership "
             f"(candidate: {hosted_candidate_reason}) but ownership is not "
-            f"independently established ({hosted_verified_reason}). "
+            f"independently established (namespace "
+            f"{'matched' if hosted_namespace_matched else 'did not match'}: "
+            f"{hosted_namespace_reason}; {hosted_verified_reason}). "
             "Candidate primary source with uncertain ownership — treat as "
             "a lead pending verification."
         )
@@ -1527,24 +1632,31 @@ def analyze(
             "paragraph-level risk before passing this text forward."
         )
     # Hosted-artifact first-party evidence (v1.8.1, gap 1; split into
-    # candidate + verified ownership in v1.8.2), computed once above
+    # candidate + verified ownership in v1.8.2; namespace match split
+    # out as its own recorded fact in v1.8.3), computed once above
     # and reused here: the custody breakdown needs it for
     # primary_source_present, and the signal brief needs to know
     # whether the doc was downgraded (see the no-cue sentinel).
     # Only the VERIFIED pair fires primary_source_present; a candidate
-    # whose ownership is not established never certifies itself.
+    # whose ownership is not established never certifies itself — and
+    # a namespace match alone is not verification, so the Baidu card
+    # (namespace matched, ownership unverified) is a candidate here
+    # too until a trusted mechanism exists.
     hosted_first_party = hosted_verified
     if hosted_verified:
         hosted_reason = (
             f"hosted release artifact: {hosted_candidate_reason}; "
-            "ownership independently established: "
-            f"{hosted_verified_reason}"
+            "namespace matched: "
+            f"{hosted_namespace_reason}; ownership independently "
+            f"established: {hosted_verified_reason}"
         )
     elif hosted_candidate:
         hosted_reason = (
-            f"hosted artifact candidate ({hosted_candidate_reason}) but "
-            "ownership not independently established: "
-            f"{hosted_verified_reason}"
+            f"hosted artifact candidate ({hosted_candidate_reason}); "
+            "namespace "
+            f"{'matched' if hosted_namespace_matched else 'did not match'}: "
+            f"{hosted_namespace_reason}; ownership not independently "
+            f"established: {hosted_verified_reason}"
         )
     else:
         hosted_reason = hosted_candidate_reason
@@ -1553,6 +1665,14 @@ def analyze(
         else "candidate_uncertain" if hosted_candidate
         else "none"
     )
+    # Source-URL provenance (v1.8.3, Arch notes 2026-11-06): the Sieve
+    # has no authenticated retrieval path — every source_url it sees
+    # was supplied by the API caller alongside the text. A namespace
+    # match on a caller-supplied URL is a consistency check between
+    # two caller-supplied values, never authenticated retrieval
+    # evidence. Record the provenance so no output can silently
+    # present it as the latter.
+    source_url_provenance = "caller_supplied" if source_url else "none"
     # A consequential custody change: a declared high-trust type that
     # was not kept at full confidence, or a genre mismatch. The signal
     # brief must not accept an empty key_signals list in that case
@@ -1571,8 +1691,10 @@ def analyze(
             hosted_first_party=hosted_first_party,
             hosted_reason=hosted_reason,
             hosted_candidate=hosted_candidate,
+            hosted_namespace_matched=hosted_namespace_matched,
             hosted_ownership_status=hosted_ownership_status,
             hosted_ownership_reason=hosted_reason,
+            source_url_provenance=source_url_provenance,
         )
         evidence_shape_data = build_evidence_shape(
             raw, sentences, anchored_n, unanchored_n
