@@ -497,8 +497,10 @@ def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
     Dealroom case). Evidence is one of: first-party announcement voice;
     an academic/institutional host; the document carrying its own
     primary identifiers (DOI, arXiv, SEC/EDGAR references); or a
-    hosted release artifact whose ownership is established per Arch's
-    hierarchy (Arch review 2026-11-05, v1.8.1).
+    hosted release artifact whose ownership is independently
+    established by hosting context (Arch objection 2026-11-05,
+    v1.8.2: a candidate whose ownership is not established does NOT
+    count as first-party evidence).
     """
     if _first_party_announcement(text)[0]:
         return True
@@ -517,86 +519,219 @@ def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
     return False
 
 
-# Hosted release artifacts (Arch review 2026-11-05, v1.8.1): a vendor's
-# own release artifact does not stop being first-party merely because
-# another platform hosts it. A Baidu model card on Hugging Face can be
-# primary evidence for Baidu's own model-release claims. But ownership
-# must be ESTABLISHED, not assumed from a name match. Evidence hierarchy:
-#   1. verified publisher/org ownership — the source URL is on a known
-#      artifact host (huggingface.co, github.com, gitlab.com) under an
-#      org slug, AND the text names that org as the releaser/author
-#      (an authorship construction, not a bare name match);
-#   2. official links connecting the org to the artifact — the text
-#      links to the org's own domain, or the source URL host is the
-#      org's own domain;
-#   3. consistent release metadata + identifiable authorship — the doc
-#      carries release-artifact markers (model card / release / license /
-#      version / parameters / checkpoint / weights) and names the org
-#      as author.
-# Level 1 must hold AND at least one of levels 2 or 3. An org-name
-# match alone is NOT sufficient.
+# Hosted release artifacts — v1.8.2 (Arch objection 2026-11-05): TWO
+# SEPARATE questions, because a document must not certify itself merely
+# by looking sufficiently official. The v1.8.1 implementation mixed
+# them: its authorship phrasing, release metadata, and in-text links
+# all originate from the document being evaluated, so a convincing
+# fake could establish its own ownership.
+#
+# Q1 — CANDIDATE: does the document BEHAVE like a first-party release
+# artifact? Document-internal signals only: an authorship construction
+# naming an org as releaser/author, plus release metadata and/or an
+# official-looking link inside the text. The claimed org is read OUT
+# OF THE TEXT, never taken from the URL — the URL answers Q2, not Q1.
+# A candidate is NOT a verified primary; it is a first-party claim
+# awaiting independent corroboration.
+#
+# Q2 — OWNERSHIP: can we INDEPENDENTLY establish that the claimed
+# publisher controls the artifact? Only hosting-context signals count
+# — signals the document cannot write for itself:
+#   (a) platform namespace: the source URL is on a known artifact
+#       host (huggingface.co, github.com, gitlab.com) and its first
+#       path segment IS the claimed org slug. The platform assigned
+#       that namespace; the document cannot choose where it is hosted.
+#   (b) own-domain hosting: the source URL's host is the claimed
+#       org's own domain (the org slug appears as a non-TLD label of
+#       the host). The org controls its domain; the document does not
+#       control where it was fetched from.
+# A verified organization association (e.g. a platform's verified-org
+# badge) would be a third Q2 signal, but no registry is available to
+# this system — it is a documented future extension, never silently
+# approximated from text. A namespace squatter (an attacker who
+# controls an org namespace named after a real company) is likewise
+# out of scope for this pass; the namespace check is the independent
+# signal available here, and its limits are stated, not hidden.
+#
+# If Q1 holds and Q2 does not, the document is preserved as a
+# candidate primary source with uncertain ownership — never promoted
+# to verified primary, never allowed to anchor.
 _ARTIFACT_HOSTS = ("huggingface.co", "github.com", "gitlab.com")
 _RELEASE_METADATA_MARKERS = (
     "model card", "license", "release", "version", "parameters",
     "pre-train", "pretrain", "checkpoint", "weights",
 )
 
+_ORG_STOPWORDS = {
+    "the", "our", "this", "that", "these", "those", "a", "an", "and",
+    "by", "for", "with", "its", "their", "his", "her", "your", "my",
+    "one", "two", "first", "last", "new", "all", "any",
+}
 
-def _hosted_release_artifact(text: str, source_url: str = "") -> Tuple[bool, str]:
-    """Return (fires, reason) for hosted-artifact first-party evidence.
+# Authorship constructions that name a releaser/author, in priority
+# order. The captured group is the claimed org. Patterns are
+# case-sensitive on the captured name (it must start uppercase in the
+# text) so lowercase prose ("the team", "by releasing") never mints
+# an org. Tried in order: a "Team" construction outranks a looser
+# release-verb mention, so "Baidu ERNIE Team" claims Baidu, not
+# "Hugging" (which merely precedes "released" in the same header).
+_CLAIMED_ORG_RES = [
+    # "X Team" with up to two words between ("Baidu ERNIE Team").
+    re.compile(r"\b([A-Z][A-Za-z0-9_-]{1,30})(?:\s+[A-Za-z][A-Za-z0-9_-]{1,30}){0,2}\s+[Tt]eam\b"),
+    # "X Labs / Research / AI".
+    re.compile(r"\b([A-Z][A-Za-z0-9_-]{1,30})\s+(?:[Ll]abs?|[Rr]esearch|[Aa][Ii])\b"),
+    # "by X".
+    re.compile(r"\b[Bb]y\s+([A-Z][A-Za-z0-9_-]{1,30})\b"),
+    # "X's ...".
+    re.compile(r"\b([A-Z][A-Za-z0-9_-]{1,30})'s\b"),
+    # "Copyright ... X".
+    re.compile(r"[Cc]opyright[^.\n]{0,60}?\b([A-Z][A-Za-z0-9_-]{1,30})\b"),
+    # "X ... released/announced/introduced/..." (loosest; last resort).
+    re.compile(
+        r"\b([A-Z][A-Za-z0-9_-]{1,30})\b[^.!?\n]{0,60}?"
+        r"\b(?:[Rr]eleas|[Aa]nnounc|[Ii]ntroduc|[Pp]resent|[Pp]ublish|[Ll]aunch)\w*\b"
+    ),
+]
 
-    The reason names the hierarchy levels that fired, so a custody
-    decision can explain itself instead of citing vague "cues".
+
+def _extract_claimed_org(text: str) -> str:
+    """The org the document itself names as releaser/author, read out
+    of the text's authorship constructions. Returns the lowercased slug
+    or "" when no construction names one. Document-internal by
+    definition: it says who the document CLAIMS to be from, never who
+    actually controls the artifact."""
+    for pat in _CLAIMED_ORG_RES:
+        seen: Dict[str, int] = {}
+        for m in pat.finditer(text):
+            org = m.group(1)
+            if len(org) < 2 or org.lower() in _ORG_STOPWORDS:
+                continue
+            seen[org.lower()] = seen.get(org.lower(), 0) + 1
+        if seen:
+            # Most-mentioned org from this construction wins; ties go
+            # to the first mentioned (dict preserves insertion order).
+            return max(seen.items(), key=lambda kv: kv[1])[0]
+    return ""
+
+
+def _hosted_artifact_candidate(text: str, source_url: str = "") -> Tuple[bool, str, str]:
+    """Q1 — does the document behave like a first-party release artifact?
+
+    Returns (candidate, claimed_org, reason). Document-internal signals
+    only: the source URL must be on a known artifact host (the doc is a
+    hosted artifact at all), the text must name an org as releaser/author
+    (an authorship construction, not a bare name match), and the text
+    must carry release metadata and/or an official-looking link. None of
+    this establishes ownership — that is Q2's job.
     """
     if not source_url:
-        return False, "no source URL: hosted ownership cannot be established"
+        return False, "", "no source URL: cannot be a hosted artifact"
     host = urlparse(source_url).netloc.lower()
     if not any(host == h or host.endswith("." + h) for h in _ARTIFACT_HOSTS):
-        return False, "source URL is not on a known artifact host"
-    parts = [p for p in urlparse(source_url).path.split("/") if p]
-    if not parts:
-        return False, "source URL has no org path segment"
-    org = parts[0].lower()
-    if len(org) < 2:
-        return False, "org slug too short to identify a publisher"
+        return False, "", "source URL is not on a known artifact host"
+    claimed = _extract_claimed_org(text)
+    if not claimed:
+        return False, "", "no org named as releaser/author in the text"
     low = text.lower()
-    org_re = re.escape(org)
-    # Level 1 — the org named as releaser/author (not a bare name match).
-    authorship_res = [
-        rf"\b{org_re}\b(?:\s+\w+){{0,2}}\s+team\b",
-        rf"\b{org_re}\s+(?:labs?|research|ai)\b",
-        rf"\bby\s+{org_re}\b",
-        rf"\b{org_re}'s\b",
-        rf"copyright[^.\n]{{0,40}}?\b{org_re}\b",
-        rf"\b{org_re}\b[^.!?\n]{{0,60}}?\b(?:releas|announc|introduc|present|publish|launch)\w*\b",
-    ]
-    if not any(re.search(p, low) for p in authorship_res):
-        return False, f"org {org!r} not named as releaser/author in text"
-    # Level 2 — official links connecting the org to the artifact.
+    # Official-looking link INSIDE the text (document-internal: a doc
+    # can link anywhere, so this supports candidacy only).
     official_link = False
     for u in re.findall(r"https?://\S+", text):
-        u_host = urlparse(u).netloc.lower()
-        if org in u_host.split("."):
+        labels = urlparse(u).netloc.lower().split(".")
+        if claimed in labels[:-1]:
             official_link = True
             break
-    if not official_link and org in host.split("."):
-        official_link = True
-    # Level 3 — consistent release metadata + identifiable authorship.
     metadata_hits = [m for m in _RELEASE_METADATA_MARKERS if m in low]
     has_metadata = len(metadata_hits) >= 2
     if official_link:
-        return True, (
-            f"hosted release artifact: org {org!r} named as releaser/author "
-            "(level 1) + official link to the org's domain (level 2)"
+        return True, claimed, (
+            f"org {claimed!r} named as releaser/author + official link "
+            "to the org's domain in the text"
         )
     if has_metadata:
+        return True, claimed, (
+            f"org {claimed!r} named as releaser/author + release metadata "
+            f"({', '.join(metadata_hits[:4])})"
+        )
+    return False, claimed, (
+        f"org {claimed!r} named as releaser/author but neither an official "
+        "link nor release metadata in the text"
+    )
+
+
+def _hosted_ownership_verified(
+    text: str, source_url: str = "", claimed_org: str = ""
+) -> Tuple[bool, str]:
+    """Q2 — can we INDEPENDENTLY establish that the claimed publisher
+    controls the artifact?
+
+    Only hosting-context signals count: the platform namespace (the
+    source URL's first path segment on a known artifact host IS the
+    claimed org slug) or own-domain hosting (the source URL's host is
+    the claimed org's own domain). Both are facts about where the
+    document was fetched from, not things the document says about
+    itself. Document-internal signals — authorship phrasing, metadata,
+    links inside the text — can NEVER establish this on their own.
+    Returns (verified, reason).
+    """
+    org = (claimed_org or _extract_claimed_org(text)).lower()
+    if not org:
+        return False, "no claimed publisher named in the text"
+    if not source_url:
+        return False, "no source URL: ownership cannot be established independently"
+    parts = [p for p in urlparse(source_url).path.split("/") if p]
+    host = urlparse(source_url).netloc.lower()
+    # (a) Platform namespace: the artifact host assigned this org slug.
+    # This check decides for artifact hosts — own-domain hosting below
+    # never runs for them, so a doc claiming "Hugging Face" under
+    # somebody else's namespace cannot ride on the huggingface.co host.
+    if any(host == h or host.endswith("." + h) for h in _ARTIFACT_HOSTS):
+        if parts and parts[0].lower() == org:
+            return True, (
+                f"source URL namespace {parts[0]!r} on {host} matches "
+                f"claimed publisher {org!r}"
+            )
+        slug = parts[0] if parts else "(no org path segment)"
+        return False, (
+            f"source URL namespace {slug!r} does not match claimed "
+            f"publisher {org!r}"
+        )
+    # (b) Own-domain hosting: the claimed org's own domain.
+    labels = host.split(".")
+    if org in labels[:-1]:
         return True, (
-            f"hosted release artifact: org {org!r} named as releaser/author "
-            f"(level 1) + release metadata ({', '.join(metadata_hits[:4])}) (level 3)"
+            f"source URL host {host} is the claimed publisher's own domain"
         )
     return False, (
-        f"org {org!r} named as releaser/author but neither an official link "
-        "nor release metadata establishes the artifact"
+        f"source URL host {host} neither matches the claimed publisher's "
+        "artifact namespace nor its own domain"
+    )
+
+
+def _hosted_release_artifact(text: str, source_url: str = "") -> Tuple[bool, str]:
+    """Verified hosted first-party evidence: the document behaves like a
+    first-party release artifact (Q1, candidate) AND its ownership is
+    independently established by hosting context (Q2, verified).
+
+    Returns (fires, reason). A candidate whose ownership is not
+    established does NOT fire here — it is preserved as a candidate
+    primary with uncertain ownership by the caller, never promoted.
+    The reason names both stages, so a custody decision can explain
+    itself instead of citing vague "cues".
+    """
+    candidate, org, cand_reason = _hosted_artifact_candidate(text, source_url)
+    if not candidate:
+        return False, f"not a hosted release artifact candidate: {cand_reason}"
+    verified, ver_reason = _hosted_ownership_verified(text, source_url, org)
+    if not verified:
+        return False, (
+            f"hosted artifact candidate (claimed publisher {org!r}: "
+            f"{cand_reason}) but ownership not independently established: "
+            f"{ver_reason}"
+        )
+    return True, (
+        f"hosted release artifact: {cand_reason}; ownership independently "
+        f"established: {ver_reason}"
     )
 
 
@@ -1016,6 +1151,31 @@ def analyze(
             "inferred_primary_gated": gated_fallback,
         }
 
+    # Hosted-artifact ownership separation (Arch objection 2026-11-05,
+    # v1.8.2): Q1 (behaves like a first-party release artifact) and Q2
+    # (ownership independently established by hosting context) are
+    # separate questions. A candidate whose ownership is NOT established
+    # is preserved as a candidate primary with uncertain ownership: its
+    # source-type confidence is capped below the verified-primary bar
+    # (0.70) so it can never anchor and gets the custody question, and
+    # it is flagged by name below. It is NOT silently demoted to
+    # secondary — the candidacy itself is evidence worth keeping
+    # visible. The cap does not apply when independent first-party
+    # evidence exists (DOI, announcement voice, academic/institutional
+    # host): then the primary standing does not rest on the hosted
+    # claim at all.
+    hosted_candidate, hosted_claimed_org, hosted_candidate_reason = \
+        _hosted_artifact_candidate(raw, source_url)
+    hosted_verified, hosted_verified_reason = \
+        _hosted_ownership_verified(raw, source_url, hosted_claimed_org)
+    hosted_ownership_uncertain = bool(
+        hosted_candidate
+        and not hosted_verified
+        and not _has_first_party_primary_evidence(raw, source_url)
+    )
+    if hosted_ownership_uncertain:
+        st_confidence = min(st_confidence, 0.60)
+
     custody_raw, custody_label, custody_clues = source_custody_score(raw, effective_st, source_url)
     # st_confidence scales custody: prevents laundering weak text through a declared 'primary' label
     custody = custody_raw * (0.65 + 0.35 * st_confidence)
@@ -1131,6 +1291,18 @@ def analyze(
         flags.append(
             "Source custody uncertain: available evidence does not establish "
             "that this publisher originated the claim. Treat as a lead pending verification."
+        )
+    if hosted_ownership_uncertain:
+        # Arch objection 2026-11-05 (v1.8.2): a document that behaves
+        # like a first-party release artifact but whose ownership is
+        # not independently established must not certify itself. It is
+        # preserved as a candidate primary with uncertain ownership.
+        flags.append(
+            "Hosted release artifact claims first-party ownership "
+            f"(candidate: {hosted_candidate_reason}) but ownership is not "
+            f"independently established ({hosted_verified_reason}). "
+            "Candidate primary source with uncertain ownership — treat as "
+            "a lead pending verification."
         )
     if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and not genre_mismatch:
         flags.append(
@@ -1354,11 +1526,33 @@ def analyze(
             f"{language_guardrail_action.replace('_', ' ')}; inspect lexical and "
             "paragraph-level risk before passing this text forward."
         )
-    # Hosted-artifact first-party evidence (v1.8.1, gap 1), computed
-    # once and reused: the custody breakdown needs it for
+    # Hosted-artifact first-party evidence (v1.8.1, gap 1; split into
+    # candidate + verified ownership in v1.8.2), computed once above
+    # and reused here: the custody breakdown needs it for
     # primary_source_present, and the signal brief needs to know
     # whether the doc was downgraded (see the no-cue sentinel).
-    hosted_first_party, hosted_reason = _hosted_release_artifact(raw, source_url)
+    # Only the VERIFIED pair fires primary_source_present; a candidate
+    # whose ownership is not established never certifies itself.
+    hosted_first_party = hosted_verified
+    if hosted_verified:
+        hosted_reason = (
+            f"hosted release artifact: {hosted_candidate_reason}; "
+            "ownership independently established: "
+            f"{hosted_verified_reason}"
+        )
+    elif hosted_candidate:
+        hosted_reason = (
+            f"hosted artifact candidate ({hosted_candidate_reason}) but "
+            "ownership not independently established: "
+            f"{hosted_verified_reason}"
+        )
+    else:
+        hosted_reason = hosted_candidate_reason
+    hosted_ownership_status = (
+        "verified" if hosted_verified
+        else "candidate_uncertain" if hosted_candidate
+        else "none"
+    )
     # A consequential custody change: a declared high-trust type that
     # was not kept at full confidence, or a genre mismatch. The signal
     # brief must not accept an empty key_signals list in that case
@@ -1376,6 +1570,9 @@ def analyze(
             raw, source_genre, effective_st, source_url, st_confidence,
             hosted_first_party=hosted_first_party,
             hosted_reason=hosted_reason,
+            hosted_candidate=hosted_candidate,
+            hosted_ownership_status=hosted_ownership_status,
+            hosted_ownership_reason=hosted_reason,
         )
         evidence_shape_data = build_evidence_shape(
             raw, sentences, anchored_n, unanchored_n
