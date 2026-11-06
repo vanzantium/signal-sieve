@@ -346,14 +346,24 @@ EXPECTATIONS = {
         # ownership per Arch's hierarchy. The old inference said
         # secondary ("results reported alongside...") and the
         # contradiction flag discounted custody to 0.40.
+        # v1.8.2 (Arch objection 2026-11-05): the same case must STILL
+        # verify — the huggingface.co/baidu namespace IS the
+        # independent signal — so the breakdown must read candidate
+        # True + ownership "verified", and the uncertain-ownership
+        # flag must NOT fire.
         "source_type": "primary",
         "source_url": "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base",
         "checks": {
             "source_type_in": ["primary"],
-            "flag_absent":   ["contradicts"],
+            "flag_absent":   ["contradicts", "uncertain ownership"],
             "questions_absent": ["closest primary source", "evidence would establish"],
             "signal_brief_min": {"key_signals": 1},
-            "custody_breakdown": {"primary_source_present": True},
+            "custody_breakdown": {
+                "primary_source_present": True,
+                "hosted_artifact_candidate": True,
+                "hosted_ownership_status": "verified",
+                "hosted_first_party_artifact": True,
+            },
         },
     },
     "primary_claims_custody_uncertain.txt": {
@@ -372,6 +382,34 @@ EXPECTATIONS = {
             "questions_absent": ["closest primary source"],
             "flag_contains": ["contradicts"],
             "signal_brief_min": {"key_signals": 1},
+        },
+    },
+    # ── v1.8.2 fixtures (Arch objection 2026-11-05) ────────────────────────
+    "primary_hf_self_certifying_fake.txt": {
+        # A document that certifies itself must not be believed on its
+        # own say-so. This doc claims Acme ownership ("Acme Nova
+        # Team", copyright Acme, release metadata, a link to
+        # acme.com) but is hosted under an unrelated namespace
+        # (huggingface.co/randomuser/...). Q1 fires (candidate), Q2
+        # does not (namespace mismatch), so it is preserved as a
+        # candidate primary with uncertain ownership: confidence capped
+        # at 0.60, never an anchor, flagged by name, and the custody
+        # question asks what evidence would establish authorship.
+        "source_type": "primary",
+        "source_url": "https://huggingface.co/randomuser/nova-7-base",
+        "checks": {
+            "source_type_in": ["primary"],
+            "source_type_confidence_max": 0.60,
+            "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
+            "flag_contains": ["uncertain ownership"],
+            "questions_contains": ["evidence would establish"],
+            "signal_brief_min": {"key_signals": 1},
+            "custody_breakdown": {
+                "primary_source_present": False,
+                "hosted_artifact_candidate": True,
+                "hosted_ownership_status": "candidate_uncertain",
+                "hosted_first_party_artifact": False,
+            },
         },
     },
     "primary_hf_with_rumor.txt": {
