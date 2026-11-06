@@ -174,7 +174,8 @@ def detect_genre(text: str, url: str = "") -> str:
     if len(_PRESS_RELEASE.findall(text)) >= 2:
         return "official_release"
 
-    fin_term_hits = len(_FIN_TERMS.findall(text))
+    fin_terms = _FIN_TERMS.findall(text)
+    fin_term_hits = len(fin_terms)
     fin_num_hits  = len(_FIN_NUMERIC.findall(text))
 
     # Phase 1.6: financial genre sub-classification
@@ -191,7 +192,18 @@ def detect_genre(text: str, url: str = "") -> str:
         if macro_hits >= 3 and region_hits >= 2:
             return "global_macro_market_update"
 
-    if fin_term_hits >= 4 and fin_num_hits >= 3:
+    # If the text is financially worded but not a snapshot or macro
+    # piece, call it a snapshot — narrow by construction: an
+    # "earnings snapshot" is not about the market at large.
+    # v1.8.5 (Nov 6): this fallback requires financial vocabulary
+    # breadth, not repetition of one ambiguous word. A model-release
+    # announcement whose only financial term is "index" (Intelligence
+    # Index, AA Index, index version, per index task — all
+    # benchmark-index mentions) is not a market snapshot, whatever its
+    # $ amounts and ticker-shaped benchmark names say. A genuine
+    # snapshot names tickers, shares, breadth, sectors, OTC, investors.
+    non_index_terms = {t.lower() for t in fin_terms if t.lower() not in ("index", "indices")}
+    if fin_term_hits >= 4 and fin_num_hits >= 3 and non_index_terms:
         return "financial_market_snapshot"
 
     if any(h in lower_url for h in _NEWSLIKE_URL_HINTS):
