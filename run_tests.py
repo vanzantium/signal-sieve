@@ -351,18 +351,35 @@ EXPECTATIONS = {
         # independent signal — so the breakdown must read candidate
         # True + ownership "verified", and the uncertain-ownership
         # flag must NOT fire.
+        # v1.8.3 (Arch notes 2026-11-06): that verification is
+        # WITHDRAWN — a namespace match is not independently verified
+        # organizational ownership, and no trusted verification
+        # mechanism exists yet (no verified-org registry; source URLs
+        # are caller-supplied). The Baidu card is now a candidate
+        # primary with uncertain ownership: namespace_matched True,
+        # ownership "candidate_uncertain", confidence capped at 0.60
+        # (declared primary at 0.90, capped by the candidate rule),
+        # inferred "unknown" (no hosted evidence fires anymore), the
+        # custody question asked, the uncertain-ownership flag
+        # present, primary_source_present False. Effective type stays
+        # "primary" (declared). This is the honest consequence of the
+        # correction, recorded for Arch to confirm.
         "source_type": "primary",
         "source_url": "https://huggingface.co/baidu/ERNIE-5.5-Flash-Base",
         "checks": {
             "source_type_in": ["primary"],
-            "flag_absent":   ["contradicts", "uncertain ownership"],
-            "questions_absent": ["closest primary source", "evidence would establish"],
+            "source_type_confidence_max": 0.60,
+            "flag_contains": ["uncertain ownership"],
+            "questions_contains": ["evidence would establish"],
+            "questions_absent": ["closest primary source", "implementation dates"],
             "signal_brief_min": {"key_signals": 1},
             "custody_breakdown": {
-                "primary_source_present": True,
+                "primary_source_present": False,
                 "hosted_artifact_candidate": True,
-                "hosted_ownership_status": "verified",
-                "hosted_first_party_artifact": True,
+                "hosted_namespace_matched": True,
+                "hosted_ownership_status": "candidate_uncertain",
+                "hosted_first_party_artifact": False,
+                "source_url_provenance": "caller_supplied",
             },
         },
     },
@@ -407,8 +424,38 @@ EXPECTATIONS = {
             "custody_breakdown": {
                 "primary_source_present": False,
                 "hosted_artifact_candidate": True,
+                "hosted_namespace_matched": False,
                 "hosted_ownership_status": "candidate_uncertain",
                 "hosted_first_party_artifact": False,
+                "source_url_provenance": "caller_supplied",
+            },
+        },
+    },
+    # ── v1.8.3 fixtures (Arch notes 2026-11-06) ───────────────────────────
+    "primary_hf_namespace_impersonator.txt": {
+        # Namespace impersonation: this doc claims Acme ownership
+        # ("Acme Nova Team", copyright Acme, release metadata) but is
+        # hosted under huggingface.co/acme-official/... — a slug that
+        # merely CONTAINS the org name. The namespace must NOT match,
+        # ownership stays candidate_uncertain, confidence is capped at
+        # 0.60, and the custody question asks what evidence would
+        # establish authorship. A lookalike slug is not the org.
+        "source_type": "primary",
+        "source_url": "https://huggingface.co/acme-official/nova-7-base",
+        "checks": {
+            "source_type_in": ["primary"],
+            "source_type_confidence_max": 0.60,
+            "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
+            "flag_contains": ["uncertain ownership"],
+            "questions_contains": ["evidence would establish"],
+            "signal_brief_min": {"key_signals": 1},
+            "custody_breakdown": {
+                "primary_source_present": False,
+                "hosted_artifact_candidate": True,
+                "hosted_namespace_matched": False,
+                "hosted_ownership_status": "candidate_uncertain",
+                "hosted_first_party_artifact": False,
+                "source_url_provenance": "caller_supplied",
             },
         },
     },
