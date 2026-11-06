@@ -399,6 +399,9 @@ def build_custody_breakdown(
     st_confidence: float,
     hosted_first_party: bool = False,
     hosted_reason: str = "",
+    hosted_candidate: bool = False,
+    hosted_ownership_status: str = "none",
+    hosted_ownership_reason: str = "",
 ) -> Dict:
     """Return layered custody breakdown.
 
@@ -407,6 +410,15 @@ def build_custody_breakdown(
     (v1.8.1, gap 1): a vendor's own release artifact hosted on a
     third-party page IS the primary source material, not merely a
     document that links to one.
+
+    v1.8.2 (Arch objection 2026-11-05): candidate and ownership are
+    separate questions. `hosted_artifact_candidate` says whether the
+    document behaves like a first-party release artifact, while
+    `hosted_ownership_status` ("verified" | "candidate_uncertain" |
+    "none") says whether ownership was independently established by
+    hosting context. A candidate whose ownership is not established is
+    NEVER primary_source_present: it is a candidate primary with
+    uncertain ownership, not a verified primary.
     """
     data_providers = _find_data_providers(text)
     market_venues  = _find_market_venues(text)
@@ -431,6 +443,9 @@ def build_custody_breakdown(
         "primary_source_linked":  primary_linked,
         "hosted_first_party_artifact": hosted_first_party,
         "hosted_first_party_reason":   hosted_reason,
+        "hosted_artifact_candidate":   hosted_candidate,
+        "hosted_ownership_status":     hosted_ownership_status,
+        "hosted_ownership_reason":     hosted_ownership_reason,
         "data_source_named":      bool(data_providers),
         "data_source_name":       data_providers[0] if data_providers else None,
         "named_data_providers":   data_providers,
