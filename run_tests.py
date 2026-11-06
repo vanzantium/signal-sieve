@@ -631,6 +631,31 @@ EXPECTATIONS = {
             "flag_absent": ["Source custody uncertain"],
         },
     },
+
+    # ── v1.8.5 fixtures (Nov 6 comparator failures) ─────────────────────────
+    "model_release_benchmark_index.txt": {
+        # Nov 6 gap 4: a model-release announcement whose ONLY financial
+        # term is "index" (Intelligence Index, AA Index, index version,
+        # per index task — all benchmark-index mentions), with $ amounts
+        # and four pricing figures. Before v1.8.5 the financial fallback
+        # (fin terms >= 4 and fin numbers >= 3) typed it
+        # financial_market_snapshot, and the follow-ups suggested SEC
+        # filings for a model release. Genre must follow the doc's main
+        # claim: a release announcement is news, not a market snapshot.
+        # The genre list is deliberately broad — the pinned fact is
+        # "not a financial-market snapshot", whatever the release
+        # reads as otherwise.
+        "source_type": "primary",
+        "source_url": "https://thinkingmachines.ai/news/inkling-2-small/",
+        "checks": {
+            "genre_in": ["news_article", "generic_article", "official_release"],
+            # The action is treat_as_lead on this condensed text: the
+            # language guardrail fires on the single dense paragraph.
+            # The fixture pins the GENRE, not the anchor verdict — the
+            # full Nov 6 primary still anchors (see replay_nov6.py).
+            "action_in": ["treat_as_lead"],
+        },
+    },
 }
 
 GREEN  = "\033[32m" if sys.stdout.isatty() else ""
