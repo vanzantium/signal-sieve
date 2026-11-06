@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.8.1"
+ANALYSIS_VERSION  = "v1.8.2"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -553,7 +553,13 @@ _OPENAPI_SPEC: dict = {
                         "type": "object",
                         "description": (
                             "Layered custody: publisher/data/claim custody, "
-                            "primary_source_present, and hosted-first-party artifact evidence."
+                            "primary_source_present, and hosted-first-party artifact evidence. "
+                            "hosted_ownership_status is 'verified' (ownership independently "
+                            "established by hosting context), 'candidate_uncertain' (the "
+                            "document behaves like a first-party release artifact but "
+                            "ownership is not independently established), or 'none'. A "
+                            "candidate with uncertain ownership is never "
+                            "primary_source_present and never anchors."
                         ),
                     },
                     "signal_brief": {
