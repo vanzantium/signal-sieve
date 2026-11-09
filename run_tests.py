@@ -370,7 +370,7 @@ EXPECTATIONS = {
             "source_type_in": ["primary"],
             "source_type_confidence_max": 0.60,
             "flag_contains": ["uncertain ownership"],
-            "questions_contains": ["evidence would establish"],
+            "questions_contains": ["independent receipt"],
             "questions_absent": ["closest primary source", "implementation dates"],
             "signal_brief_min": {"key_signals": 1},
             "custody_breakdown": {
@@ -419,7 +419,7 @@ EXPECTATIONS = {
             "source_type_confidence_max": 0.60,
             "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
             "flag_contains": ["uncertain ownership"],
-            "questions_contains": ["evidence would establish"],
+            "questions_contains": ["independent receipt"],
             "signal_brief_min": {"key_signals": 1},
             "custody_breakdown": {
                 "primary_source_present": False,
@@ -447,7 +447,7 @@ EXPECTATIONS = {
             "source_type_confidence_max": 0.60,
             "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
             "flag_contains": ["uncertain ownership"],
-            "questions_contains": ["evidence would establish"],
+            "questions_contains": ["independent receipt"],
             "signal_brief_min": {"key_signals": 1},
             "custody_breakdown": {
                 "primary_source_present": False,
@@ -518,7 +518,7 @@ EXPECTATIONS = {
             "source_type_confidence_max": 0.60,
             "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
             "flag_contains": ["uncertain ownership"],
-            "questions_contains": ["evidence would establish"],
+            "questions_contains": ["independent receipt"],
             "signal_brief_min": {"key_signals": 1},
             "custody_breakdown": {
                 "primary_source_present": False,
@@ -546,7 +546,7 @@ EXPECTATIONS = {
             "source_type_confidence_max": 0.60,
             "action_in": ["treat_as_lead", "verify_primary", "seek_receipts", "drop", "reject"],
             "flag_contains": ["uncertain ownership"],
-            "questions_contains": ["evidence would establish"],
+            "questions_contains": ["independent receipt"],
             "signal_brief_min": {"key_signals": 1},
             "custody_breakdown": {
                 "primary_source_present": False,
@@ -632,6 +632,77 @@ EXPECTATIONS = {
         },
     },
 
+    # ── v1.8.6 fixtures (Arch fix plan 2026-11-08, P1) ──────────────────────
+    "primary_feed_header_google.txt": {
+        # P1: the Nov 8 leak — the feed header "PRIMARY SOURCE — Google
+        # ADK ..." was read by the loose release-verb pattern as the
+        # publisher org "primary". The header is now read first: the
+        # claimed org is "google", the hosting namespace (github.com/
+        # google/...) matches it, ownership stays candidate_uncertain
+        # (no trusted verification mechanism exists), and the custody
+        # question is the adapted one (a hosted candidate speaks as
+        # the originator).
+        "source_type": "primary",
+        "source_url": "https://github.com/google/adk-python/releases/tag/v2.14.0",
+        "checks": {
+            "source_type_in": ["primary"],
+            "source_type_confidence_max": 0.60,
+            "questions_contains": ["independent receipt"],
+            "questions_absent": ["evidence would establish", "closest primary source"],
+            "custody_breakdown": {
+                "claimed_publisher_org": "google",
+                "hosting_namespace": "google",
+                "hosted_artifact_candidate": True,
+                "hosted_namespace_matched": True,
+                "hosted_ownership_status": "candidate_uncertain",
+                "independently_verified_owner": None,
+                "primary_source_present": False,
+            },
+        },
+    },
+    "primary_fake_google_namespace.txt": {
+        # P1: a fake Google release under a lookalike namespace
+        # (github.com/google-official/...). The header still names
+        # "google" as the claimed org, but the hosting namespace is
+        # "google-official" and does NOT match — a lookalike slug is
+        # not the org. Ownership stays candidate_uncertain.
+        "source_type": "primary",
+        "source_url": "https://github.com/google-official/adk-python/releases/tag/v2.14.0",
+        "checks": {
+            "source_type_in": ["primary"],
+            "source_type_confidence_max": 0.60,
+            "questions_contains": ["independent receipt"],
+            "custody_breakdown": {
+                "claimed_publisher_org": "google",
+                "hosting_namespace": "google-official",
+                "hosted_artifact_candidate": True,
+                "hosted_namespace_matched": False,
+                "hosted_ownership_status": "candidate_uncertain",
+                "independently_verified_owner": None,
+                "primary_source_present": False,
+            },
+        },
+    },
+    "primary_third_party_story.txt": {
+        # P1: the text-mined fallback tightenings. "classified by
+        # Mozilla" sits mid-document with no release verb nearby
+        # (byline gate); "GPT-6 Cyber's" is preceded by the model
+        # token "GPT-6"; "We're introducing" must not mint the
+        # pronoun "we" as an org. None of the three may mint an org,
+        # so no org is claimed at all. (The "We're introducing" voice
+        # DOES fire the announcement regex, so the custody question
+        # is the adapted one — voice and org-minting are separate:
+        # the doc speaks as an originator without naming one.)
+        "source_type": "primary",
+        "checks": {
+            "questions_contains": ["independent receipt"],
+            "questions_absent": ["evidence would establish", "closest primary source"],
+            "custody_breakdown": {
+                "claimed_publisher_org": None,
+                "independently_verified_owner": None,
+            },
+        },
+    },
     # ── v1.8.5 fixtures (Nov 6 comparator failures) ─────────────────────────
     "model_release_benchmark_index.txt": {
         # Nov 6 gap 4: a model-release announcement whose ONLY financial
