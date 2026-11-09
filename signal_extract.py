@@ -416,6 +416,8 @@ def build_custody_breakdown(
     hosted_ownership_status: str = "none",
     hosted_ownership_reason: str = "",
     source_url_provenance: str = "none",
+    claimed_publisher_org: str = "",
+    hosting_namespace: str = "",
 ) -> Dict:
     """Return layered custody breakdown.
 
@@ -445,6 +447,20 @@ def build_custody_breakdown(
     came from — "caller_supplied" whenever one was given, "none"
     otherwise — so a namespace match on a caller-supplied URL can
     never silently pose as authenticated retrieval evidence.
+
+    v1.8.6, P1/P3 (Arch plan 2026-11-08): the custody fields are
+    separated so they can be read without forcing agreement.
+    `claimed_publisher_org` is the org the document itself names
+    (feed header first, then authorship constructions) — a claim,
+    never a verification. `hosting_namespace` is where the document
+    is hosted (artifact host's first path segment, else the
+    registrable-domain label) — a location fact, not an identity.
+    `independently_verified_owner` is the claimed org only when
+    ownership was independently established through a trusted
+    channel, else None; no trusted channel exists today, so it is
+    None for every document. `custody_field_notes` documents what
+    each field measures, so a reader can see why two fields disagree
+    instead of the system papering over the disagreement.
     """
     data_providers = _find_data_providers(text)
     market_venues  = _find_market_venues(text)
@@ -460,6 +476,14 @@ def build_custody_breakdown(
     publisher_custody = _PUBLISHER_WEIGHTS.get(source_type, 0.40)
     data_custody = 0.85 if primary_linked else (0.60 if data_providers else 0.30)
     claim_custody = min(0.30 + attribution_hits * 0.07, 0.85)
+    # v1.8.6, P1/P3: the verified owner is the claimed org only when
+    # ownership was independently established; otherwise None. No
+    # trusted channel exists today, so this is None for every
+    # document — that is the honest state, not a gap to fill by
+    # re-describing a namespace match.
+    independently_verified_owner = (
+        claimed_publisher_org if hosted_ownership_status == "verified" else None
+    )
     return {
         "publisher_custody":      round(publisher_custody, 2),
         "data_custody":           round(data_custody, 2),
@@ -474,6 +498,56 @@ def build_custody_breakdown(
         "hosted_ownership_status":     hosted_ownership_status,
         "hosted_ownership_reason":     hosted_ownership_reason,
         "source_url_provenance":       source_url_provenance,
+        "claimed_publisher_org":       claimed_publisher_org or None,
+        "hosting_namespace":           hosting_namespace or None,
+        "independently_verified_owner": independently_verified_owner,
+        "custody_field_notes": {
+            "custody_label": (
+                "Text-form + declared-type proximity: what the document "
+                "looks like, and how close its declared type sits to "
+                "that form. It does not certify who published it."
+            ),
+            "primary_source_present": (
+                "Verified first-party presence only: a linked primary "
+                "source, or a hosted artifact whose ownership was "
+                "independently established. A candidate with uncertain "
+                "ownership is never present."
+            ),
+            "source_type_confidence": (
+                "Declared-vs-inferred agreement: how far the inferred "
+                "source type agrees with the declared one. Low "
+                "confidence means the declaration and the text "
+                "disagree, not that the text is false."
+            ),
+            "claim_custody": (
+                "Attribution density: how often the text attributes "
+                "claims to a named source (said/reported/according "
+                "to/...). A density measure, not a verification of any "
+                "single attribution."
+            ),
+            "publisher_custody": (
+                "A weight for the effective source type: how much "
+                "custody that type of document usually carries. A "
+                "prior, not a measurement of this document."
+            ),
+            "claimed_publisher_org": (
+                "The org the document itself names as releaser/author "
+                "(feed header first, then authorship constructions). A "
+                "claim, never a verification."
+            ),
+            "hosting_namespace": (
+                "Where the document is hosted: the artifact host's "
+                "first path segment, or the registrable-domain label "
+                "of the source URL's host. A location fact, not an "
+                "identity."
+            ),
+            "independently_verified_owner": (
+                "The claimed org, only when ownership was "
+                "independently established through a trusted channel; "
+                "None otherwise. No trusted channel exists in this "
+                "system today, so this is None for every document."
+            ),
+        },
         "data_source_named":      bool(data_providers),
         "data_source_name":       data_providers[0] if data_providers else None,
         "named_data_providers":   data_providers,
@@ -1075,14 +1149,30 @@ def extract_signal_brief(
     high-trust type not kept at full confidence, or a genre mismatch);
     the generic extractor must not accept an empty key_signals list in
     that case (Arch review 2026-11-05, v1.8.1).
+
+    v1.8.6, P4: when the extraction finds no key signal in any genre,
+    the brief carries an explicit extraction_note saying so, instead
+    of silently presenting an empty list.
     """
     if genre == "financial_market_snapshot":
-        return _extract_financial(text, source_type, source_url)
-    if genre == "global_macro_market_update":
-        return _extract_macro_update(text, source_type, source_url)
-    if genre == "investment_strategy_commentary":
-        return _extract_strategy_commentary(text, source_type, source_url)
-    if genre == "x_news_post":
-        return _extract_x_news_post(text, source_type, source_url)
-    return _extract_generic(text, genre, source_type, source_url,
-                            custody_downgraded=custody_downgraded)
+        brief = _extract_financial(text, source_type, source_url)
+    elif genre == "global_macro_market_update":
+        brief = _extract_macro_update(text, source_type, source_url)
+    elif genre == "investment_strategy_commentary":
+        brief = _extract_strategy_commentary(text, source_type, source_url)
+    elif genre == "x_news_post":
+        brief = _extract_x_news_post(text, source_type, source_url)
+    else:
+        brief = _extract_generic(text, genre, source_type, source_url,
+                                 custody_downgraded=custody_downgraded)
+    # v1.8.6, P4: an empty key_signals list says so explicitly, in any
+    # genre — never silently present an empty extraction as a signal.
+    # (The v1.8.1 downgrade sentinel inside _extract_generic already
+    # fills key_signals for downgraded docs, so this fires only where
+    # the extraction genuinely found nothing.)
+    if not brief.get("key_signals"):
+        brief["extraction_note"] = (
+            "No supported signal extracted: the extractor found no "
+            "key-signal sentence in this document."
+        )
+    return brief
