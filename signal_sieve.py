@@ -546,6 +546,22 @@ def _first_party_announcement(text: str) -> Tuple[bool, str]:
     return False, "no first-person announcement voice found"
 
 
+def _speaks_as_originator(text: str) -> bool:
+    """Does the document speak in the originator's own voice — a
+    first-party announcement ("We're introducing ...") or first-person
+    research conduct ("we measured ...")? This is the raw voice,
+    WITHOUT the secondary-reporting veto that _first_party_announcement()
+    / _first_person_research() apply: the veto is a custody decision
+    (whether the doc can serve as a primary source — and the Nov 7
+    genuine primaries stay downgraded on it, per P3), while this is a
+    wording decision (whether asking "what evidence would establish
+    that this publisher originated the claim" is the wrong question to
+    ask a document that already speaks as the originator). A side
+    detail ("previously reported") can trigger the custody veto
+    without changing whose voice the document speaks in."""
+    return bool(_ANNOUNCEMENT_RE.search(text) or _RESEARCH_CONDUCT_RE.search(text))
+
+
 def _has_first_party_primary_evidence(text: str, source_url: str = "") -> bool:
     """Positive first-party evidence for an inferred PRIMARY type.
 
@@ -654,7 +670,53 @@ _ORG_STOPWORDS = {
     "the", "our", "this", "that", "these", "those", "a", "an", "and",
     "by", "for", "with", "its", "their", "his", "her", "your", "my",
     "one", "two", "first", "last", "new", "all", "any",
+    # Pronouns (v1.8.6, P1): "We're introducing ..." must never mint
+    # "we" as an org.
+    "we", "us", "it", "they", "he", "she",
 }
+
+# Pipeline feed labels are not publisher names (v1.8.6, P1): the Nov 8
+# run mistook the feed header "PRIMARY SOURCE — Google ADK ..." for a
+# publisher org ("primary") via the loose release-verb pattern. These
+# labels are reserved and can never be minted as an org, in any
+# construction.
+_RESERVED_ORG_LABELS = {
+    "primary", "secondary", "tertiary", "coverage", "companion", "source",
+}
+
+# The pipeline feed header names the publisher the feed says published
+# the document ("PRIMARY SOURCE — OpenAI, ..."). First word after the
+# dash, slugified. This is the feed's declaration, not a verification.
+_HEADER_ORG_RE = re.compile(
+    r"^(?:PRIMARY SOURCE|PRIMARY COMPANION|COVERAGE)\s*[\u2014\-]\s*"
+    r"([A-Za-z][A-Za-z0-9_-]{1,30})",
+    re.M,
+)
+
+# Release/authorship verbs, for the "by X" byline gate (v1.8.6, P1).
+_RELEASE_VERB_RE = re.compile(
+    r"\b(?:releas|announc|introduc|present|publish|launch|author|writ|post|report)\w*\b",
+    re.I,
+)
+
+# A capitalized token carrying a digit ("GPT-6", "GPT-5.6") — a model
+# token, not a publisher name (v1.8.6, P1).
+_MODEL_TOKEN_RE = re.compile(r"([A-Za-z][A-Za-z0-9._-]*)\s*$")
+
+
+def _header_claimed_org(text: str) -> str:
+    """The org named in the pipeline feed header, if the text carries
+    one. Returns the lowercased slug or "" when no feed header names
+    an org. The header is the feed's own declaration of who published
+    the document — it says who the feed SAYS published it, never who
+    actually controls the artifact."""
+    m = _HEADER_ORG_RE.search(text)
+    if not m:
+        return ""
+    org = m.group(1).lower()
+    if org in _RESERVED_ORG_LABELS:
+        return ""
+    return org
 
 # Authorship constructions that name a releaser/author, in priority
 # order. The captured group is the claimed org. Patterns are
@@ -683,17 +745,48 @@ _CLAIMED_ORG_RES = [
 
 
 def _extract_claimed_org(text: str) -> str:
-    """The org the document itself names as releaser/author, read out
-    of the text's authorship constructions. Returns the lowercased slug
-    or "" when no construction names one. Document-internal by
-    definition: it says who the document CLAIMS to be from, never who
-    actually controls the artifact."""
-    for pat in _CLAIMED_ORG_RES:
+    """The org the document itself names as releaser/author. Returns
+    the lowercased slug or "" when no construction names one.
+    Document-internal by definition: it says who the document CLAIMS
+    to be from, never who actually controls the artifact.
+
+    v1.8.6, P1 — source type is not publisher identity. The feed
+    header is read first (the pipeline's own declaration of who
+    published the document); the text-mined constructions are the
+    fallback. Reserved feed labels ("primary", "secondary",
+    "coverage", ...) can never be minted as an org, in any
+    construction. Two tightenings on the fallback: "by X" counts
+    only in the byline zone (first ~600 chars) or when a
+    release/authorship verb follows within 60 chars (kills
+    "classified by Mozilla" mid-document), and "X's" skips a match
+    whose captured word is preceded by a model token ("GPT-6
+    Cyber's" must not mint "cyber").
+    """
+    header = _header_claimed_org(text)
+    if header:
+        return header
+    for idx, pat in enumerate(_CLAIMED_ORG_RES):
         seen: Dict[str, int] = {}
         for m in pat.finditer(text):
             org = m.group(1)
             if len(org) < 2 or org.lower() in _ORG_STOPWORDS:
                 continue
+            if org.lower() in _RESERVED_ORG_LABELS:
+                continue
+            if idx == 2:
+                # "by X": byline zone, or a release/authorship verb
+                # follows within 60 chars.
+                if m.start() > 600 and not _RELEASE_VERB_RE.search(
+                        text[m.end():m.end() + 60]):
+                    continue
+            if idx == 3:
+                # "X's": skip when the captured word is preceded by a
+                # model token ("GPT-6 Cyber's" -> "cyber").
+                prev = _MODEL_TOKEN_RE.search(text[:m.start()])
+                if prev:
+                    tok = prev.group(1)
+                    if tok[0].isupper() and any(c.isdigit() for c in tok):
+                        continue
             seen[org.lower()] = seen.get(org.lower(), 0) + 1
         if seen:
             # Most-mentioned org from this construction wins; ties go
@@ -815,6 +908,26 @@ def _hosted_namespace_matched(
         f"source URL host {host} neither matches the claimed publisher's "
         "artifact namespace nor its own domain"
     )
+
+
+def _hosting_namespace(source_url: str) -> str:
+    """The hosting namespace of the source URL (v1.8.6, P1/P3): for an
+    artifact host, the first path segment (the platform-assigned org
+    slug); otherwise the registrable-domain label of the host. A
+    location fact, never an identity — it says where the document is
+    hosted, not who published it. "" when no URL."""
+    if not source_url:
+        return ""
+    host = urlparse(source_url).netloc.lower()
+    parts = [p for p in urlparse(source_url).path.split("/") if p]
+    if any(host == h or host.endswith("." + h) for h in _ARTIFACT_HOSTS):
+        return parts[0].lower() if parts else ""
+    labels = host.split(".")
+    if len(labels) >= 3 and labels[-2] in _SECOND_LEVEL_SUFFIXES:
+        return labels[-3]
+    if len(labels) >= 2:
+        return labels[-2]
+    return ""
 
 
 def _hosted_ownership_verified(
@@ -1650,10 +1763,28 @@ def analyze(
             "What implementation dates, scope limits, or superseding versions apply to this claim?"
         )
     elif declared_st in _HIGH_TRUST_TYPES:
-        questions.append(
-            "What evidence would establish that this publisher originated the claim — "
-            "authorship, ownership, or an official link to the source?"
+        # v1.8.6, P4: asking an apparent originator "what evidence
+        # would establish that this publisher originated the claim"
+        # is the wrong question — the document already speaks in the
+        # originator's voice (a first-party announcement, first-person
+        # research, or a hosted release artifact). Ask instead what
+        # independent receipt would authenticate that authorship.
+        apparent_originator = bool(
+            _speaks_as_originator(raw)
+            or hosted_candidate
         )
+        if apparent_originator:
+            questions.append(
+                "What independent receipt would authenticate this "
+                "publisher's authorship — a verified-organization "
+                "record, an official link retrieved through a trusted "
+                "channel, or corroboration from a second source?"
+            )
+        else:
+            questions.append(
+                "What evidence would establish that this publisher originated the claim — "
+                "authorship, ownership, or an official link to the source?"
+            )
     else:
         questions.append("What is the closest primary source for the main claim?")
     questions.extend([
@@ -1771,6 +1902,12 @@ def analyze(
     custody_breakdown: Dict = {}
     evidence_shape_data: Dict = {}
     signal_brief: Dict = {}
+    # v1.8.6, P1/P3: the claimed publisher and the hosting
+    # namespace are recorded as separate facts, so a reader can see
+    # the claim, the location, and the (absent) verification side by
+    # side instead of the system forcing them to agree.
+    claimed_publisher_org = _extract_claimed_org(raw)
+    hosting_namespace = _hosting_namespace(source_url)
     if _EXTRACT_AVAILABLE:
         custody_breakdown = build_custody_breakdown(
             raw, source_genre, effective_st, source_url, st_confidence,
@@ -1781,6 +1918,8 @@ def analyze(
             hosted_ownership_status=hosted_ownership_status,
             hosted_ownership_reason=hosted_reason,
             source_url_provenance=source_url_provenance,
+            claimed_publisher_org=claimed_publisher_org,
+            hosting_namespace=hosting_namespace,
         )
         evidence_shape_data = build_evidence_shape(
             raw, sentences, anchored_n, unanchored_n
