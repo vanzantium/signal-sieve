@@ -191,13 +191,58 @@ _MONTH_ALT = (
 _DATE_FULL_RE = re.compile(
     r"\b(" + _MONTH_ALT + r")\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b"
     r"|\b(\d{1,2})(?:st|nd|rd|th)?\s+(" + _MONTH_ALT + r")\s+(\d{4})\b"
-    r"|\b(\d{4})-(\d{2})-(\d{2})\b",
+    # ISO dates, with an optional time component (v1.8.6, P5): a bare
+    # "2026-11-07T00:58:18Z" failed the old trailing \b (no word
+    # boundary between the day digits and the "T"), so every ISO
+    # timestamp was invisible to date extraction — the Nov 7 packet
+    # lost both the SecurityWeek published/updated timestamps and the
+    # TSN updated timestamp. The time is matched and masked with the
+    # date; the date_key stays YYYY-MM-DD.
+    r"|\b(\d{4})-(\d{2})-(\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?\b",
     re.I,
 )
 _YEAR_RE = re.compile(
     r"\b(?:in|from|by|during|starting|effective|early|late|mid)[\s\-]+(20\d{2})\b",
     re.I,
 )
+
+
+def _date_role(text: str, start: int, end: int) -> str:
+    """Role of a date occurrence: event / published / updated / fetched /
+    access / unknown, from the label cues around it.
+
+    v1.8.6 (P5): dates are not one undifferentiated pile — a release
+    heading date, a published_at timestamp, and a "Fetched 2026-11-08"
+    feed header are different kinds of dates, and a shared date that is
+    only ever a fetched date is a pipeline artifact, not a shared claim.
+    The role is read off the nearest label cue in a window BEFORE the
+    match; the window ends at the match, because a "Published: X,
+    updated Y" header would otherwise let "updated" bleed into X's
+    window and mislabel the published date. Anything without a cue
+    is "unknown" — honest, not guessed.
+    """
+    window = text[max(0, start - 70):end].lower()
+    # Nearest cue wins: the label closest to the match is the one that
+    # labels it. A "Fetched" header in the previous sentence must not
+    # outrank a "Published:" immediately before this date (the earlier
+    # priority-order read did exactly that: "Fetched 2026-11-08.
+    # Published: November 7, 2026." mislabeled November 7 as fetched).
+    cues = (
+        ("fetched", ("fetch",)),
+        ("updated", ("updat",)),
+        ("published", ("publish",)),
+        ("access", ("access",)),
+        ("event", ("heading date", "release")),
+    )
+    best_role = "unknown"
+    best_pos = -1
+    for role, words in cues:
+        for word in words:
+            pos = window.rfind(word)
+            if pos > best_pos:
+                best_pos = pos
+                best_role = role
+    return best_role
 
 
 # Benchmark variant identity (Sieve gap 2026-11-06, v1.8.5): a benchmark
@@ -539,7 +584,13 @@ def extract_date_claims(text: str) -> List[Dict]:
     inside "February 1, 2027" is part of that date, not a separate
     year-only claim, or every dated document would trivially share every
     year with every other dated document. Deduplicates on date_key.
-    Returns [{date_key, date_label, kind, raw, context}].
+    Returns [{date_key, date_label, kind, raw, context}] — full-date
+    claims also carry date_role / date_roles (v1.8.6, P5, see
+    _date_role): a document that mentions the same date more than once
+    — e.g. the AI Weekly feed's 2026-11-08 as published, updated AND
+    fetched — contributes one claim per date_key, with every role it
+    holds. A date that is only ever "fetched" is a pipeline artifact,
+    not a shared claim.
     """
     claims: List[Dict] = []
     seen: set = set()
@@ -558,7 +609,11 @@ def extract_date_claims(text: str) -> List[Dict]:
         if not (1 <= month <= 12 and 1 <= day <= 31):
             continue
         key = f"{year:04d}-{month:02d}-{day:02d}"
+        role = _date_role(text, m.start(), m.end())
         if key in seen:
+            for c in claims:
+                if c["date_key"] == key and role not in c["date_roles"]:
+                    c["date_roles"].append(role)
             continue
         seen.add(key)
         for i in range(m.start(), m.end()):
@@ -569,6 +624,8 @@ def extract_date_claims(text: str) -> List[Dict]:
             "kind":       "date",
             "raw":        m.group(0).strip(),
             "context":    text[max(0, m.start() - 40):m.end() + 40].strip()[:120],
+            "date_role":  role,
+            "date_roles": [role],
         })
     masked_text = "".join(masked)
     for m in _YEAR_RE.finditer(masked_text):
@@ -897,6 +954,782 @@ def extract_numeric_claims(
     return claims
 
 
+# ── Generic quantitative-claim fallback (v1.8.6, P2) ──────────────────────
+# Benchmark/pricing extraction only covers mapped entities. Vendor
+# announcements and release notes repeat figures — benchmark scores,
+# counts, percentages, costs — that no mapped entity catches, so compare
+# used to report zero shared claims on documents that agree everywhere
+# (Nov 7 GPT-6 Cyber packet, Nov 8 ADK 2.14.0 packet: 0 shared, 0
+# conflicts, 0 aligned, on docs agreeing on every figure). The fallback
+# extracts bounded generic quantitative claims from ordinary sentences
+# and compares only compatible identities: same metric family, same
+# measured subject (when stated), same context numbers (denominator),
+# same unit. It never expands the benchmark map, and it never calls
+# repetition "independent verification" — shared entries carry their
+# attribution, and a single-originator figure says so on the entry.
+#
+# Bounds, by design:
+#   - a number needs a metric cue (a verb or count noun naming what it
+#     measures) — metric-less numbers are skipped, never guessed;
+#   - versions, years, times, hyphenated modifiers (30-node, 200-turn),
+#     multipliers ("five times"), error codes and URLs are not claims;
+#   - number words only for three–nineteen, tens and hyphenated
+#     compounds, only next to a count noun (one/two excluded);
+#   - currency forces family "cost" (or "grants" when the clause names
+#     a grant); a per-unit denominator separates totals from per-unit
+#     figures ($1,279 per LPE exploit is not $1,213,430 total);
+#   - the measured subject is the nearest product token in the claim's
+#     own segment (since the previous number / until the next one), so
+#     "99.93% ... compared to 94.49% for GPT-5.6 Cyber" does not pin
+#     the 99.93% on GPT-5.6;
+#   - the benchmark name is recorded on the claim but is NOT part of
+#     the identity: a benchmark named in one doc and unnamed in another
+#     ("RemoteExploitBench" in the TSN 95% sentence, unnamed in the
+#     primary's) is the same claim. Two different NAMED benchmarks in
+#     one group is a benchmark mismatch instead (see compare_documents).
+_GENERIC_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_GENERIC_CLAUSE_SPLIT_RE = re.compile(r"[,;]|\s+and\s+")
+_GENERIC_DIGIT_RE = re.compile(
+    # One greedy digit run (commas allowed, must END on a digit):
+    # "2026" must match whole — the old \d{1,3} alternative split it
+    # into "202" + "6" and minted two spurious claims, and a trailing
+    # comma ("July 2026,") must not join the match or the year guard
+    # fails. "1,724", "2.8", "48.5", "0.30" all match.
+    r"([$£€]?)(\d(?:[\d,]*\d)?(?:\.\d+)?)"
+    r"(\s*(?:%|million|billion|thousand))?"
+)
+_GENERIC_NUMBER_WORDS = {
+    "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+    "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+    "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_GENERIC_NUMBER_WORD_RE = re.compile(
+    r"\b((?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)[- ]"
+    r"(?:one|two|three|four|five|six|seven|eight|nine)"
+    r"|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen"
+    r"|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty"
+    r"|forty|fifty|sixty|seventy|eighty|ninety)\b",
+    re.I,
+)
+# Product tokens: an ALLCAPS-ish name, optionally versioned, optionally
+# followed by a display word ("GPT-6 Cyber", "GPT-5.6 Sol", "GPT-6").
+# CamelCase names (ExploitGym, OpenAI, RemoteExploitBench) are not
+# product tokens — they are benchmarks or orgs, caught elsewhere.
+_GENERIC_PRODUCT_RE = re.compile(
+    r"\b([A-Z]{2,}(?:[-.][A-Za-z0-9]+)*(?:\s+(?:[A-Z][a-zA-Z]+|[A-Z]{2,})){0,2})\b"
+)
+_GENERIC_PRODUCT_BASE_STOPLIST = {
+    "lpe", "api", "url", "cve", "http", "https", "html", "css", "sql",
+    "json", "sdk", "gpu", "cpu", "ram", "tls", "ssl", "dns", "ai", "ml",
+    "llm", "cli", "tbd", "faq", "pdf", "doc", "jpg", "png", "svg", "xml",
+    "csv", "io", "os", "vm",
+}
+# Metric cues, in list order only as a tiebreak — the metric function
+# picks by NEARNESS to the number, not by list position (a cue that
+# belongs to another number in the same sentence must not win).
+_GENERIC_METRIC_CUES = [
+    (re.compile(r"\brecall\b", re.I), "recall"),
+    (re.compile(r"percentage points?", re.I), "percentage-point gap"),
+    (re.compile(r"relative improvement", re.I), "relative improvement"),
+    (re.compile(r"\bfaster\b", re.I), "speed"),
+    (re.compile(r"\bmemory\b", re.I), "memory"),
+    (re.compile(r"\bsampl\w*\b", re.I), "samples"),
+    (re.compile(r"out-of-scope", re.I), "out-of-scope avoidance"),
+    (re.compile(r"refrain\w*\s+.{0,30}exploit|exploit\w*\s+.{0,30}refrain", re.I),
+     "out-of-scope avoidance"),
+    (re.compile(r"proofs? of concept|\bpocs?\b", re.I), "proofs of concept"),
+    (re.compile(r"\btechniques?\b", re.I), "techniques"),
+    (re.compile(r"disclos\w*", re.I), "findings disclosed"),
+    (re.compile(r"reported\b.{0,60}\bto maintainers\b", re.I), "findings disclosed"),
+    # "exploit" as a whole word only: "ExploitGym" must not fire it
+    # (a benchmark name is not an exploit count — "48.5% on
+    # ExploitGym" is a score), and "exploitation" as an adjective
+    # ("10 new exploitation techniques") must not fire it either.
+    (re.compile(r"\bexploit(?:s|ed|ing)?\b", re.I), "exploits"),
+    (re.compile(r"\blpe\b", re.I), "exploits"),
+    (re.compile(r"reproduc\w*", re.I), "vulnerabilities"),
+    (re.compile(r"\bpatch\w*\b|\bstaging\b", re.I), "patches"),
+    (re.compile(r"\bmodules?\b", re.I), "modules"),
+    (re.compile(r"\btoolsets?\b|\bintegrations?\b", re.I), "features"),
+    (re.compile(r"\bfeatures?\b", re.I), "features"),
+    (re.compile(r"\bcomponents?\b", re.I), "components"),
+    (re.compile(r"breaking changes?", re.I), "breaking changes"),
+    (re.compile(r"vulnerabilit\w*", re.I), "vulnerabilities"),
+    (re.compile(r"\bflaws?\b|\bissues?\b", re.I), "vulnerabilities"),
+    (re.compile(r"\bfindings?\b", re.I), "findings"),
+    (re.compile(r"\brefus\w*\b", re.I), "refusal"),
+    (re.compile(r"\bcomplet\w*\b", re.I), "completion"),
+    (re.compile(r"\bscores?\b|\bachiev\w*\b|\breached\b", re.I), "score"),
+    # "48.5% on ExploitGym": a number followed by "on <Benchmark>" is
+    # a score on that benchmark.
+    (re.compile(r"\bon\s+[A-Z][a-z]+(?:[A-Z][a-z]+)+\b"), "score"),
+    (re.compile(r"\btasks?\b", re.I), "tasks"),
+    (re.compile(r"\btargets?\b", re.I), "targets"),
+    (re.compile(r"\bgrants?\b", re.I), "grants"),
+    (re.compile(r"\bcandidates?\b", re.I), "candidates"),
+    (re.compile(r"lines? of code|code ?base", re.I), "code"),
+    (re.compile(r"\bcost\b|\bcredits?\b", re.I), "cost"),
+]
+_GENERIC_FAMILY_LABELS = {
+    "score": "score", "recall": "recall", "speed": "workflow speed",
+    "memory": "peak memory", "modules": "modules", "features": "features",
+    "components": "components", "breaking changes": "breaking changes",
+    "exploits": "exploits", "vulnerabilities": "vulnerabilities",
+    "findings": "findings", "findings disclosed": "critical findings disclosed",
+    "patches": "patches", "refusal": "task refusal",
+    "completion": "task completion",
+    "out-of-scope avoidance": "out-of-scope avoidance rate",
+    "relative improvement": "relative improvement",
+    "percentage-point gap": "percentage-point gap",
+    "cost": "cost", "grants": "grants", "candidates": "candidate findings",
+    "targets": "audit targets", "techniques": "exploitation techniques",
+    "proofs of concept": "proofs of concept", "tasks": "tasks",
+    "code": "code base share", "samples": "sampled items",
+}
+_GENERIC_CTX_NUM_RE = re.compile(
+    # Denominators only: node/turn/run/test/task/workflow/user. Day and
+    # hour are durations, not denominators ("within 12 hours" is not a
+    # claim context — the ledger lists durations as not extracted).
+    r"(\d+(?:\.\d+)?)[- ](node|turn|run|test|task|workflow|user)s?\b",
+    re.I,
+)
+_GENERIC_DENOM_RE = re.compile(
+    # At most two words after per/of — a longer capture swallows the
+    # rest of the clause (\"per LPE exploit by OpenAI's arithmetic\")
+    # and splits one denominator into two different keys.
+    r"\b(?:per|out of|of)\s+([A-Za-z][\w\-]{0,20}(?:\s+[A-Za-z][\w\-]{0,20})?)"
+)
+_GENERIC_QUALIFIER_RE = re.compile(
+    r"\b(about|approximately|around|roughly|nearly|almost|up to|more than"
+    r"|over|at least|just over|just under)\b|~",
+    re.I,
+)
+_GENERIC_UPPER_BOUND_QUALS = {"up to", "at most", "no more than"}
+_GENERIC_APPROX_QUALS = {"about", "approximately", "~", "roughly", "nearly", "around", "almost"}
+# Verb-driven families: on a near-tie the governing verb names the
+# count ("sampled 166 exploits" is a sample count). Derived families
+# never hand their metric down to a baseline (a percentage-point gap
+# is not the metric of the score it measures).
+_GENERIC_VERB_DRIVEN_FAMILIES = {"samples", "findings disclosed"}
+_GENERIC_DERIVED_FAMILIES = {"percentage-point gap", "relative improvement"}
+_GENERIC_COMPARISON_MARKER_RE = re.compile(
+    r"\bcompared (?:with|to)\b|\bversus\b|\bvs\.?\b|\bup from\b|\bdown from\b"
+    r"|\bhigher than\b|\blower than\b|\bagainst\b",
+    re.I,
+)
+_GENERIC_PRODUCTION_VERB_RE = re.compile(
+    r"\b(?:produced|developed|found|identified|generated|created|reported"
+    r"|disclosed|scored|achieved|reached|built|ran|conducted)\b",
+    re.I,
+)
+_GENERIC_CAMEL_RE = re.compile(r"[A-Z][a-z]+(?:[A-Z][a-z]+)+")
+_GENERIC_BENCH_ORG_STOPLIST = {
+    "securityweek", "github", "gitlab", "huggingface", "coderabbit",
+    "openai", "google", "microsoft", "mozilla", "meta", "amazon",
+    "anthropic", "deepmind", "mistral", "cisco", "teamsrunner",
+    "multirunconfig", "toolargsmatcher",
+}
+_GENERIC_ASSERT_RE = re.compile(
+    r"\b([A-Z][A-Za-z]{2,})\s+(?:says|said|claims|claimed|reports|reported"
+    r"|states|stated|announced|confirmed)\b"
+)
+_GENERIC_ACCORDING_RE = re.compile(r"according to\s+([A-Z][A-Za-z]{2,})")
+_GENERIC_HEADER_ORG_RE = re.compile(
+    r"^(?:PRIMARY SOURCE|PRIMARY COMPANION|COVERAGE)\s*[—\-–]\s*([A-Z][A-Za-z0-9_-]{1,30})"
+)
+_GENERIC_FIRST_PERSON_RE = re.compile(
+    r"\b(?:we|our)\b\s+(?:are|'re|built|conducted|used|found|developed"
+    r"|introduced|disclosed|tested|ran|report|reports|also|spent|sampled"
+    r"|identified|also)\b"
+    r"|\bOur\s+(?:researchers|prototype|system|model|team)\b"
+)
+_GENERIC_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _generic_number_word_value(text: str) -> Optional[int]:
+    parts = text.lower().replace("-", " ").split()
+    if len(parts) == 1:
+        return _GENERIC_NUMBER_WORDS.get(parts[0])
+    if len(parts) == 2:
+        tens = _GENERIC_NUMBER_WORDS.get(parts[0])
+        ones = _GENERIC_NUMBER_WORDS.get(parts[1])
+        if tens is not None and ones is not None and tens >= 20 and ones < 10:
+            return tens + ones
+    return None
+
+
+def _generic_is_version(sentence: str, start: int, end: int) -> bool:
+    """True when a matched number is a version token, not a value.
+
+    _is_version_number only catches a v/version prefix, which misses
+    "Python 2.14.0" and "the version is 2.29.5". The fallback also
+    treats a number followed by ".digit" as a version fragment, a
+    number preceded by ".digit" as a version fragment, a dotted number
+    right after a version-ish word ("ADK 2.14", "Python 2.14") as a
+    version, and a number that is part of a model identifier
+    ("GPT-6", "GPT-5.6" — a digit right after "-" or "." that follows
+    a letter) as a version fragment. A dotted measurement ("48.5%",
+    "2.8 million", "$0.30") is not a version: it carries a unit or a
+    magnitude, and the word before it is not version-ish.
+    """
+    if _is_version_number(sentence, start):
+        return True
+    if re.match(r"\.\d", sentence[end:]):
+        return True
+    if start >= 2 and sentence[start - 1] == "." and sentence[start - 2].isdigit():
+        return True
+    # Model identifier: a digit right after "-" or "." that follows a
+    # letter ("GPT-6", "GPT-5.6", "v2.14" without the v caught above).
+    if start >= 2 and sentence[start - 1] in "-." and sentence[start - 2].isalpha():
+        return True
+    if "." in sentence[start:end]:
+        before = sentence[max(0, start - 12):start]
+        if re.search(
+                r"\b(?:python|release|version|v|build|sdk|api|adk|gpt|gemini"
+                r"|claude|chrome|node|npm|pip|java|go|rust|app|os|ios|android"
+                r"|linux|windows|macos)\s*$", before, re.I):
+            return True
+    return False
+
+
+_GENERIC_CTX_UNIT_RE = re.compile(
+    r"[- ](?:node|turn|run|test|task|workflow|user)s?\b", re.I)
+_GENERIC_DURATION_RE = re.compile(
+    r"\s*(?:hours?|minutes?|seconds?|days?|weeks?|months?|years?)\b", re.I)
+
+
+def _generic_numbers_in(sentence: str) -> List[Dict]:
+    """Claim-candidate numbers in one sentence: digit numbers and
+    number words, with positions, values, units and currency.
+
+    Excluded (they are context, not claims): version tokens, bare
+    years, times, hyphenated/attached modifiers (30-node, 200-turn,
+    "200 turns" — recorded separately as context numbers), durations
+    ("within 12 hours", "after 10 days" — the ledger lists durations
+    as not extracted), multipliers ("five times"), numbers followed by
+    a letter (570s, 5x — except a magnitude letter after currency,
+    $5B), and numbers inside URLs.
+    """
+    numbers: List[Dict] = []
+    for m in _GENERIC_DIGIT_RE.finditer(sentence):
+        currency, digits, suffix = m.group(1), m.group(2), (m.group(3) or "").strip()
+        start, end = m.start(), m.end()
+        if _generic_is_version(sentence, start, end):
+            continue
+        after = sentence[end:end + 1]
+        before = sentence[start - 1:start] if start > 0 else ""
+        if after == "-" or after == ":" or before == ":":
+            continue
+        # Range endpoint ("lines 0-98"): a number right after "-" that
+        # follows a digit is the second half of a range, not a claim.
+        if start >= 2 and sentence[start - 1] == "-" and sentence[start - 2].isdigit():
+            continue
+        # Attached context modifier ("30-node", "200 turns") or a
+        # duration ("12 hours", "10 days") — context, not a claim.
+        if _GENERIC_CTX_UNIT_RE.match(sentence[end:]):
+            continue
+        if _GENERIC_DURATION_RE.match(sentence[end:]):
+            continue
+        if re.search(r"https?://\S*$", sentence[:start]):
+            continue
+        value = float(digits.replace(",", ""))
+        if suffix == "%":
+            unit = "percent"
+        elif suffix:
+            value *= {"million": 1e6, "billion": 1e9, "thousand": 1e3}[suffix.lower()]
+            unit = "count"
+        elif currency:
+            unit = currency
+        else:
+            unit = "count"
+        if not currency and not suffix and re.fullmatch(r"\d{4}", digits) \
+                and 1900 <= int(digits) <= 2099:
+            continue
+        if after.isalpha():
+            if currency and after in "BMK":
+                value *= {"B": 1e9, "M": 1e6, "K": 1e3}[after]
+                end += 1
+            else:
+                continue
+        if re.match(r"\s*(?:times|fold)\b", sentence[end:], re.I):
+            continue
+        numbers.append({
+            "start": start, "end": end, "value": value,
+            "raw": sentence[start:end].strip(), "unit": unit, "currency": currency,
+        })
+    for m in _GENERIC_NUMBER_WORD_RE.finditer(sentence):
+        value = _generic_number_word_value(m.group(1))
+        if value is None:
+            continue
+        start, end = m.start(), m.end()
+        # A hyphenated fraction ("three-quarters", "two-thirds") is a
+        # proportion, not a count of three — skip.
+        if re.match(r"-(?:quarters?|thirds?|halves|half)\b", sentence[end:], re.I):
+            continue
+        if re.match(r"\s*(?:times|fold)\b", sentence[end:], re.I):
+            continue
+        numbers.append({
+            "start": start, "end": end, "value": float(value),
+            "raw": m.group(1), "unit": "count", "currency": "",
+        })
+    numbers.sort(key=lambda n: n["start"])
+    return numbers
+
+
+def _generic_product_base(token: str) -> str:
+    return token.split()[0].split("-")[0].split(".")[0].lower()
+
+
+def _generic_subject(sentence: str, num: Dict, numbers: List[Dict]) -> Tuple[str, str]:
+    """The measured subject of one number: the nearest product token in
+    the segment since the previous number, else the first product token
+    after the number introduced by "for"/"by" before the next number.
+    Returns (slug, display), ("", "") when the sentence names no
+    measured system for this number — the claim is then subject-less and
+    the merge pass in compare_documents attaches it to the one
+    stated-subject group with the same identity, or leaves it standing
+    on its own."""
+    prev_end = 0
+    for n in numbers:
+        if n["end"] <= num["start"] and n["end"] > prev_end:
+            prev_end = n["end"]
+    next_start = len(sentence)
+    for n in numbers:
+        if n["start"] >= num["end"] and n["start"] < next_start:
+            next_start = n["start"]
+    seg_before = sentence[prev_end:num["start"]]
+    seg_after = sentence[num["end"]:next_start]
+    tokens_before = [
+        m for m in _GENERIC_PRODUCT_RE.finditer(seg_before)
+        if _generic_product_base(m.group(1)) not in _GENERIC_PRODUCT_BASE_STOPLIST
+    ]
+    if tokens_before:
+        display = tokens_before[-1].group(1)
+        return re.sub(r"[^a-z0-9]+", "-", display.lower()).strip("-"), display
+    for m in _GENERIC_PRODUCT_RE.finditer(seg_after):
+        if _generic_product_base(m.group(1)) in _GENERIC_PRODUCT_BASE_STOPLIST:
+            continue
+        before = seg_after[max(0, m.start() - 12):m.start()]
+        if re.search(r"\b(?:for|by)\s*$", before):
+            display = m.group(1)
+            return re.sub(r"[^a-z0-9]+", "-", display.lower()).strip("-"), display
+    return ("", "")
+
+
+def _generic_metric(sentences: List[str], sent_idx: int, num: Dict,
+                    numbers: List[Dict]) -> Optional[str]:
+    """Metric family for one number, or None (metric-less numbers are
+    skipped — the fallback is bounded, not a number vacuum).
+
+    Region 1: the nearest cue within 20 chars — a cue before the
+    number counts double (the metric usually follows the number:
+    "16 percentage points", "81 findings", "9% ... memory"), and a
+    cue belongs to its NEAREST number: a cue that sits between two
+    numbers is claimed by the nearer one ("23% faster with 9%" — the
+    "faster" belongs to the 23%, not the 9%). A cue whose span wraps
+    the number ("reported 304 ... to maintainers") counts as adjacent.
+    On a near-tie (within 2) the before-cue wins only when its family
+    is verb-driven ("sampled 166 exploits" is a sample count;
+    "achieved 40.3% recall" is a recall, not a generic score).
+    Region 2: a comparison marker ("compared with", "up from",
+    "versus") between the nearest preceding number and this one hands
+    this number the preceding number's metric — a baseline inherits
+    its metric — except derived families (a percentage-point gap, a
+    relative improvement) never hand their metric down: the walk
+    continues to the value number behind them.
+    Region 3: the nearest cue in the same clause within 60 chars,
+    then the whole sentence (a "modules" cue two clauses over still
+    belongs to a bare "26 auth" when no closer cue exists).
+    Region 4: a bare count sentence ("produced 166.") inherits the
+    previous sentence's most recently mentioned figure's metric, when
+    a production verb precedes the number in the same clause.
+    A "refrain" in the sentence reframes "exploit" as avoidance
+    ("refrained from exploiting them in 99.93%") — the plain exploit
+    cue is excluded there, so the figure is an avoidance rate, not an
+    exploit count.
+    """
+    sentence = sentences[sent_idx]
+    refrain = bool(re.search(r"\brefrain\w*\b", sentence))
+    cues = []
+    for rx, family in _GENERIC_METRIC_CUES:
+        if refrain and family == "exploits":
+            continue
+        for m in rx.finditer(sentence):
+            cues.append((m.start(), m.end(), family))
+    if not cues:
+        return None
+
+    def _edge_dist(cs: int, ce: int, n: Dict) -> int:
+        if ce <= n["start"]:
+            return n["start"] - ce
+        if cs >= n["end"]:
+            return cs - n["end"]
+        return 0
+
+    def _claimed_by_other(cs: int, ce: int) -> bool:
+        """True when another number in this sentence is strictly
+        nearer to the cue than the number being scored — the cue
+        belongs to that number, not this one. (\"23% faster with 9%\":
+        \"faster\" belongs to the 23%; \"completed 95%\": \"completed\"
+        belongs to the 95% it directly precedes.) A before-cue in a
+        different clause than the number belongs to that clause's
+        number ("43 had staging patches, and 299 were being
+        reported" — "patches" is the 43's, not the 299's)."""
+        if ce <= num["start"] and not (clause_a <= cs < clause_b):
+            return True
+        mine = _edge_dist(cs, ce, num)
+        for n in numbers:
+            if n is num:
+                continue
+            if _edge_dist(cs, ce, n) < mine:
+                return True
+        return False
+
+    def _between_has_number(a: int, b: int) -> bool:
+        return any(n["start"] >= a and n["end"] <= b for n in numbers
+                   if n is not num)
+
+    clause_a, clause_b = _generic_clause_span(sentence, num["start"], num["end"])
+
+    # Region 1: the nearest cue within 20 chars, in the number's own
+    # clause first (the clause scope uses a wider limit, 60: the clause
+    # bounds the search, so a cue 29 chars out in the number's own
+    # clause ("81 novel high-severity Firefox issues") is still that
+    # number's). A cue in another clause — \"candidate patches;
+    # 81 novel issues\" — belongs to its own clause's number, not to
+    # a number across the semicolon), then the whole sentence.
+    for scope_a, scope_b, limit in ((clause_a, clause_b, 60), (0, len(sentence), 20)):
+        best_before = None  # (effective_dist, family)
+        best_after = None
+        for cs, ce, family in cues:
+            if not (scope_a <= cs < scope_b):
+                continue
+            if _claimed_by_other(cs, ce):
+                continue
+            if ce <= num["start"]:
+                if _between_has_number(ce, num["start"]):
+                    continue
+                dist = (num["start"] - ce) * 2
+                if dist <= limit and (best_before is None or dist < best_before[0]):
+                    best_before = (dist, family)
+            elif cs >= num["end"]:
+                dist = cs - num["end"]
+                if dist <= limit and (best_after is None or dist < best_after[0]):
+                    best_after = (dist, family)
+            else:
+                # The cue's span wraps the number ("reported 304 ... to
+                # maintainers") — adjacent, dist 0.
+                if best_before is None or 0 < best_before[0]:
+                    best_before = (0, family)
+        if best_before and best_after:
+            if abs(best_before[0] - best_after[0]) <= 2:
+                if best_before[1] in _GENERIC_VERB_DRIVEN_FAMILIES:
+                    return best_before[1]
+                return best_after[1] if best_after[0] < best_before[0] else best_before[1]
+            return best_before[1] if best_before[0] < best_after[0] else best_after[1]
+        if best_before:
+            return best_before[1]
+        if best_after:
+            return best_after[1]
+    # Region 2: baseline inheritance, skipping derived families
+    prev = None
+    for n in numbers:
+        if n["end"] <= num["start"] and (prev is None or n["end"] > prev["end"]):
+            prev = n
+    while prev is not None:
+        between = sentence[prev["end"]:num["start"]]
+        if _GENERIC_COMPARISON_MARKER_RE.search(between):
+            family = _generic_metric(sentences, sent_idx, prev, numbers)
+            if family and family not in _GENERIC_DERIVED_FAMILIES:
+                return family
+            if family:
+                # Derived family: walk back to the value number behind it.
+                earlier = None
+                for n in numbers:
+                    if n["end"] <= prev["start"] and (earlier is None or n["end"] > earlier["end"]):
+                        earlier = n
+                prev = earlier
+                continue
+        break
+    # Region 3: same clause first, then the whole sentence. Claiming
+    # applies to BEFORE-cues only (a \"vulnerabilities\" cue that
+    # belongs to a 1,724 must not leak into a neighbouring 74.7%).
+    # An AFTER-cue before the next number is the scored number's own
+    # list noun (\"26 auth, ..., cache modules, 16 ...\" — \"modules\"
+    # is the 26's even though the 16 sits nearer), so claiming does
+    # not apply to it.
+    clause_a, clause_b = _generic_clause_span(sentence, num["start"], num["end"])
+    next_start = len(sentence)
+    for n in numbers:
+        if n["start"] >= num["end"] and n["start"] < next_start:
+            next_start = n["start"]
+    for scope_a, scope_b in ((clause_a, clause_b), (0, len(sentence))):
+        best = None
+        for cs, ce, family in cues:
+            if not (scope_a <= cs < scope_b):
+                continue
+            if ce <= num["start"]:
+                if _claimed_by_other(cs, ce):
+                    continue
+                if _between_has_number(ce, num["start"]):
+                    continue
+                dist = num["start"] - ce
+            elif cs >= num["end"] and cs < next_start:
+                dist = cs - num["end"]
+            elif cs < num["start"] and ce > num["end"]:
+                # The cue's span genuinely wraps the number — adjacent.
+                if _claimed_by_other(cs, ce):
+                    continue
+                dist = 0
+            else:
+                continue
+            if dist <= 60 and (best is None or dist < best[0]):
+                best = (dist, family)
+        if best:
+            return best[1]
+    # Region 4: a production verb precedes the number in the same
+    # clause — the bare count inherits the previous sentence's most
+    # recently mentioned figure's metric.
+    if sent_idx > 0:
+        before_in_clause = sentence[clause_a:num["start"]]
+        if _GENERIC_PRODUCTION_VERB_RE.search(before_in_clause[-25:]):
+            prev_numbers = _generic_numbers_in(sentences[sent_idx - 1])
+            if prev_numbers:
+                return _generic_metric(sentences, sent_idx - 1, prev_numbers[-1], prev_numbers)
+    return None
+
+
+def _generic_clause_span(sentence: str, start: int, end: int) -> Tuple[int, int]:
+    """The (start, end) span of the comma/and clause containing a position."""
+    parts = []
+    last = 0
+    for m in _GENERIC_CLAUSE_SPLIT_RE.finditer(sentence):
+        parts.append((last, m.start()))
+        last = m.end()
+    parts.append((last, len(sentence)))
+    for a, b in parts:
+        if a <= start < b:
+            return (a, b)
+    return (0, len(sentence))
+
+
+def _generic_clause(sentence: str, start: int, end: int) -> str:
+    """The comma/and clause containing a position (cue scoping)."""
+    a, b = _generic_clause_span(sentence, start, end)
+    return sentence[a:b]
+
+
+def _generic_context_numbers(sentence: str, num: Dict) -> Tuple[str, str]:
+    """Hyphenated/attached context numbers in the claim's clause
+    (30-node, 200-turn): part of the identity, so a 30-node/200-turn
+    run is not the same claim as a bare run. Returns (key part,
+    display)."""
+    clause = _generic_clause(sentence, num["start"], num["end"])
+    found: Dict[str, str] = {}
+    for m in _GENERIC_CTX_NUM_RE.finditer(clause):
+        unit = m.group(2).lower()
+        plural = unit if unit.endswith("s") else unit + "s"
+        found[plural] = m.group(1)
+    key = ";".join(f"{k}={found[k]}" for k in sorted(found))
+    display = "; ".join(f"{found[k]}-{k[:-1]}" for k in sorted(found))
+    return key, display
+
+
+def _generic_denominator(sentence: str, num_end: int,
+                         numbers: List[Dict] = None) -> str:
+    """The denominator after a number ("of tests", "per LPE exploit"),
+    from the ~40 chars after it. The window stops at the next number:
+    a "per" phrase that belongs to a later amount in the same
+    sentence ("$1,213,430 ... $1,279 per LPE exploit") must not be
+    read as this amount's denominator. Recorded on every claim; only
+    a per-unit denominator on a cost claim enters the identity key."""
+    limit = num_end + 45
+    if numbers:
+        for n in numbers:
+            if n["start"] >= num_end and n["start"] < limit:
+                limit = n["start"]
+                break
+    window = sentence[num_end:limit]
+    m = _GENERIC_DENOM_RE.search(window)
+    return m.group(0).strip() if m else ""
+
+
+def _generic_qualifier(sentence: str, num_start: int) -> str:
+    """The qualifier nearest before a number ("about", "up to", "~"),
+    from the ~30 chars before it. Recorded, never silently dropped:
+    an "up to" ceiling and an "about" approximation change what a
+    value means when compared."""
+    window = sentence[max(0, num_start - 30):num_start]
+    found = list(_GENERIC_QUALIFIER_RE.finditer(window))
+    if not found:
+        return ""
+    q = found[-1].group(0).lower().strip()
+    return "approximately" if q == "~" else q
+
+
+def _generic_benchmark(sentence: str) -> str:
+    """The first CamelCase token in the sentence, excluding org names —
+    the benchmark the claim belongs to, when the sentence names one.
+    Recorded on the claim; NOT part of the identity (see the module
+    header: a benchmark named in one doc and unnamed in another is the
+    same claim)."""
+    for m in _GENERIC_CAMEL_RE.finditer(sentence):
+        if m.group(0).lower() not in _GENERIC_BENCH_ORG_STOPLIST:
+            return m.group(0)
+    return ""
+
+
+def _generic_header_org(text: str) -> str:
+    """The pipeline feed header's org ("PRIMARY SOURCE — OpenAI"),
+    first word, lowercased. The header is the caller's own label for
+    who the document is from — the doc-level attribution fallback for
+    first-person docs."""
+    first_line = text.split("\n", 1)[0]
+    m = _GENERIC_HEADER_ORG_RE.match(first_line)
+    return m.group(1).lower() if m else ""
+
+
+def _generic_attribution(sentence: str, doc_attribution: str) -> str:
+    """Who the sentence says asserted the figure: a sentence-level
+    asserter verb ("OpenAI says 48.5%", "according to OpenAI"), else
+    the doc-level attribution (first-person voice + header org), else
+    "" — unstated, never guessed. "Deemed"/"classified" deliberately
+    excluded: they attribute a classification, not the number."""
+    m = _GENERIC_ASSERT_RE.search(sentence)
+    if m:
+        return m.group(1).lower()
+    m = _GENERIC_ACCORDING_RE.search(sentence)
+    if m:
+        return m.group(1).lower()
+    return doc_attribution
+
+
+def extract_generic_quantitative_claims(
+    text: str,
+    source_name: str = "",
+    existing_claims: Optional[List[Dict]] = None,
+) -> List[Dict]:
+    """Bounded generic quantitative-claim fallback (v1.8.6, P2).
+
+    Extracts numbers that carry a metric cue from ordinary sentences
+    and returns them in the same shape as extract_numeric_claims, plus
+    claim_kind "generic_quantitative" and the Arch fields: source span,
+    entity, metric, value, unit, context/denominator, qualifier,
+    variant, time, attribution. Dedupes against *existing_claims*
+    (mapped extraction) by (sentence, value), so a mapped benchmark
+    score is never double-counted. Returns [] for empty text.
+    """
+    if not text or not text.strip():
+        return []
+    sentences = [s for s in _GENERIC_SENT_SPLIT_RE.split(text) if s.strip()]
+    header_org = _generic_header_org(text)
+    first_person_hits = len(_GENERIC_FIRST_PERSON_RE.findall(text))
+    # Doc-level attribution only for docs that speak in the first
+    # person at least twice ("We're introducing", "Our researchers") —
+    # a coverage doc's stray "we asked" must not re-attribute the
+    # vendor's figures to the coverage publisher.
+    doc_attribution = header_org if (header_org and first_person_hits >= 2) else ""
+    existing_pairs = set()
+    if existing_claims:
+        for c in existing_claims:
+            raw = str(c.get("raw_value", "")).strip().lstrip("$").rstrip("%")
+            val = c.get("numeric_value")
+            if val is None or not raw:
+                continue
+            for si, s in enumerate(sentences):
+                if raw in s:
+                    existing_pairs.add((si, float(val)))
+    claims: List[Dict] = []
+    for si, sentence in enumerate(sentences):
+        numbers = _generic_numbers_in(sentence)
+        for num in numbers:
+            if (si, num["value"]) in existing_pairs:
+                continue
+            if num.get("currency"):
+                clause = _generic_clause(sentence, num["start"], num["end"])
+                family = "grants" if re.search(r"\bgrants?\b", clause, re.I) else "cost"
+            else:
+                family = _generic_metric(sentences, si, num, numbers)
+            if not family:
+                continue
+            subject_slug, subject_display = _generic_subject(sentence, num, numbers)
+            ctx_key, ctx_display = _generic_context_numbers(sentence, num)
+            denominator = _generic_denominator(sentence, num["end"], numbers)
+            qualifier = _generic_qualifier(sentence, num["start"])
+            benchmark = _generic_benchmark(sentence)
+            attribution = _generic_attribution(sentence, doc_attribution)
+            denom_key = (
+                re.sub(r"[^a-z0-9]+", "-", denominator.lower()).strip("-")
+                if family == "cost" and denominator.lower().startswith("per")
+                else ""
+            )
+            label = _GENERIC_FAMILY_LABELS.get(family, family)
+            if benchmark:
+                label = f"{benchmark} {label}"
+            if denominator and family == "cost":
+                label = f"{label} ({denominator})"
+            if subject_display:
+                label = f"{label} — {subject_display}"
+            year_m = _GENERIC_YEAR_RE.search(sentence)
+            context = "; ".join(
+                p for p in [ctx_display, denominator] if p
+            )
+            claims.append({
+                "entity_key": f"generic|{family}|{ctx_key}|{denom_key}|{subject_slug or 'unstated'}",
+                "entity_label": label,
+                "numeric_value": float(num["value"]),
+                "unit": num["unit"],
+                "raw_value": num["raw"],
+                "version": "",
+                "shot_count": None,
+                "variant": "",
+                "claim_kind": "generic_quantitative",
+                "subject": subject_slug,
+                "subject_display": subject_display,
+                "metric": family,
+                "benchmark": benchmark,
+                "context": context,
+                "context_numbers": ctx_key,
+                "denominator": denominator,
+                "qualifier": qualifier,
+                "time": year_m.group(0) if year_m else "",
+                "attribution": attribution,
+                "span": sentence.strip()[:200],
+            })
+    return claims
+
+
+def _generic_unique_entry(key: str, label: str, doc_name: str, claim: Dict,
+                          variant: str = "", note: str = "") -> Dict:
+    """A unique_claims entry for a generic quantitative claim, carrying
+    the Arch fields (span, metric, benchmark, context, qualifier, time,
+    attribution) so the caller can see what the figure is, not just
+    that it is unique."""
+    entry = {
+        "entity_key":   key,
+        "entity_label": label,
+        "found_in":     doc_name,
+        "value":        claim["numeric_value"],
+        "unit":         claim["unit"],
+        "raw":          claim["raw_value"],
+        "variant":      variant,
+        "claim_kind":   "generic_quantitative",
+        "metric":       claim.get("metric", ""),
+        "benchmark":    claim.get("benchmark", ""),
+        "context":      claim.get("context", ""),
+        "qualifier":    claim.get("qualifier", ""),
+        "time":         claim.get("time", ""),
+        "attribution":  claim.get("attribution", ""),
+        "span":         claim.get("span", ""),
+    }
+    if note:
+        entry["note"] = note
+    return entry
+
+
 def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     """Cross-reference numeric claims across multiple documents.
 
@@ -916,6 +1749,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
           "version_mismatches": [...],  # same benchmark, different versions
           "evaluation_setting_mismatches": [...],  # same benchmark, different shot counts
           "variant_mismatches": [...],  # same benchmark, different variants (v1.8.5)
+          "benchmark_mismatches": [...],  # same generic identity, different named benchmarks (v1.8.6)
           "timeline_reconciliation": [...],  # shared-year date/precision notes
           "agreement_status":  str,     # aligned | conflicts_present | not_established
           "comparable_claims": int,     # claims that actually went through comparison
@@ -945,6 +1779,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "version_mismatches": [],
             "evaluation_setting_mismatches": [],
             "variant_mismatches": [],
+            "benchmark_mismatches": [],
             "shared_dates":      [],
             "shared_years":      [],
             "unique_dates":      [],
@@ -970,7 +1805,14 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     dropped_market_claims: List[Dict] = []
     for doc_idx, doc in enumerate(analyzed_docs):
         dropped: List[Dict] = []
-        doc_claims.append(extract_numeric_claims(doc.get("text", ""), dropped_out=dropped))
+        base_claims = extract_numeric_claims(doc.get("text", ""), dropped_out=dropped)
+        # Generic quantitative fallback (v1.8.6, P2): numbers that carry
+        # a metric cue in ordinary sentences — benchmark scores, counts,
+        # percentages, costs — deduped against the mapped extraction
+        # above by (sentence, value), so nothing is double-counted.
+        base_claims += extract_generic_quantitative_claims(
+            doc.get("text", ""), _doc_name(doc_idx), base_claims)
+        doc_claims.append(base_claims)
         for entry in dropped:
             dropped_market_claims.append({**entry, "source": _doc_name(doc_idx)})
     doc_dates: List[List[Dict]] = [
@@ -985,6 +1827,57 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             key = claim["entity_key"]
             entity_map.setdefault(key, []).append({"doc_idx": doc_idx, "claim": claim})
 
+    # ── Generic-claim subject merge (v1.8.6, P2) ─────────────────────────
+    # A subject-less generic claim attaches to the stated-subject group
+    # with the same (family, context, denominator) identity — a doc
+    # that states a figure without naming the measured system in the
+    # claim's own segment is still stating that figure (\"the model
+    # avoided exploiting out-of-scope services in 99.93% of tests\" is
+    # GPT-6 Cyber's 99.93% when the primary names it). The VALUE
+    # disambiguates when two subjects share a family (GPT-6 Cyber
+    # 99.93% vs GPT-5.6 Cyber 94.49% avoidance; GPT-6 Cyber 40.3%
+    # vs GPT-6 Astra 32.0% recall): an unstated entry attaches to the
+    # one stated group whose values include a value within tolerance
+    # of its own. Zero or two-plus matching stated groups: the entry
+    # stands alone, never guessed. Moved entries are flagged
+    # subject_attached so the attachment stays visible.
+    def _generic_close(a: float, b: float) -> bool:
+        if abs(a) < 20 and abs(b) < 20:
+            return abs(a - b) <= 0.15
+        ref = max(abs(a), abs(b)) or 1.0
+        return abs(a - b) <= ref * 0.02
+
+    for key in [k for k, es in entity_map.items()
+                if es and es[0]["claim"].get("claim_kind") == "generic_quantitative"
+                and k.endswith("|unstated")]:
+        parts = key.split("|")
+        if len(parts) != 5:
+            continue
+        prefix = "|".join(parts[:4])
+        stated = {k: es for k, es in entity_map.items()
+                  if k.startswith(prefix + "|") and not k.endswith("|unstated")
+                  and es and es[0]["claim"].get("claim_kind") == "generic_quantitative"}
+        if not stated:
+            continue
+        attached: List[Dict] = []
+        for e in list(entity_map[key]):
+            val = e["claim"].get("numeric_value")
+            matches = [k for k, es in stated.items()
+                       if any(_generic_close(x["claim"].get("numeric_value", 0), val)
+                              for x in es)]
+            if len(matches) == 1:
+                target = matches[0]
+                target_label = entity_map[target][0]["claim"]["entity_label"]
+                e["claim"] = {**e["claim"], "entity_key": target,
+                              "entity_label": target_label,
+                              "subject_attached": True}
+                entity_map[target].append(e)
+                attached.append(e)
+        if attached:
+            entity_map[key] = [e for e in entity_map[key] if e not in attached]
+            if not entity_map[key]:
+                del entity_map[key]
+
     shared_claims: List[Dict] = []
     unique_claims: List[Dict] = []
     conflicts:     List[Dict] = []
@@ -994,6 +1887,13 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     evaluation_setting_mismatches: List[Dict] = []
     presence_absence_mismatches: List[Dict] = []
     variant_mismatches: List[Dict] = []
+    # Benchmark mismatches (v1.8.6, P2): one generic identity reported
+    # under two different NAMED benchmarks is not comparable at all —
+    # neither a conflict nor an alignment.
+    benchmark_mismatches: List[Dict] = []
+    # Single-originator generic figures (v1.8.6, P2): orgs whose
+    # figures are repeated across sources, for the triage summary.
+    vendor_repeat_orgs: set = set()
     # Provisional variant comparisons (v1.8.5): one stated variant
     # compared against unstated sides — counted for the triage summary.
     provisional_variant_comparisons: List[str] = []
@@ -1101,20 +2001,174 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     _presence_mismatch_done: set = set()
 
     for key, entries, variant in grouped:
+        # ── Generic-claim group shaping (v1.8.6, P2) ─────────────────────
+        is_generic = bool(entries) and entries[0]["claim"].get("claim_kind") == "generic_quantitative"
+        if is_generic:
+            # (b) Benchmark guard: two different NAMED benchmarks in
+            # one group is a benchmark mismatch, not a comparison.
+            named_benches = {e["claim"].get("benchmark", "") for e in entries} - {""}
+            if len(named_benches) > 1:
+                benchmark_mismatches.append({
+                    "entity_key":   key,
+                    "entity_label": entries[0]["claim"]["entity_label"],
+                    "benchmarks":   sorted(named_benches),
+                    "values":       [
+                        {"source": _doc_name(e["doc_idx"]), "value": e["claim"]["numeric_value"],
+                         "unit": e["claim"]["unit"], "raw": e["claim"]["raw_value"],
+                         "benchmark": e["claim"].get("benchmark", "")}
+                        for e in entries
+                    ],
+                    "note": (
+                        "Same generic identity reported under different named benchmarks "
+                        "across sources — figures from different benchmarks are not directly "
+                        "comparable. Do not read as a conflict or an alignment."
+                    ),
+                })
+                continue
+            # (c) A group compares ACROSS documents, never within one:
+            # a single-doc group emits one unique claim per distinct
+            # value (a doc that states 61 patched and 43 in staging is
+            # not disagreeing with itself).
+            doc_ids = {e["doc_idx"] for e in entries}
+            if len(doc_ids) == 1:
+                if any(s == "EXPLICITLY_ABSENT" for s in presence_status[key].values()):
+                    if key not in _presence_mismatch_done:
+                        presence_absence_mismatches.append(
+                            _mismatch_entry(key, entries[0]["claim"]["entity_label"],
+                                            [_doc_name(e["doc_idx"]) for e in entries])
+                        )
+                        _presence_mismatch_done.add(key)
+                    continue
+                seen_vals: Dict[float, Dict] = {}
+                for e in entries:
+                    seen_vals.setdefault(e["claim"]["numeric_value"], e)
+                for v, e in seen_vals.items():
+                    unique_claims.append(_generic_unique_entry(
+                        key, entries[0]["claim"]["entity_label"],
+                        _doc_name(e["doc_idx"]), e["claim"], variant))
+                continue
+            # (c) Multi-doc groups compare VALUE SETS, not modals: one
+            # identity can hold two distinct claims in the same document
+            # (1,724 reproduced vulnerabilities AND 81 novel Firefox
+            # vulnerabilities; 948 post-dedup AND 1,169 pre-dedup
+            # exploits). Each value reported by 2+ docs is its own
+            # aligned group; a value in one doc only splits out as a
+            # unique. A doc's modal, when a single shared value is
+            # compared, is the most frequent value ANOTHER doc also
+            # reports (not merely its own most frequent value).
+            by_value: Dict[float, List[Dict]] = {}
+            for e in entries:
+                by_value.setdefault(e["claim"]["numeric_value"], []).append(e)
+            shared_vals = [v for v, es in by_value.items()
+                           if len({e["doc_idx"] for e in es}) >= 2]
+            if len(shared_vals) >= 2:
+                for v in sorted(shared_vals):
+                    ves = by_value[v]
+                    vobjs = []
+                    for e in ves:
+                        vo = {"source": _doc_name(e["doc_idx"]),
+                              "value": e["claim"]["numeric_value"],
+                              "unit": e["claim"]["unit"],
+                              "raw": e["claim"]["raw_value"],
+                              "version": e["claim"].get("version", ""),
+                              "shot_count": e["claim"].get("shot_count"),
+                              "variant": e["claim"].get("variant", ""),
+                              "span": e["claim"].get("span", ""),
+                              "metric": e["claim"].get("metric", ""),
+                              "benchmark": e["claim"].get("benchmark", ""),
+                              "context": e["claim"].get("context", ""),
+                              "qualifier": e["claim"].get("qualifier", ""),
+                              "time": e["claim"].get("time", ""),
+                              "attribution": e["claim"].get("attribution", "")}
+                        vobjs.append(vo)
+                    shared_claims.append({
+                        "entity_key": key,
+                        "entity_label": entries[0]["claim"]["entity_label"],
+                        "found_in_docs": list(dict.fromkeys(
+                            _doc_name(e["doc_idx"]) for e in ves)),
+                        "values": vobjs,
+                        "variant": variant,
+                        "claim_kind": "generic_quantitative",
+                    })
+                    attr_orgs = sorted(
+                        {e["claim"].get("attribution", "") for e in ves} - {""})
+                    align_entry: Dict = {
+                        "entity_key": key,
+                        "entity_label": entries[0]["claim"]["entity_label"],
+                        "spread": 0.0,
+                        "values": vobjs,
+                        "variant": variant,
+                        "claim_kind": "generic_quantitative",
+                        "attribution": attr_orgs,
+                    }
+                    if len(attr_orgs) == 1:
+                        align_entry["attribution_note"] = (
+                            f"All compared sources that name an attributor attribute this figure to "
+                            f"{attr_orgs[0]} — the figure is repeated across sources, not "
+                            "independently verified.")
+                        vendor_repeat_orgs.add(attr_orgs[0])
+                    alignment.append(align_entry)
+                for v, es in by_value.items():
+                    if v not in shared_vals:
+                        for e in es:
+                            unique_claims.append(_generic_unique_entry(
+                                key, entries[0]["claim"]["entity_label"],
+                                _doc_name(e["doc_idx"]), e["claim"], variant))
+                continue
+            by_doc: Dict[int, List[Dict]] = {}
+            for e in entries:
+                by_doc.setdefault(e["doc_idx"], []).append(e)
+            cmp_entries: List[Dict] = []
+            for doc_idx, doc_entries in by_doc.items():
+                vals = [e["claim"]["numeric_value"] for e in doc_entries]
+                if len(set(vals)) == 1:
+                    cmp_entries.extend(doc_entries)
+                    continue
+                counts: Dict[float, int] = {}
+                for v in vals:
+                    counts[v] = counts.get(v, 0) + 1
+                other_vals = {e["claim"]["numeric_value"] for e in entries
+                              if e["doc_idx"] != doc_idx}
+                ranked = sorted(counts, key=lambda v: -counts[v])
+                modal = next((v for v in ranked if v in other_vals), ranked[0])
+                cmp_entries.extend(
+                    [e for e in doc_entries if e["claim"]["numeric_value"] == modal])
+                for e in doc_entries:
+                    if e["claim"]["numeric_value"] != modal:
+                        unique_claims.append(_generic_unique_entry(
+                            key, entries[0]["claim"]["entity_label"],
+                            _doc_name(doc_idx), e["claim"], variant,
+                            note=(
+                                f"Also reported in {_doc_name(doc_idx)} alongside the compared "
+                                f"value {modal}: a different count for this identity in the same "
+                                "document, not compared."
+                            )))
+            entries = cmp_entries
+
         label      = entries[0]["claim"]["entity_label"]
         doc_names  = [_doc_name(e["doc_idx"]) for e in entries]
         values     = [e["claim"]["numeric_value"] for e in entries]
         units      = [e["claim"]["unit"]          for e in entries]
         raws       = [e["claim"]["raw_value"]      for e in entries]
 
-        val_objs = [
-            {"source": n, "value": v, "unit": u, "raw": r, "version": ver, "shot_count": sh, "variant": va}
-            for n, v, u, r, ver, sh, va in zip(
-                doc_names, values, units, raws,
-                [e["claim"].get("version", "") for e in entries],
-                [e["claim"].get("shot_count") for e in entries],
-                [e["claim"].get("variant", "") for e in entries])
-        ]
+        val_objs = []
+        for e in entries:
+            vo = {"source": _doc_name(e["doc_idx"]), "value": e["claim"]["numeric_value"],
+                  "unit": e["claim"]["unit"], "raw": e["claim"]["raw_value"],
+                  "version": e["claim"].get("version", ""),
+                  "shot_count": e["claim"].get("shot_count"),
+                  "variant": e["claim"].get("variant", "")}
+            if e["claim"].get("claim_kind") == "generic_quantitative":
+                vo.update({
+                    "span": e["claim"].get("span", ""),
+                    "metric": e["claim"].get("metric", ""),
+                    "benchmark": e["claim"].get("benchmark", ""),
+                    "context": e["claim"].get("context", ""),
+                    "qualifier": e["claim"].get("qualifier", ""),
+                    "time": e["claim"].get("time", ""),
+                    "attribution": e["claim"].get("attribution", ""),
+                })
+            val_objs.append(vo)
 
         if len(entries) == 1:
             # A lone claim where another doc EXPLICITLY lacks the entity
@@ -1125,6 +2179,10 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                         _mismatch_entry(key, label, doc_names)
                     )
                     _presence_mismatch_done.add(key)
+                continue
+            if is_generic:
+                unique_claims.append(_generic_unique_entry(
+                    key, label, doc_names[0], entries[0]["claim"], variant))
                 continue
             unique_claims.append({
                 "entity_key":   key,
@@ -1137,13 +2195,16 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             })
             continue
 
-        shared_claims.append({
+        shared_entry = {
             "entity_key":    key,
             "entity_label":  label,
             "found_in_docs": list(dict.fromkeys(doc_names)),
             "values":        val_objs,
             "variant":       variant,
-        })
+        }
+        if is_generic:
+            shared_entry["claim_kind"] = "generic_quantitative"
+        shared_claims.append(shared_entry)
 
         # Shared key, but some compared doc explicitly lacks the entity:
         # record the mismatch alongside (not instead of) numeric comparison
@@ -1273,6 +2334,51 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             reference   = abs(vals_sorted[0]) if vals_sorted[0] != 0 else 1.0
             is_conflict = spread > reference * 0.02
 
+        # Qualifier rules (v1.8.6, P2): an "up to"/"at most" ceiling
+        # makes lower values compatible, not a conflict; an approximate
+        # qualifier ("about", "~") widens the tolerance for that pair.
+        qualifier_note = ""
+        if is_generic and is_conflict:
+            quals = [e["claim"].get("qualifier", "") for e in entries]
+            if any(q in _GENERIC_UPPER_BOUND_QUALS for q in quals):
+                max_val = vals_sorted[-1]
+                max_entries = [e for e in entries
+                               if e["claim"]["numeric_value"] == max_val]
+                if all(e["claim"].get("qualifier", "") in _GENERIC_UPPER_BOUND_QUALS
+                       for e in max_entries):
+                    is_conflict = False
+                    qualifier_note = (
+                        "Upper-bound qualifier ('up to'/'at most') on the highest value — "
+                        "lower values are compatible with the ceiling, not a conflict."
+                    )
+            if is_conflict and any(q in _GENERIC_APPROX_QUALS for q in quals):
+                reference = abs(vals_sorted[0]) if vals_sorted[0] != 0 else 1.0
+                if spread <= max(reference * 0.10, 0.15):
+                    is_conflict = False
+                    qualifier_note = (
+                        "Approximate qualifier ('about'/'~') on one side — values agree "
+                        "within the widened tolerance for an approximate figure."
+                    )
+
+        # Generic-claim attribution (v1.8.6, P2): the orgs the compared
+        # sentences actually name as asserters. When every asserter
+        # names one org, the figure is repeated across sources, not
+        # independently verified — say so on the entry, and once in the
+        # triage summary. "Four sources repeated the vendor claim" must
+        # never be phrased as "four independently verified it."
+        attribution_note = ""
+        attribution_orgs: List[str] = []
+        if is_generic:
+            attribution_orgs = sorted(
+                {e["claim"].get("attribution", "") for e in entries} - {""})
+            if len(attribution_orgs) == 1:
+                attribution_note = (
+                    f"All compared sources that name an attributor attribute this figure to "
+                    f"{attribution_orgs[0]} — the figure is repeated across sources, not "
+                    "independently verified."
+                )
+                vendor_repeat_orgs.add(attribution_orgs[0])
+
         entry = {
             "entity_key":   key,
             "entity_label": label,
@@ -1280,6 +2386,13 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "values":       val_objs,
             "variant":      variant,
         }
+        if is_generic:
+            entry["claim_kind"] = "generic_quantitative"
+            entry["attribution"] = attribution_orgs
+            if attribution_note:
+                entry["attribution_note"] = attribution_note
+            if qualifier_note:
+                entry["qualifier_note"] = qualifier_note
         if key in _BENCHMARK_KEYS:
             entry["shot_count"] = next(iter(named_shots), None) if named_shots else None
             entry["evaluation_conditions"] = evaluation_note
@@ -1314,11 +2427,19 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         doc_names = [_doc_name(e["doc_idx"]) for e in entries]
         raws = [e["claim"]["raw"] for e in entries]
         kind = entries[0]["claim"]["kind"]
+        # v1.8.6, P5: per-document roles for the date, so a caller can
+        # tell a shared published date from a shared fetched header.
+        # Year claims carry no role (the year pass has no label cues).
+        roles = {
+            _doc_name(e["doc_idx"]): sorted(e["claim"].get("date_roles", ["unknown"]))
+            for e in entries
+        }
         entry = {
             "date_key":  date_key,
             "kind":      kind,
             "found_in":  doc_names,
             "raw":       raws,
+            "roles":     roles,
         }
         if len(entries) == 1:
             unique_dates.append(entry)
@@ -1346,6 +2467,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         | {m["entity_key"] for m in version_mismatches}
         | {m["entity_key"] for m in evaluation_setting_mismatches}
         | {m["entity_key"] for m in variant_mismatches}
+        | {m["entity_key"] for m in benchmark_mismatches}
     )
     follow_up: List[str] = []
     follow_up_trace: List[Dict] = []
@@ -1374,6 +2496,10 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     n_version_mismatches = len(version_mismatches)
     n_setting_mismatches = len(evaluation_setting_mismatches)
     n_variant_mismatches = len(variant_mismatches)
+    n_benchmark_mismatches = len(benchmark_mismatches)
+    n_vendor_repeat = sum(
+        1 for c in alignment + conflicts if c.get("attribution_note")
+    )
     n_shared_dates = len(shared_dates) + len(shared_years)
     timeline_notes = reconcile_timelines(analyzed_docs)
     # Agreement status (Arch review 2026-11-04): zero conflicts must not
@@ -1429,6 +2555,17 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             f" {n_variant_mismatches} variant mismatch(es): same benchmark in "
             "different variants across sources — not comparable, not a conflict."
         )
+    if n_benchmark_mismatches > 0:
+        triage_summary += (
+            f" {n_benchmark_mismatches} benchmark mismatch(es): same generic identity "
+            "reported under different named benchmarks — not comparable, not a conflict."
+        )
+    if n_vendor_repeat > 0:
+        triage_summary += (
+            f" {n_vendor_repeat} shared generic claim(s) repeat figures attributed to a "
+            f"single originator ({', '.join(sorted(vendor_repeat_orgs))}) — repetition "
+            "across sources, not independent verification."
+        )
     n_provisional = sum(
         1 for c in alignment + conflicts
         if "provisional" in c.get("evaluation_conditions", "")
@@ -1476,6 +2613,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         "version_mismatches": version_mismatches,
         "evaluation_setting_mismatches": evaluation_setting_mismatches,
         "variant_mismatches": variant_mismatches,
+        "benchmark_mismatches": benchmark_mismatches,
         "shared_dates":      shared_dates,
         "shared_years":      shared_years,
         "unique_dates":      unique_dates,
