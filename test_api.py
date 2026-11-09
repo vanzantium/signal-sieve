@@ -1186,7 +1186,11 @@ def _():
     assert any("uncertain ownership" in f for f in d["flags"]), f"ownership flag missing, got {d['flags']}"
     assert any("namespace matched" in f for f in d["flags"]), \
         f"flag must name the namespace match, got {d['flags']}"
-    assert any("evidence would establish" in q for q in d["questions_to_ask"]), \
+    # v1.8.6 (P4): a hosted candidate speaks as the originator, so the
+    # custody question is the adapted one — what independent receipt
+    # would authenticate authorship — not the generic "evidence would
+    # establish" question.
+    assert any("independent receipt" in q for q in d["questions_to_ask"]), \
         f"expected a custody question, got {d['questions_to_ask']}"
     assert not any("implementation dates" in q for q in d["questions_to_ask"])
     assert not any("closest primary source" in q for q in d["questions_to_ask"])
@@ -1347,7 +1351,8 @@ def _():
     assert d["custody_breakdown"]["hosted_ownership_status"] == "candidate_uncertain"
     assert d["custody_breakdown"]["hosted_first_party_artifact"] is False
     assert d["custody_breakdown"]["source_url_provenance"] == "caller_supplied"
-    assert any("evidence would establish" in q for q in d["questions_to_ask"]), \
+    # v1.8.6 (P4): hosted candidate -> adapted custody question.
+    assert any("independent receipt" in q for q in d["questions_to_ask"]), \
         f"expected a custody question, got {d['questions_to_ask']}"
 
 
@@ -1639,6 +1644,179 @@ def _():
         f"humaneval must be only the 82.3 score, got {by_key.get('humaneval')}"
     assert by_key["humaneval"][0]["shot_count"] == 1
     assert "dow" not in by_key, f"Downloads/FP8 must not mint a Dow claim, got {by_key.get('dow')}"
+
+
+# ── v1.8.6: generic quantitative fallback + date roles ───────────────────────
+
+@test("POST /api/v1/compare aligns vendor performance claims across docs (P2)")
+def _():
+    # Nov 8 gap 1: the 23% / 9% / 30-node / 200-turn / 26 / 16 claims
+    # extracted nothing before the generic quantitative fallback. The
+    # context numbers (30-node, 200-turn) are part of the claim's
+    # identity, so a bare 23% elsewhere would not merge with these.
+    a = ("A 30-node workflow's 200-turn run is 23% faster with 9% lower "
+         "peak memory. The release graduates 26 modules to stable, "
+         "including 16 features.")
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": a, "source_name": "A"},
+            {"text": a, "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
+               for c in d.get("alignment", [])}
+    assert "generic|speed|nodes=30;turns=200||unstated" in aligned, \
+        f"expected speed aligned, got {list(aligned)}"
+    assert aligned["generic|speed|nodes=30;turns=200||unstated"] == [23.0, 23.0]
+    assert aligned.get("generic|memory|nodes=30;turns=200||unstated") == [9.0, 9.0], \
+        f"expected memory aligned, got {list(aligned)}"
+    assert aligned.get("generic|modules|||unstated") == [26.0, 26.0]
+    assert aligned.get("generic|features|||unstated") == [16.0, 16.0]
+    assert not d.get("conflicts"), f"identical vendor claims must not conflict, got {d.get('conflicts')}"
+
+
+@test("POST /api/v1/compare keeps two subjects of one family apart (P2)")
+def _():
+    # Nov 7: GPT-6 Cyber 99.93% vs GPT-5.6 Cyber 94.49% avoidance are
+    # two values of one family, not a conflict. Each subject's value
+    # aligns with its own twin; nothing conflicts.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "GPT-6 Cyber avoided exploiting out-of-scope services in "
+                     "99.93% of tests, up from 94.49% for GPT-5.6 Cyber.",
+             "source_name": "A"},
+            {"text": "GPT-6 Cyber avoided exploiting out-of-scope services in "
+                     "99.93% of tests. GPT-5.6 Cyber avoided exploiting "
+                     "out-of-scope services in 94.49% of tests.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
+               for c in d.get("alignment", [])}
+    assert aligned.get("generic|out-of-scope avoidance|||gpt-6-cyber") == [99.93, 99.93], \
+        f"expected GPT-6 99.93 aligned, got {aligned}"
+    assert aligned.get("generic|out-of-scope avoidance|||gpt-5-6-cyber") == [94.49, 94.49], \
+        f"expected GPT-5.6 94.49 aligned, got {aligned}"
+    assert not d.get("conflicts"), f"two subjects must not conflict, got {d.get('conflicts')}"
+
+
+@test("POST /api/v1/compare aligns number words with digits (P2)")
+def _():
+    # Nov 8: "Twenty-six modules" and "26 modules" are the same claim;
+    # "Sixteen features" and "16 features" likewise.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "The release graduates 26 modules to stable, including 16 features.",
+             "source_name": "A"},
+            {"text": "The release graduates Twenty-six modules to stable, including Sixteen features.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
+               for c in d.get("alignment", [])}
+    assert aligned.get("generic|modules|||unstated") == [26.0, 26.0], \
+        f"expected modules 26 aligned, got {aligned}"
+    assert aligned.get("generic|features|||unstated") == [16.0, 16.0], \
+        f"expected features 16 aligned, got {aligned}"
+    assert not d.get("conflicts")
+
+
+@test("POST /api/v1/compare extracts ISO timestamps as dates (P5)")
+def _():
+    # Nov 7 gap 4: "2026-11-06T10:15:00Z" extracted nothing before the
+    # ISO-with-time alternative was added to the date regex.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Updated 2026-11-06T10:15:00Z. The release is out.",
+             "source_name": "A"},
+            {"text": "Updated 2026-11-06T10:15:00Z. The release is out.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    shared = {x["date_key"]: x for x in d.get("shared_dates", [])}
+    assert "2026-11-06" in shared, f"expected ISO timestamp shared, got {list(shared)}"
+    assert shared["2026-11-06"]["roles"] == {"A": ["updated"], "B": ["updated"]}, \
+        f"expected updated roles, got {shared['2026-11-06']['roles']}"
+
+
+@test("POST /api/v1/compare labels fetched vs published date roles (P5)")
+def _():
+    # A "Fetched 2026-11-08" feed header is a fetched date, not a
+    # published one; a "Published: November 7, 2026" line is a
+    # published date even when the previous sentence was a fetch.
+    # (The nearest label cue wins — a fetched header must not bleed
+    # into the next sentence's published date.)
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Fetched 2026-11-08. Published: November 7, 2026. "
+                     "The release is out.", "source_name": "A"},
+            {"text": "Published: November 7, 2026. The release is out.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    shared = {x["date_key"]: x for x in d.get("shared_dates", [])}
+    assert "2026-11-07" in shared, f"expected 2026-11-07 shared, got {list(shared)}"
+    assert shared["2026-11-07"]["roles"] == {"A": ["published"], "B": ["published"]}, \
+        f"expected published roles, got {shared['2026-11-07']['roles']}"
+    unique = {x["date_key"]: x for x in d.get("unique_dates", [])}
+    assert "2026-11-08" in unique, f"expected 2026-11-08 unique, got {list(unique)}"
+    assert unique["2026-11-08"]["roles"] == {"A": ["fetched"]}, \
+        f"expected fetched role, got {unique['2026-11-08']['roles']}"
+
+
+@test("POST /api/v1/compare treats an up-to ceiling as compatible (P2)")
+def _():
+    # "up to 95% completion" is a ceiling: a plain 95% and a plain 90%
+    # both sit under it, so neither is a conflict.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "The model reached up to 95% completion on the tasks.",
+             "source_name": "A"},
+            {"text": "The model reached 95% completion on the tasks.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
+               for c in d.get("alignment", [])}
+    assert aligned.get("generic|completion|||unstated") == [95.0, 95.0], \
+        f"expected ceiling 95 aligned with plain 95, got {aligned}"
+    assert not d.get("conflicts")
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "The model reached up to 95% completion on the tasks.",
+             "source_name": "A"},
+            {"text": "The model reached 90% completion on the tasks.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not [c for c in d.get("conflicts", [])
+                if c["entity_key"] == "generic|completion|||unstated"], \
+        "a value under the ceiling must not conflict with it"
+
+
+@test("POST /api/v1/compare never mints a claim from a version string (P2)")
+def _():
+    # "v2.14.0" and "GPT-6" are versions and model names, not values.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Release v2.14.0 is available. GPT-6 is the new model.",
+             "source_name": "A"},
+            {"text": "Release v2.14.0 is available. GPT-6 is the new model.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    keys = ([c["entity_key"] for c in d.get("shared_claims", [])] +
+            [c["entity_key"] for c in d.get("alignment", [])] +
+            [c["entity_key"] for c in d.get("unique_claims", [])])
+    assert not keys, f"version strings must mint no claims, got {keys}"
 
 
 # ── runner ─────────────────────────────────────────────────────────────────────
