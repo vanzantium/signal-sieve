@@ -395,6 +395,16 @@ def _host_is_or_subdomain(host: str, trusted: str) -> bool:
     return host == trusted or host.endswith("." + trusted)
 
 
+# Anonymous/rumor cues, word-boundary matched (v1.8.7, B1): a substring
+# check made an outlet name mint an anonymous inference — "MacRumors"
+# contains "rumor" — so these only fire on standalone words. Plurals
+# ("anonymous sources", "rumors") still count.
+_ANONYMOUS_CUES_RE = re.compile(
+    r"\b(?:anonymous sources?|sources? familiar|unnamed sources?|rumou?rs?|leaked)\b",
+    re.I,
+)
+
+
 def _infer_source_type_from_signals(text: str, source_url: str = "") -> str:
     """Infer source type from text content and URL signals only."""
     t = text.lower()
@@ -405,7 +415,7 @@ def _infer_source_type_from_signals(text: str, source_url: str = "") -> str:
         return "official"
     if any(_host_is_or_subdomain(host, h) for h in ACADEMIC_HOSTS):
         return "primary"
-    if any(x in t for x in ["anonymous source", "source familiar", "unnamed source", "rumor", "leaked"]):
+    if _ANONYMOUS_CUES_RE.search(t):
         return "anonymous"
     if any(x in t for x in ["press release", "we are excited to announce"]):
         return "official"
@@ -506,6 +516,17 @@ _RESEARCH_CONDUCT_RE = re.compile(
 )
 
 
+def _cue_in_text(cue: str, low: str) -> bool:
+    """Word-boundary match for a reporting/attribution cue (v1.8.7, B1).
+
+    The veto's SCOPE is unchanged — any cue anywhere in the text still
+    vetoes the exemption for the whole doc — only the mechanism moves
+    from substring `in` to word-boundary regex, so a word merely
+    containing a cue (e.g. an outlet name) cannot trip it.
+    """
+    return re.search(r"\b" + re.escape(cue) + r"\b", low) is not None
+
+
 def _first_person_research(text: str) -> Tuple[bool, str]:
     """Return (fires, reason) for first-person research-conduct voice.
 
@@ -516,10 +537,10 @@ def _first_person_research(text: str) -> Tuple[bool, str]:
     """
     low = text.lower()
     for cue in _THIRD_PARTY_ATTRIBUTION_CUES:
-        if cue in low:
+        if _cue_in_text(cue, low):
             return False, f"third-party attribution cue present ({cue!r})"
     for cue in _SECONDARY_REPORTING_CUES:
-        if cue in low:
+        if _cue_in_text(cue, low):
             return False, f"secondary-reporting cue present ({cue!r})"
     if _RESEARCH_CONDUCT_RE.search(text):
         return True, "first-person research-conduct voice about the authors' own work"
@@ -536,10 +557,10 @@ def _first_party_announcement(text: str) -> Tuple[bool, str]:
     """
     low = text.lower()
     for cue in _THIRD_PARTY_ATTRIBUTION_CUES:
-        if cue in low:
+        if _cue_in_text(cue, low):
             return False, f"third-party attribution cue present ({cue!r})"
     for cue in _SECONDARY_REPORTING_CUES:
-        if cue in low:
+        if _cue_in_text(cue, low):
             return False, f"secondary-reporting cue present ({cue!r})"
     if _ANNOUNCEMENT_RE.search(text):
         return True, "first-person announcement voice about the publisher's own action"
@@ -685,11 +706,18 @@ _RESERVED_ORG_LABELS = {
 }
 
 # The pipeline feed header names the publisher the feed says published
-# the document ("PRIMARY SOURCE — OpenAI, ..."). First word after the
-# dash, slugified. This is the feed's declaration, not a verification.
+# the document ("PRIMARY SOURCE — OpenAI, ..."). Up to four capitalized
+# words after the dash, slugified. This is the feed's declaration, not a
+# verification. v1.8.7, B1: multi-word names are preserved whole
+# ("Thinking Machines Lab", "AI Weekly", "The Information") instead of
+# truncating to the first token. Continuation words are Titlecase (second
+# letter lowercase), so a trailing all-caps product/model token ("Google
+# ADK" — ADK is the product, not the publisher) stops the capture at
+# "Google"; a leading all-caps word ("AI Weekly", "TSN Media") still
+# counts. SECONDARY / TERTIARY headers name the publisher the same way.
 _HEADER_ORG_RE = re.compile(
-    r"^(?:PRIMARY SOURCE|PRIMARY COMPANION|COVERAGE)\s*[\u2014\-]\s*"
-    r"([A-Za-z][A-Za-z0-9_-]{1,30})",
+    r"^(?:PRIMARY SOURCE|PRIMARY COMPANION|SECONDARY(?: SOURCE)?|TERTIARY(?: SOURCE)?|COVERAGE)\s*[\u2014\-]\s*"
+    r"([A-Z][A-Za-z0-9_-]{1,30}(?: +[A-Z][a-z][A-Za-z0-9_-]{0,29}){0,3})",
     re.M,
 )
 
@@ -714,7 +742,7 @@ def _header_claimed_org(text: str) -> str:
     if not m:
         return ""
     org = m.group(1).lower()
-    if org in _RESERVED_ORG_LABELS:
+    if org in _RESERVED_ORG_LABELS or org.split()[0] in _RESERVED_ORG_LABELS:
         return ""
     return org
 
@@ -728,8 +756,10 @@ def _header_claimed_org(text: str) -> str:
 _CLAIMED_ORG_RES = [
     # "X Team" with up to two words between ("Baidu ERNIE Team").
     re.compile(r"\b([A-Z][A-Za-z0-9_-]{1,30})(?:\s+[A-Za-z][A-Za-z0-9_-]{1,30}){0,2}\s+[Tt]eam\b"),
-    # "X Labs / Research / AI".
-    re.compile(r"\b([A-Z][A-Za-z0-9_-]{1,30})\s+(?:[Ll]abs?|[Rr]esearch|[Aa][Ii])\b"),
+    # "X Labs / Research / AI" — up to two preceding capitalized words
+    # (v1.8.7, B1), so "Thinking Machines Labs" claims "Thinking
+    # Machines", not just "Machines".
+    re.compile(r"\b((?:[A-Z][A-Za-z0-9_-]{1,30}\s+){0,2}[A-Z][A-Za-z0-9_-]{1,30})\s+(?:[Ll]abs?|[Rr]esearch|[Aa][Ii])\b"),
     # "by X".
     re.compile(r"\b[Bb]y\s+([A-Z][A-Za-z0-9_-]{1,30})\b"),
     # "X's ...".
@@ -761,13 +791,20 @@ def _extract_claimed_org(text: str) -> str:
     "classified by Mozilla" mid-document), and "X's" skips a match
     whose captured word is preceded by a model token ("GPT-6
     Cyber's" must not mint "cyber").
+    v1.8.7, B1 — double-quoted spans are stripped before the
+    text-mined constructions run: a quoted cited source ("Understanding
+    AI") is a phrase inside the document, not the publisher, and must
+    never mint an org. The feed header above is read on the unstripped
+    text: a caller-declared publisher string ("COVERAGE — TechTimes")
+    still mints its org.
     """
     header = _header_claimed_org(text)
     if header:
         return header
+    unquoted = re.sub(r'"[^"\n]{0,200}"|“[^”\n]{0,200}”', " ", text)
     for idx, pat in enumerate(_CLAIMED_ORG_RES):
         seen: Dict[str, int] = {}
-        for m in pat.finditer(text):
+        for m in pat.finditer(unquoted):
             org = m.group(1)
             if len(org) < 2 or org.lower() in _ORG_STOPWORDS:
                 continue
@@ -777,12 +814,12 @@ def _extract_claimed_org(text: str) -> str:
                 # "by X": byline zone, or a release/authorship verb
                 # follows within 60 chars.
                 if m.start() > 600 and not _RELEASE_VERB_RE.search(
-                        text[m.end():m.end() + 60]):
+                        unquoted[m.end():m.end() + 60]):
                     continue
             if idx == 3:
                 # "X's": skip when the captured word is preceded by a
                 # model token ("GPT-6 Cyber's" -> "cyber").
-                prev = _MODEL_TOKEN_RE.search(text[:m.start()])
+                prev = _MODEL_TOKEN_RE.search(unquoted[:m.start()])
                 if prev:
                     tok = prev.group(1)
                     if tok[0].isupper() and any(c.isdigit() for c in tok):
@@ -1292,6 +1329,30 @@ def build_triage_summary(
 # CFT-inspired internal coherence scorer
 # ---------------------------------------------------------------------------
 
+# A line that is a list/table row, not prose (v1.8.7, B2): a bullet or
+# numbered-list line, or any line carrying a pipe (markdown table row).
+_LIST_TABLE_LINE_RE = re.compile(
+    r"^\s*(?:[-*\u2022\u2013\u2014]\s|\d{1,3}[.)]\s|[A-Za-z][.)]\s)|\|",
+)
+
+
+def _table_list_split(text: str) -> Tuple[float, str]:
+    """Return (table/list line share, prose-only text).
+
+    Share is list/table lines over non-empty lines. A list/table is not
+    by itself contradictory, so callers score coherence on the prose
+    lines only when the share is high, and suppress the low-coherence
+    flag when it dominates the document.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return 0.0, ""
+    is_lt = [_LIST_TABLE_LINE_RE.search(ln) is not None for ln in lines]
+    share = sum(is_lt) / len(lines)
+    prose = "\n".join(ln for ln, flag in zip(lines, is_lt) if not flag)
+    return share, prose
+
+
 def _score_internal_coherence(words: list, sentences: list) -> float:
     """Estimate internal logical coherence of the text (CFT-inspired).
 
@@ -1528,7 +1589,18 @@ def analyze(
             manipulation_risk = clamp(manipulation_risk + weak_chain_hits * 0.04 + bait_hits * 0.06)
             certainty_bias = clamp(certainty_bias + weak_chain_hits * 0.04)
 
-    internal_coherence = _score_internal_coherence(words, sentences)
+    # v1.8.7, B2: when table/list lines exceed 25% of the doc's lines,
+    # coherence is scored on prose lines only — table rows drag the
+    # connective/diversity signals down for reasons that say nothing
+    # about the argument, and a list/table is not by itself
+    # contradictory.
+    table_list_share, _prose_only = _table_list_split(raw)
+    if table_list_share > 0.25:
+        _coh_words = re.findall(r"\b\w+\b", _prose_only)
+        _coh_sentences = sentence_split(_prose_only)
+        internal_coherence = _score_internal_coherence(_coh_words, _coh_sentences)
+    else:
+        internal_coherence = _score_internal_coherence(words, sentences)
     certainty_to_evidence_gap = certainty_bias - evidence
     band_width = 0.10 + (manipulation_risk + certainty_bias) * 0.12
     confidence_low = clamp(overall - band_width)
@@ -1558,7 +1630,9 @@ def analyze(
                 "Table-heavy market snapshot: argument coherence scoring is not the primary "
                 "signal mode for this genre — use evidence shape and signal brief instead."
             )
-        else:
+        elif table_list_share <= 0.40:
+            # v1.8.7, B2: suppressed when table/list lines dominate the
+            # doc (>40%) — a list/table is not by itself contradictory.
             flags.append("Low internal coherence: argument appears repetitive or logically unconnected.")
     # Phase 1.6: house-view and forward-looking flags for investment strategy commentary
     if source_genre == "investment_strategy_commentary":
@@ -1787,11 +1861,22 @@ def analyze(
             )
     else:
         questions.append("What is the closest primary source for the main claim?")
-    questions.extend([
-        "Who benefits if this framing is believed?",
-        "What would change my mind if this claim were wrong?",
-        "Which claims are observed facts vs interpretation vs speculation?",
-    ])
+    # v1.8.7, B3: the generic follow-ups are only emitted when the doc
+    # actually carries claim content to point at — a sentence with a
+    # specific anchor (number/unit/date/proper-noun pair) or an evidence
+    # marker. A doc with no checkable claim content keeps the custody
+    # question and the score-wired questions below; a generic question
+    # whose subject ("this claim", "this framing") has no referent in
+    # the doc's claims is skipped rather than emitted.
+    has_claim_content = any(
+        SPECIFICITY.search(s) or EVIDENCE_MARKERS.search(s) for s in sentences
+    )
+    if has_claim_content:
+        questions.extend([
+            "Who benefits if this framing is believed?",
+            "What would change my mind if this claim were wrong?",
+            "Which claims are observed facts vs interpretation vs speculation?",
+        ])
     if certainty_bias > 0.45:
         questions.append("Why is the author so certain, and what uncertainty is missing?")
     if custody < 0.50:
@@ -1804,7 +1889,11 @@ def analyze(
         questions.append("Who profits if this framing spreads?")
     if attack_hits:
         questions.append("Strip the attack language; does the underlying argument still stand?")
-    if attribution < 0.5 and count_matches(QUOTE_PAT, raw) >= 1:
+    # v1.8.7, B2: only ask the quote-attribution question when an
+    # attributed quote actually exists — attribution strictly between 0
+    # and 0.5. A bare QUOTE_PAT match with no attribution (attribution
+    # == 0) gets no question; nor does a fully attributed set.
+    if 0 < attribution < 0.5:
         questions.append("The quotes here — who actually said them, when, and on what record?")
     if x_post_assessment:
         questions.extend([
@@ -1920,6 +2009,7 @@ def analyze(
             source_url_provenance=source_url_provenance,
             claimed_publisher_org=claimed_publisher_org,
             hosting_namespace=hosting_namespace,
+            speaks_as_originator=_speaks_as_originator(raw),
         )
         evidence_shape_data = build_evidence_shape(
             raw, sentences, anchored_n, unanchored_n
@@ -1928,6 +2018,26 @@ def analyze(
             raw, source_genre, effective_st, source_url,
             custody_downgraded=custody_downgraded,
         )
+
+    # v1.8.7, B2: an anchor verdict must never display without a plain
+    # distinction between document proximity / first-person declaration
+    # and authenticated origin. When the origin is not independently
+    # authenticated — primary_source_present is False (no primary link
+    # in the text and no verified hosted first-party artifact, i.e.
+    # hosted ownership not verified) — the anchor verdict and the
+    # triage summary both carry the distinction in plain words.
+    # (Uses the fields already computed above; no new verification.)
+    if custody_breakdown:
+        _origin_authenticated = bool(custody_breakdown.get("primary_source_present"))
+    else:
+        _origin_authenticated = bool(hosted_verified or re.search(
+            r"https?://(?:sec\.gov|sedarplus|sedar\.com|edgar|doi\.org|arxiv\.org|pubmed)",
+            raw.lower(),
+        ))
+    if recommended_action == "use_as_anchor" and not _origin_authenticated:
+        _origin_note = "primary origin claimed, not independently authenticated"
+        verdict = f"{verdict} ({_origin_note})"
+        triage_summary = f"{triage_summary} {_origin_note.capitalize()}."
 
     assessment = Assessment(
         source_name=source_name,
