@@ -1,0 +1,33 @@
+SECONDARY — InfoWorld, "Anthropic unveils Claude Fable 5.2, Mythos 5.2 with coding gains and lower prices"
+URL: https://www.infoworld.com/article/4246681/anthropic-unveils-claude-fable-5-2-mythos-5-2-with-coding-gains-and-lower-prices.html
+Published: 2026-11-10.
+
+Anthropic has introduced Claude Fable 5.2 and Mythos 5.2, claiming significant improvements in handling complex software engineering tasks while cutting API prices by 20% compared with the previous versions.
+
+Fable 5.2 and Mythos 5.2 share the same underlying model but have different safeguards. Fable is broadly available, while direct access to Mythos is restricted to vetted cybersecurity and life sciences organizations to limit potential misuse.
+
+The models are both priced at $8 per million input tokens and $40 per million output tokens, down from $10 and $50, respectively. Anthropic said the newer versions can generate output up to 30% faster than their predecessors.
+
+The company reported substantial gains in coding performance. Fable 5.2 scored 49.1% on the FrontierCode 2.0 benchmark at its Xhigh effort setting, compared with 32.4% for Fable 5.1. The benchmark assesses whether maintainers of open-source projects would accept AI-generated changes to their code.
+
+The models' improved performance and lower prices could make long-running AI agents viable for software migrations and scientific research, according to Lian Jye Su, chief analyst at Omdia. Higher task completion rates could further reduce deployment costs, he said.
+
+Anthropic said Fable 5.2 at its "High effort" setting achieved a coding benchmark score comparable to Opus 5.5 at its highest setting, at roughly half the cost per task. The comparison suggests that Fable could be more economical for some demanding assignments, although the savings would depend on the workload and effort setting.
+
+"Anthropic has cut the price of a token, not the price of a thought," said Sanchit Vir Gogia, chief analyst at Greyhound Research. He urged CIOs to treat AI processing effort as a budget consideration and measure costs against successfully completed tasks.
+
+Anthropic also recommends Opus 5.5 for most coding and knowledge work, with Fable and Mythos intended for more demanding assignments.
+
+In an internal experiment, an Anthropic engineer tasked Fable 5.2 with building a prototype operating system. The model coordinated more than 1,000 subagents over eight days and produced software that could boot on a laptop.
+
+"Reliability remains an issue without human supervision," Su said. Coordinating multiple AI agents across enterprise tools and internal teams also remains difficult, he added. Organizations will need to monitor agent activity and run these systems in appropriately isolated environments. Critical changes should remain subject to human approval, with sufficient visibility into agent behavior to support audits.
+
+Anthropic said Mythos 5.2 identified 89.6% of vulnerabilities in its internal CVE Rediscovery evaluation, compared with 78.3% for Mythos 5.1. Conducted against 1,829 previously disclosed vulnerabilities, the test assessed whether models could independently rediscover flaws in software snapshots taken before the vulnerabilities were fixed. The company said Mythos 5.2 was also better at reproducing vulnerabilities and developing fixes.
+
+Anthropic has restricted direct access to Mythos 5.2 through its verification programs. However, Claude Enterprise customers can use the model's vulnerability detection capabilities through Claude Security without joining those programs, the company said.
+
+According to Su, "Mythos 5.2 shifts the balance towards defenders in controlled enterprise settings." Pareekh Jain, CEO of Pareekh Consulting, cautioned that advances in AI-powered vulnerability discovery could also help attackers identify software weaknesses more quickly. "This creates an AI-powered race between attackers and defenders," he said.
+
+Anthropic said customers eligible for zero data retention can continue using Fable 5.2 and Mythos 5.2 under those arrangements, while other customers face 30-day retention for safety monitoring. The company has also introduced Enterprise Frontier Safeguards, currently in private beta, which allows automated safety monitoring to run on prompts and responses stored within customers' infrastructure.
+
+Gogia said data retention requirements could outweigh the benefits of lower API prices for regulated enterprises. He urged procurement teams to obtain written confirmation of zero-retention arrangements before deploying the models for sensitive workloads.
