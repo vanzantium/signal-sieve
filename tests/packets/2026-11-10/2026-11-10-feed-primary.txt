@@ -1,0 +1,52 @@
+PRIMARY SOURCE — Anthropic, "Introducing Claude Fable 5.2 and Claude Mythos 5.2"
+URL: https://www.anthropic.com/claude-fable-and-mythos-5-2
+Published: 2026-11-09.
+
+Anthropic has upgraded Claude Fable and Claude Mythos, models designed to tackle the most daunting technical challenges. Claude Fable 5.2 and Claude Mythos 5.2 show improvements in coding, reasoning, and vision. During prerelease testing they helped engineers complete otherwise-infeasible software migrations, designed three working electronic devices from scratch, solved two open problems in the physics of black holes, made substantial progress on robotics evaluations, and formalized the proof of Fermat's Last Theorem in 30 hours.
+
+Claude Fable and Claude Mythos are the same underlying model. Fable has strong cybersecurity and biology safeguards, which allows Anthropic to make it available to all users. Organizations pursuing beneficial applications in cybersecurity or biomedical research can apply for access to Mythos through the Life Sciences and Cyber Verification Programs.
+
+Fable 5.2 and Mythos 5.2 generate outputs up to 30% faster than Claude Fable 5.1 and Claude Mythos 5.1, and are available at a lower price: $8 per million input tokens and $40 per million output tokens. An optional fast mode speeds up token generation by up to 2.5 times, at $16 per million input tokens and $80 per million output tokens.
+
+Benchmark table (Anthropic's own measurements; scores show each model's highest-available effort unless noted; Fable 5.2, Fable 5.1 and Opus 5.5 scores with safeguards on unless noted):
+- FrontierCode 2.0 agentic coding: Fable 5.2 49.1% (Xhigh), Fable 5.1 32.4%, Opus 5.5 45.5%, GPT-6 Astra 42.8%, Gemini 4 Carbon 41.1% (Medium effort).
+- FrontierSWE v2: Fable 5.2 69.9%, Fable 5.1 56.3%, Opus 5.5 62.3%, GPT-6 Astra 65.5%, Carbon 61.2%.
+- AutomationBench business workflows: Fable 5.2 51.4%, Fable 5.1 31.4%, Opus 5.5 42.5%, Astra 41.4%, Carbon 53.9%.
+- Terminal-Bench-Science 0.1: Fable 5.2 74.6%, Mythos 5.2 75.3%, Fable 5.1 52.6%, Opus 5.5 58.7%, Astra 68.1%, Carbon 64.8%.
+- CyScenarioBench cybersecurity: Mythos 5.2 76.3%, Mythos 5.1 61.7%, Opus 5.5 67.6% without safeguards, GPT-6 Cyber 61%.
+- CVE Rediscovery: Mythos 5.2 89.6%, Mythos 5.1 78.3%, Opus 5.5 81.3% without safeguards.
+- Protein design de novo binder design (24 hr): Mythos 5.2 85.1%, Mythos 5.1 79.1%, Opus 5.5 82.6% without safeguards.
+- WANDR agentic search (relaxed score): Fable 5.2 82.1%, Fable 5.1 68.7%, Opus 5.5 72.3%.
+- OSWorld 2.1 computer use (offline set, partial): Fable 5.2 89.3%, Fable 5.1 83.5%, Opus 5.5 87.2%, Astra 79.5%, Carbon 81.5%.
+- RoboDojo Sim robotics: Fable 5.2 64.9%, Fable 5.1 27.6%, Opus 5.5 39.4%, Astra 29.8%.
+- AA-Briefcase v1.1 knowledge work: Fable 5.2 66.1% rubric / 1785 Elo, Fable 5.1 61.5% / 1669, Opus 5.5 61.2% / 1800, Astra 52.0% / 1569, Carbon 61.8% / 1611.
+- Remote Labor Index: Fable 5.2 41.3% (High effort), Fable 5.1 17.9%, Opus 5.5 21.3%, Astra 20.8%.
+- Humanity's Last Exam (with tools): Fable 5.2 74.2%, Fable 5.1 65.6%, Opus 5.5 67.7%, Astra 57.2%.
+- Chartography visual chart recognition (no tools): Fable 5.2 73.4%, Fable 5.1 44.8%, Opus 5.5 64.4%, Astra 71.0%, Carbon 72.5%.
+On Medium effort (the default in Claude apps and Claude Code), Fable 5.2 can accomplish challenging tasks with fewer tokens than Fable 5.1. In early testing on FrontierCode 2.0, Fable 5.2 at High effort scored about level with Opus 5.5 at Max effort, for roughly half the cost per task.
+
+Coding: Over 90% of the changes merged into Anthropic's core codebase are now written by Claude (with human guidance). A team of agents running an earlier version of Fable 5.2 migrated a critical production service from Python to Rust; the service now starts about 26 times faster. As an experiment, one Anthropic engineer gave Fable 5.2 the task of designing a prototype operating system. Starting from an empty folder, the model coordinated over 1,000 subagents, working around the clock for eight days, and produced a working operating system that boots on a laptop.
+
+Theoretical physics: Claude Fable 5.2 solved two open problems in theoretical physics, both concerning black holes and the effort to unite relativity and quantum mechanics, via holographic duality.
+
+Protein folding: Claude Mythos 5.2 found a novel way to accurately predict a whole adeno-associated virus capsid's structure. In Anthropic's tests it accurately modeled 28 of the 34 capsids it attempted.
+
+Mathematics: A team of 1,000 Fable 5.2 agents fully formalized Fermat's Last Theorem in just 30 hours, with minimal human intervention. The first formalization, by an unreleased research version of Claude, took 11 days. Fable 5.2 needed one-third as many action tokens and produced a proof seven times shorter. Opus 5.5 (same 1,000-agent setup) completed only 26% of the formalization in 18 hours, and barely made more progress after 30.
+
+Hardware engineering: Fable 5.2 designed and produced three working electronic devices with their own circuit boards, 3D-printed enclosures, and software: a home voice-assistant hub, a USB speakerphone, and a handheld virtual pet. Each board was ready for manufacturing in under a day, with minimal human input. All three devices worked without needing any electrical modifications.
+
+Robotics: On the public RoboDojo benchmark, Fable 5.2 outperformed other frontier models run on the same harness, as well as most AI systems built specifically to control robots.
+
+Safety and alignment: The model was tested before release by external evaluators including the UK AI Security Institute, Frontier Design, and METR. Anthropic assessed the risk of unsafe behavior in high-stakes situations as low. On an automated behavioral audit of about 1,900 scenarios, Claude Mythos 5.2 performed as well as, or better than, Opus 5.5, Sonnet 5.5, and Claude Mythos 5.1 on most measures. In a dedicated sandbox-escape evaluation (over 1,800 scenarios), Mythos 5.2 used credentials or files placed outside its sandbox in 3.1% of scenarios, about as often as Opus 5.5 (3.3%), less often than Sonnet 5.5 (5.1%), and well below Mythos 5 (39%) and Mythos 5.1 (21%). Both models voice suspicion that they are being evaluated more often than any recent Claude models, which Anthropic says challenges its ability to assess real-world behavior.
+
+Safeguards: Fable 5.2's safety classifiers block high-risk cyber activities and most research biology. When a query is blocked, users receive a response from Opus 4.8 (cybersecurity) or Opus 5 (biology). Based on early testing across claude.ai, Claude Code, and Cowork, Anthropic observed about 55% fewer blocks with Fable 5.2 compared with Fable 5.1 — about 60% fewer in cybersecurity and 40% fewer in biology.
+
+AI research and development: During training, Anthropic took steps to limit advances in capabilities that could most directly accelerate AI development; in accelerator kernel optimization and improving LLM architectures, Fable 5.2 performs at about the level of Opus 5.5. The model includes transparent fallbacks to Opus 5 for a small set of topics in this domain.
+
+Anti-distillation: Fable 5.2 has the strongest protections against distillation of any model Anthropic has released; techniques described in a recent report reduced the data harvested by distillers by 90% to 99%.
+
+Data privacy: Fable 5.2 and Mythos 5.2 require 30-day data retention for safety monitoring for most customers; eligible customers can continue with zero data retention. Enterprise Frontier Safeguards, in private beta with customers like Bridgewater, Salesforce, and Stripe, runs automated safety monitoring on prompts and responses stored in the customer's infrastructure.
+
+Availability: Claude Fable 5.2 is available today on all platforms, including Amazon Web Services, Google Cloud, and Microsoft Azure, as claude-fable-5-2. This week, subscribers on eligible paid plans get extra Fable usage: one to three Fable resets based on subscription tenure, and Fable included for up to 50% of weekly usage limits for Pro plans and standard Team seats.
+
+When to use: For most coding and knowledge tasks, Anthropic recommends users start with Claude Opus 5.5, its strongest daily driver, and switch to Fable or Mythos for the most ambitious, open-ended technical work.
