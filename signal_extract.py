@@ -418,6 +418,7 @@ def build_custody_breakdown(
     source_url_provenance: str = "none",
     claimed_publisher_org: str = "",
     hosting_namespace: str = "",
+    speaks_as_originator: bool = False,
 ) -> Dict:
     """Return layered custody breakdown.
 
@@ -461,6 +462,12 @@ def build_custody_breakdown(
     None for every document. `custody_field_notes` documents what
     each field measures, so a reader can see why two fields disagree
     instead of the system papering over the disagreement.
+
+    v1.8.7, B2: `primary_origin_status` ("verified" | "claimed" |
+    "none") derives the origin-authentication state from the existing
+    inputs, and `speaks_as_originator` records whether the document
+    speaks in the originator's own voice (passed through from the
+    caller's voice check; a wording fact, not a custody verdict).
     """
     data_providers = _find_data_providers(text)
     market_venues  = _find_market_venues(text)
@@ -481,6 +488,20 @@ def build_custody_breakdown(
     # trusted channel exists today, so this is None for every
     # document — that is the honest state, not a gap to fill by
     # re-describing a namespace match.
+    # v1.8.7, B2: origin status, derived from the existing inputs only.
+    # "verified" — ownership independently established (a verified
+    # hosted first-party artifact); "claimed" — the document (or its
+    # feed) claims primary origin without independent authentication:
+    # a hosted candidate, a primary link in the text, a claimed
+    # publisher org, or originator voice; "none" — no origin claim at
+    # all. A claimed origin is never verified on the document's own
+    # say-so.
+    if hosted_ownership_status == "verified" or hosted_first_party:
+        primary_origin_status = "verified"
+    elif hosted_candidate or primary_linked or claimed_publisher_org or speaks_as_originator:
+        primary_origin_status = "claimed"
+    else:
+        primary_origin_status = "none"
     independently_verified_owner = (
         claimed_publisher_org if hosted_ownership_status == "verified" else None
     )
@@ -501,6 +522,8 @@ def build_custody_breakdown(
         "claimed_publisher_org":       claimed_publisher_org or None,
         "hosting_namespace":           hosting_namespace or None,
         "independently_verified_owner": independently_verified_owner,
+        "primary_origin_status":        primary_origin_status,
+        "speaks_as_originator":         speaks_as_originator,
         "custody_field_notes": {
             "custody_label": (
                 "Text-form + declared-type proximity: what the document "
@@ -546,6 +569,19 @@ def build_custody_breakdown(
                 "independently established through a trusted channel; "
                 "None otherwise. No trusted channel exists in this "
                 "system today, so this is None for every document."
+            ),
+            "primary_origin_status": (
+                "Whether the document's origin as a primary source is "
+                "independently authenticated ('verified'), merely "
+                "claimed by the document or its feed ('claimed'), or "
+                "not claimed at all ('none'). A claimed origin is "
+                "never verified on the document's own say-so."
+            ),
+            "speaks_as_originator": (
+                "Whether the document speaks in the originator's own "
+                "voice (a first-party announcement or first-person "
+                "research conduct), without the secondary-reporting "
+                "veto. A wording fact, not a custody verdict."
             ),
         },
         "data_source_named":      bool(data_providers),
