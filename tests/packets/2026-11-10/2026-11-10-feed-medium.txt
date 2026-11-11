@@ -1,0 +1,40 @@
+SECONDARY — Medium review (mcthkayaa), "Claude Fable 5.2 review: what changed from Fable 5.1, what it costs, and who can use Mythos 5.2"
+URL: https://medium.com/@mcthkayaa/claude-fable-5-2-review-what-changed-from-fable-5-1-what-it-costs-and-who-can-use-mythos-5-2-888180931c37
+Published: 2026-11-09 (read 9 November 2026).
+
+Anthropic released Claude Fable 5.2 on 9 November 2026 at $8 input and $40 output per million tokens. Anthropic says Claude Mythos 5.2 is the same underlying model with more permissive safeguards, for verified programmes only. Artificial Analysis's Intelligence Index v5.0.1, read 9 November, scores Fable 5.2 at High 61.82 for $9.08 per task, against 59.11 for $10.04 for Claude Opus 5.5 at Max. Anthropic still advises starting with Opus 5.5, and its headline examples have no outside check.
+
+This review sent no prompt to Claude Fable 5.2 or Claude Mythos 5.2. It rests on Anthropic's launch announcement, its 264-page system card, its docs, four outside boards (Artificial Analysis, Cognition, Zapier and Vals AI) and five launch-day user reports, all read on 9 November 2026. Anthropic's launch table is checked cell by cell against each benchmark owner's board. Artificial Analysis is now on Intelligence Index v5.0.1, which regraded CritPt in November 2026, so its figures differ from pages quoting older versions.
+
+Claude Fable 5.2 lists at $8 / $40 per million input and output tokens against $10 / $50 for Claude Fable 5.1. Anthropic's announcement adds "up to 30% faster" output, "about 55% fewer blocks", split as "about 60% fewer in cybersecurity and 40% fewer in biology", and a table in which Fable 5.2 beats Fable 5.1 on every printed row; the system card has no speed or block-rate measurement, and its ProgramBench result puts Fable 5.2 at 85.6% against 87.6% for Fable 5.1 (system card p.216). Anthropic's block figure comes from what it calls "early testing across claude.ai, Claude Code, and Cowork".
+
+Per token, Fable 5.2 is cheaper than Fable 5.1: input, output, cache reads ($0.20 against $0.25) and batch ($4 / $20 against $5 / $25) are all 20% lower. Per task it depends on effort: Artificial Analysis's Intelligence Index v5.0.1 lists Fable 5.1 (High) at 47.17 for $7.54 per index task and Fable 5.2 (High) at 61.82 for $9.08, while Fable 5.2 (Medium) costs $3.80 for 56.41. Artificial Analysis now marks Fable 5.1 deprecated.
+
+No published measurement backs Anthropic's claim that Claude Fable 5.2 is "up to 30% faster than Claude Fable 5.1 and Claude Mythos 5.1": the figure appears only in the announcement, and the system card's one serving-speed line says speeds in its evaluations "may differ from what external users experience" (p.221). Fast mode is separate: Anthropic's fast-mode docs give "Up to 2.5x higher output tokens per second compared to standard speed" at $16 / $80, twice the standard price, and "not time to first token (TTFT)". No launch-day user report timed Fable 5.2's speed.
+
+Only at High on hard tasks is Fable 5.2 worth twice the price of Opus 5.5: Fable 5.2 (High) scores 61.82 for $9.08 per index task against 59.11 for $10.04 for Opus 5.5 (Max), while at Medium Opus 5.5 is cheaper (48.21 for $2.45 against 56.41 for $3.80). Per token, Fable 5.2 costs twice as much as Opus 5.5 ($8 / $40 against $4 / $20 per million).
+
+Anthropic recommends Claude Opus 5.5 first: "For most coding and knowledge tasks, we recommend that users start with Claude Opus 5.5, our strongest daily driver". Its cost case for Fable 5.2 rests on one FrontierCode 2.0 chart: "At High effort, Fable 5.2 scores about the same as Opus 5.5's best score (45.3% vs. 45.5%) for roughly half the cost per task". The half holds on Anthropic's cost axis ($6.721 against $12.82 per task); Cognition's own data file gives $8.402 against $12.821, about two thirds. The system card adds that Fable 5.2's max-effort 45.7% would be 44.4% if 22 timed-out attempts counted as zero (p.209).
+
+Artificial Analysis Intelligence Index v5.0.1, read 9 November 2026: Fable 5.2 (Max) 64.56 for $26.54 per index task, first of 74 rows; Fable 5.2 (Xhigh) 62.22 for $14.83; Fable 5.2 (High, API default) 61.82 for $9.08; Fable 5.2 (Medium, apps default) 56.41 for $3.80; Fable 5.2 (Low) 53.92 for $3.10. Gemini 4 Carbon (High) 60.03 for $7.76. Claude Opus 5.5 (Max) 59.11 for $10.04. GPT-6 Astra (Max) 56.85 for $6.24. Fable 5.1 (High) 47.17 for $7.54, marked deprecated. Index v5.0.1 (CritPt regraded, November 2026) is not comparable with earlier versions.
+
+Three other boards had Fable 5.2 by 20:12 UTC on 9 November 2026: Cognition's FrontierCode 2.0 (first, 49.1% at xhigh), Vals AI's Vals Index v2.2 (first of 36, 71.31% at high effort) and Zapier's AutomationBench 1.0.6 (third, 51.45% at Max).
+
+Moving Fable 5.2 from High to Xhigh adds 0.40 points for $5.75 more per index task, and Xhigh to Max adds 2.34 points for $11.71 more, so Max costs 2.9 times High for 2.74 more points.
+
+Cell-by-cell check of Anthropic's launch table against owners' boards (boards read 20:02 to 20:12 UTC on 9 November 2026):
+- FrontierCode 2.0: Fable 5.2 49.1%, Opus 5.5 45.5%, Astra 42.8%, Fable 5.1 32.4% — owner board: 49.11%, 45.45%, 42.77%, 32.44%; matches.
+- FrontierCode 2.0: Gemini 4 Carbon 41.1% "Medium effort" — owner board: 40.0% (devin-cli); differs.
+- FrontierSWE v2: four comparators — owner board: same four values; Fable 5.2 not listed; matches.
+- AutomationBench: Fable 5.2 51.4%, Opus 5.5 42.5%, Astra 41.4%, Carbon 53.9% — owner board: 51.45%, 42.47%, 41.40%, 53.88%; matches. Fable 5.1 31.4% matches (without fallback 22.37%).
+- Terminal-Bench-Science 0.1: Astra 68.1% matches. Fable 5.1 52.6% and Opus 5.5 58.7% differ: owner board shows 40.0% and 63.3%. Carbon 64.8% and Fable 5.2 74.6% are not listed on the owner's board (Artificial Analysis has 64.76% for Carbon High and 73.33% for Fable 5.2 Max).
+- CyScenarioBench: the "61% GPT-6 Cyber" cell is a different model, labelled: owner board has GPT-6 Cyber 61% but Astra 59% on 10 scenarios. Opus 5.5 67.6% and Mythos 5.1 61.7% match.
+- Chartography: Opus 5.5 64.4% and Fable 5.1 44.8% differ: Surge AI's board shows 66.3% and 46.2%. Astra 71.0% matches. Carbon 72.5% has no Carbon row on the owner's board.
+- AA-Briefcase v1.1: all five columns match. Remote Labor Index: three comparators match. RoboDojo Sim: Astra 29.8% differs (RoboDojo team run: 28.97).
+- HLE with tools, OSWorld 2.1, WANDR, CVE Rediscovery, binder design, RoboDojo Claude rows: Anthropic's own run; no owner board lists them; no outside result found as of 9 November 2026.
+
+Anthropic's own launch table shows Fable 5.2 behind in two cells: Gemini 4 Carbon leads AutomationBench at 53.9% against 51.4%, and Opus 5.5 leads the AA-Briefcase v1.1 Elo at 1800 against 1785; that board's leader, read 9 November 2026, is Claude Sonnet 5.5 (Max) at 1813.33, absent from the table. The system card adds ProgramBench, 85.6% against 91.2% for Opus 5.5, after Fable 5.2 "ran out of context before submitting on 68% of tasks" (p.216), and GDPval-AA v2.1, 1831 against 1866 (p.239).
+
+Claude Mythos 5.2 (claude-mythos-5-2) is the same underlying model as Fable 5.2 with more permissive safeguards in cybersecurity and biology, open only to vetted individuals and organisations in Anthropic's Cyber or Life Sciences Verification Programs and, through Claude Security, to Claude Enterprise customers. Anthropic lists the same $8 / $40 price, and no outside board lists Mythos 5.2. The Cyber Verification Program page says "only Defense access is available for individual applicants at this time", "Access to Mythos will trail application approval by approximately five business days" and "The Cyber Verification Program requires data retention". In Anthropic's table Mythos 5.2 scores 75.3% on Terminal-Bench-Science against 74.6% for Fable 5.2 with safeguards on. Both models require 30-day data retention, like Fable 5.1 and Mythos 5.1.
+
+Requests that Fable 5.2 blocks go to Claude Opus 4.8 (cybersecurity) or Claude Opus 5 (biology and some AI research topics), both listed at $5 / $25.
