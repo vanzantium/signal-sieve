@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.8.6"
+ANALYSIS_VERSION  = "v1.8.7"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
