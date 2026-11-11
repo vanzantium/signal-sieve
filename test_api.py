@@ -1666,13 +1666,13 @@ def _():
     d = r.get_json()
     aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
                for c in d.get("alignment", [])}
-    assert "generic|speed|nodes=30;turns=200||unstated" in aligned, \
+    assert "generic|percentage|speed|nodes=30;turns=200||unstated" in aligned, \
         f"expected speed aligned, got {list(aligned)}"
-    assert aligned["generic|speed|nodes=30;turns=200||unstated"] == [23.0, 23.0]
-    assert aligned.get("generic|memory|nodes=30;turns=200||unstated") == [9.0, 9.0], \
+    assert aligned["generic|percentage|speed|nodes=30;turns=200||unstated"] == [23.0, 23.0]
+    assert aligned.get("generic|percentage|memory|nodes=30;turns=200||unstated") == [9.0, 9.0], \
         f"expected memory aligned, got {list(aligned)}"
-    assert aligned.get("generic|modules|||unstated") == [26.0, 26.0]
-    assert aligned.get("generic|features|||unstated") == [16.0, 16.0]
+    assert aligned.get("generic|task_count|modules|||unstated") == [26.0, 26.0]
+    assert aligned.get("generic|task_count|features|||unstated") == [16.0, 16.0]
     assert not d.get("conflicts"), f"identical vendor claims must not conflict, got {d.get('conflicts')}"
 
 
@@ -1695,9 +1695,9 @@ def _():
     d = r.get_json()
     aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
                for c in d.get("alignment", [])}
-    assert aligned.get("generic|out-of-scope avoidance|||gpt-6-cyber") == [99.93, 99.93], \
+    assert aligned.get("generic|percentage|out-of-scope avoidance|||gpt-6-cyber") == [99.93, 99.93], \
         f"expected GPT-6 99.93 aligned, got {aligned}"
-    assert aligned.get("generic|out-of-scope avoidance|||gpt-5-6-cyber") == [94.49, 94.49], \
+    assert aligned.get("generic|percentage|out-of-scope avoidance|||gpt-5-6-cyber") == [94.49, 94.49], \
         f"expected GPT-5.6 94.49 aligned, got {aligned}"
     assert not d.get("conflicts"), f"two subjects must not conflict, got {d.get('conflicts')}"
 
@@ -1717,9 +1717,9 @@ def _():
     d = r.get_json()
     aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
                for c in d.get("alignment", [])}
-    assert aligned.get("generic|modules|||unstated") == [26.0, 26.0], \
+    assert aligned.get("generic|task_count|modules|||unstated") == [26.0, 26.0], \
         f"expected modules 26 aligned, got {aligned}"
-    assert aligned.get("generic|features|||unstated") == [16.0, 16.0], \
+    assert aligned.get("generic|task_count|features|||unstated") == [16.0, 16.0], \
         f"expected features 16 aligned, got {aligned}"
     assert not d.get("conflicts")
 
@@ -1784,7 +1784,7 @@ def _():
     d = r.get_json()
     aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
                for c in d.get("alignment", [])}
-    assert aligned.get("generic|completion|||unstated") == [95.0, 95.0], \
+    assert aligned.get("generic|percentage|completion|||unstated") == [95.0, 95.0], \
         f"expected ceiling 95 aligned with plain 95, got {aligned}"
     assert not d.get("conflicts")
     r = client.post("/api/v1/compare", json={
@@ -1797,7 +1797,7 @@ def _():
     })
     d = r.get_json()
     assert not [c for c in d.get("conflicts", [])
-                if c["entity_key"] == "generic|completion|||unstated"], \
+                if c["entity_key"] == "generic|percentage|completion|||unstated"], \
         "a value under the ceiling must not conflict with it"
 
 
@@ -1817,6 +1817,346 @@ def _():
             [c["entity_key"] for c in d.get("alignment", [])] +
             [c["entity_key"] for c in d.get("unique_claims", [])])
     assert not keys, f"version strings must mint no claims, got {keys}"
+
+
+@test("POST /api/v1/compare never mints a claim from a version string (P2)")
+def _():
+    # "v2.14.0" and "GPT-6" are versions and model names, not values.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Release v2.14.0 is available. GPT-6 is the new model.",
+             "source_name": "A"},
+            {"text": "Release v2.14.0 is available. GPT-6 is the new model.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    keys = ([c["entity_key"] for c in d.get("shared_claims", [])] +
+            [c["entity_key"] for c in d.get("alignment", [])] +
+            [c["entity_key"] for c in d.get("unique_claims", [])])
+    assert not keys, f"version strings must mint no claims, got {keys}"
+
+
+# ── v1.8.7: typed assertions, minimum identity, fail-closed gate ────────
+
+@test("POST /api/v1/compare never mints a model version as a measurement (v1.8.7)")
+def _():
+    # Run 11 live failure: Fable 5.2, Opus 5.5, FrontierCode 2.0,
+    # OSWorld 2.1, CL-Bench 1.0 minted as scores/measurements.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("Fable 5.2 scored 49.1% on FrontierCode 2.0. Opus 5.5 scored "
+                      "45.5%. On OSWorld 2.1, Fable 5.2 scored 74.2% on Humanity's "
+                      "Last Exam. CL-Bench 1.0 results: Opus 5.5 0.655 and 0.838."),
+             "source_name": "A"},
+            {"text": ("Fable 5.2 scored 49.1% on FrontierCode 2.0. Opus 5.5 scored "
+                      "45.5%. On OSWorld 2.1, Fable 5.2 scored 74.2% on Humanity's "
+                      "Last Exam. CL-Bench 1.0 results: Opus 5.5 0.655 and 0.838."),
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    all_vals = ([v["value"] for c in d.get("alignment", []) for v in c.get("values", [])] +
+                [v["value"] for c in d.get("conflicts", []) for v in c.get("values", [])] +
+                [c["value"] for c in d.get("unique_claims", [])])
+    for version in (5.2, 5.5, 2.0, 2.1, 1.0):
+        assert version not in all_vals, f"version {version} minted as a value: {all_vals}"
+    assert 49.1 in all_vals and 45.5 in all_vals and 74.2 in all_vals, \
+        f"real scores must mint, got {all_vals}"
+    assert not d.get("conflicts"), f"identical scores must not conflict, got {d.get('conflicts')}"
+
+
+@test("POST /api/v1/compare never mints a month-day date as a count (v1.8.7)")
+def _():
+    # Run 11 live failure: "April 7" minted as 7 findings disclosed,
+    # conflicting with 1,829 CVEs.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("Anthropic disclosed Claude Mythos Preview on April 7. "
+                      "Conducted against 1,829 previously disclosed vulnerabilities."),
+             "source_name": "A"},
+            {"text": ("Anthropic disclosed Claude Mythos Preview on April 7. "
+                      "Conducted against 1,829 previously disclosed vulnerabilities."),
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    all_vals = ([v["value"] for c in d.get("alignment", []) for v in c.get("values", [])] +
+                [c["value"] for c in d.get("unique_claims", [])])
+    assert 7.0 not in all_vals, f"April 7 minted as a count: {all_vals}"
+    assert 1829.0 in all_vals, f"1,829 CVEs must mint, got {all_vals}"
+    assert not d.get("conflicts"), f"date vs CVE count must not conflict, got {d.get('conflicts')}"
+
+
+@test("POST /api/v1/compare keeps pricing tiers and eras apart (v1.8.7)")
+def _():
+    # Run 11 live failure: $8/$16/$80 and $10/$50 (prior) conflated;
+    # fast-mode prices swapped with standard ones.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("Pricing: $8 per million input tokens and $40 per million output "
+                      "tokens. Fast mode: $16 per million input tokens and $80 per "
+                      "million output tokens. Previously $10 per million input tokens "
+                      "and $50 per million output tokens."),
+             "source_name": "A"},
+            {"text": ("Pricing: $8 per million input tokens and $40 per million output "
+                      "tokens. Fast mode: $16 per million input tokens and $80 per "
+                      "million output tokens. Previously $10 per million input tokens "
+                      "and $50 per million output tokens."),
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = {}
+    for c in d.get("alignment", []):
+        aligned.setdefault(c["entity_key"], []).append(
+            sorted(v["value"] for v in c.get("values", [])))
+    assert [8.0, 8.0] in aligned.get("pricing-input", []), \
+        f"current input must align at 8, got {aligned}"
+    assert [40.0, 40.0] in aligned.get("pricing-output", []), \
+        f"current output must align at 40, got {aligned}"
+    assert [16.0, 16.0] in aligned.get("pricing-fast-input", []), \
+        f"fast input must align at 16, got {aligned}"
+    assert [80.0, 80.0] in aligned.get("pricing-fast-output", []), \
+        f"fast output must align at 80, got {aligned}"
+    assert [10.0, 10.0] in aligned.get("pricing-input", []), \
+        f"prior input must align at 10 in its own era, got {aligned}"
+    assert [50.0, 50.0] in aligned.get("pricing-output", []), \
+        f"prior output must align at 50 in its own era, got {aligned}"
+    assert not d.get("conflicts"), f"identical pricing must not conflict, got {d.get('conflicts')}"
+
+
+@test("POST /api/v1/compare keeps two models' per-task costs apart (v1.8.7)")
+def _():
+    # Run 11 live failure: $9.08 (Fable 5.2 High) vs $12.82 (Opus 5.5
+    # Max) read as a conflict — different models' costs are a
+    # comparison, not a dispute.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("Fable 5.2 costs $9.08 per task. Opus 5.5 costs $12.82 per task."),
+             "source_name": "A"},
+            {"text": ("Fable 5.2 costs $9.08 per task. Opus 5.5 costs $12.82 per task."),
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = {}
+    for c in d.get("alignment", []):
+        aligned.setdefault(c["entity_key"], []).append(
+            sorted(v["value"] for v in c.get("values", [])))
+    assert [9.08, 9.08] in aligned.get("pricing-per-task", []), \
+        f"Fable 5.2 per-task cost must align, got {aligned}"
+    assert [12.82, 12.82] in aligned.get("pricing-per-task", []), \
+        f"Opus 5.5 per-task cost must align, got {aligned}"
+    assert not d.get("conflicts"), f"two models' costs must not conflict, got {d.get('conflicts')}"
+
+
+@test("POST /api/v1/compare never lets one document self-conflict (v1.8.7)")
+def _():
+    # Arch gate point 3: a benchmark table row is a value set with
+    # different qualified identities, not a dispute.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("- FrontierCode 2.0 agentic coding: Fable 5.2 49.1%, Fable 5.1 32.4%, "
+                      "Opus 5.5 45.5%, GPT-6 Astra 42.8%."),
+             "source_name": "A"},
+            {"text": "No benchmark table in this document.",
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"one doc can never self-conflict, got {d.get('conflicts')}"
+    vals = sorted(c["value"] for c in d.get("unique_claims", [])
+                  if "score" in c["entity_key"])
+    assert 49.1 in vals and 32.4 in vals and 45.5 in vals and 42.8 in vals, \
+        f"table-row scores must surface as uniques, got {vals}"
+
+
+@test("POST /api/v1/compare mints table-row benchmark scores (v1.8.7)")
+def _():
+    # Run 11 live failure: the FrontierCode table rows minted nothing.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("- FrontierCode 2.0 agentic coding: Fable 5.2 49.1%, Fable 5.1 32.4%, "
+                      "Opus 5.5 45.5%, GPT-6 Astra 42.8%."),
+             "source_name": "A"},
+            {"text": ("- FrontierCode 2.0 agentic coding: Fable 5.2 49.1%, Fable 5.1 32.4%, "
+                      "Opus 5.5 45.5%, GPT-6 Astra 42.8%."),
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    aligned = {c["entity_key"]: sorted(v["value"] for v in c.get("values", []))
+               for c in d.get("alignment", [])}
+    fc = [k for k in aligned if "frontiercode" in k.lower() or "score" in k]
+    assert fc, f"FrontierCode rows must align, got {aligned}"
+    all_vals = sorted(v for vs in aligned.values() for v in vs)
+    assert 49.1 in all_vals and 45.5 in all_vals, f"table scores must align, got {all_vals}"
+    assert not d.get("conflicts")
+
+
+@test("POST /api/v1/compare mints durations and retention, not bare versions (v1.8.7)")
+def _():
+    # Run 11 live failure: "30 hours" / "30-day retention" unextracted;
+    # the Fable 5.2 version took the retention cue instead.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("A team of 1,000 Fable 5.2 agents fully formalized Fermat's Last "
+                      "Theorem in just 30 hours. Fable 5.2 and Mythos 5.2 require "
+                      "30-day data retention."),
+             "source_name": "A"},
+            {"text": ("A team of 1,000 Fable 5.2 agents fully formalized Fermat's Last "
+                      "Theorem in just 30 hours. Fable 5.2 and Mythos 5.2 require "
+                      "30-day data retention."),
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    all_vals = ([v["value"] for c in d.get("alignment", []) for v in c.get("values", [])] +
+                [c["value"] for c in d.get("unique_claims", [])])
+    assert 30.0 in all_vals, f"30 hours / 30-day retention must mint, got {all_vals}"
+    assert 1000.0 in all_vals, f"1,000 agents must mint, got {all_vals}"
+    assert not d.get("conflicts")
+
+
+@test("POST /api/v1/compare lists bare pricing as unmatched, never compared (v1.8.7)")
+def _():
+    # Arch gate point 4: an unresolvable tier is fail-closed. The
+    # amount mints (a "per million" minting word) but no tier word
+    # can be assigned, so it lands in unmatched_claims, never compared.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "The model costs $10.02 per million tokens.", "source_name": "A"},
+            {"text": "The model costs $10.02 per million tokens.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), "bare pricing must never conflict"
+    unmatched = d.get("unmatched_claims", [])
+    assert unmatched, "bare pricing must land in unmatched_claims"
+    assert all(u["entity_key"] == "pricing" for u in unmatched), \
+        f"unmatched must be bare pricing, got {unmatched}"
+    assert d.get("extraction_coverage"), "extraction_coverage must be present"
+
+
+@test("POST /api/v1/compare aligns a CVE count across phrasings (v1.8.7)")
+def _():
+    # Run 11 live miss: "1,829 CVEs" (techtimes) vs "1,829 previously
+    # disclosed vulnerabilities" (infoworld) minted under two families
+    # ("vulnerabilities" vs "findings disclosed") and never aligned.
+    # A CVE/vulnerabilities token right after the number names the
+    # family before the nearer "disclosed" cue can claim it.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("On an internal CVE Rediscovery run in October across 1,829 CVEs, "
+                      "Mythos 5.2 scored 89.6%."),
+             "source_name": "A"},
+            {"text": ("Conducted against 1,829 previously disclosed vulnerabilities, "
+                      "the test assessed whether models could rediscover flaws."),
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"CVE count must never conflict, got {d.get('conflicts')}"
+    aligned = [c for c in d.get("alignment", [])
+               if any(v["value"] == 1829.0 for v in c.get("values", []))]
+    assert aligned, f"1,829 CVE count must align, got {d.get('alignment')}"
+    assert "vulnerabilities" in aligned[0]["entity_key"], \
+        f"1,829 must be a vulnerabilities count, got {aligned[0]['entity_key']}"
+
+
+@test("POST /api/v1/compare attaches a bench-less claim to the one stated-benchmark group (v1.8.7)")
+def _():
+    # Nov 7 regression: the 51% relative improvement (tsn names neither
+    # benchmark nor model) and the ~16 point gap (tsn names the model,
+    # primary names the benchmark) must both align with the primary's
+    # benched claims — and two different models' scores must NOT
+    # collapse into one bench-less group (74.6 vs 75.3 are different
+    # models on different benchmarks).
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("GPT-6 Cyber scored 48.5% on ExploitGym, a 51% relative improvement "
+                      "over GPT-5.6 Cyber's 32.1%. The gap is about 16 percentage points."),
+             "source_name": "A"},
+            {"text": ("GPT-6 Cyber's 48.5% on ExploitGym is a 51% relative improvement. "
+                      "The percentage-point gap is about 16."),
+             "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"bench-less attach must never conflict, got {d.get('conflicts')}"
+    aligned_vals = [v["value"] for c in d.get("alignment", []) for v in c.get("values", [])]
+    assert 51.0 in aligned_vals, f"51% relative improvement must align, got {aligned_vals}"
+    assert 16.0 in aligned_vals, f"~16 point gap must align, got {aligned_vals}"
+
+
+@test("POST /api/v1/analyze reads a multi-word secondary header org (v1.8.7)")
+def _():
+    # Run 11 live failure: TechTimes -> "understanding", InfoWorld ->
+    # "greyhound", Medium -> "robodojo" (quoted cited sources).
+    r = client.post("/api/v1/analyze", json={
+        "text": ("COVERAGE — TechTimes\n"
+                 "Anthropic announced Claude Fable 5.2 today. The new model "
+                 "scored 49.1% on FrontierCode 2.0."),
+        "source_type": "auto",
+    })
+    d = r.get_json()
+    org = d["custody_breakdown"]["claimed_publisher_org"]
+    assert org == "techtimes", \
+        f"header org must be techtimes, got {org}"
+    r = client.post("/api/v1/analyze", json={
+        "text": ("SECONDARY — AI Weekly\n"
+                 "A new model scored 49.1% on FrontierCode 2.0 this week."),
+        "source_type": "auto",
+    })
+    d = r.get_json()
+    org = d["custody_breakdown"]["claimed_publisher_org"]
+    assert org == "ai weekly", \
+        f"multi-word header org must be preserved, got {org}"
+
+
+@test("POST /api/v1/analyze does not infer anonymous from MacRumors (v1.8.7)")
+def _():
+    # Run 11 live failure: "rumor" inside "MacRumors" inferred anonymous.
+    r = client.post("/api/v1/analyze", json={
+        "text": ("MacRumors reports that Apple will release a new chip next year. "
+                 "The report cites supply-chain sources and a launch window."),
+        "source_type": "auto",
+    })
+    d = r.get_json()
+    assert d["inferred_source_type"] != "anonymous", \
+        f"MacRumors must not infer anonymous, got {d['inferred_source_type']}"
+
+
+@test("POST /api/v1/analyze skips the quote question with no attributed quote (v1.8.7)")
+def _():
+    # Run 11 live failure: generic quote-attribution questions asked
+    # when no attributed quote exists.
+    r = client.post("/api/v1/analyze", json={
+        "text": ("The new model scored 49.1% on FrontierCode 2.0. "
+                 "Pricing is $8 per million input tokens."),
+        "source_type": "auto",
+    })
+    d = r.get_json()
+    qs = d.get("follow_up_questions", [])
+    assert not [q for q in qs if "quote" in q.lower() or "attributed" in q.lower()], \
+        f"no quote question without an attributed quote, got {qs}"
+
+
+@test("POST /api/v1/analyze marks an unauthenticated anchor origin as claimed (v1.8.7)")
+def _():
+    # Run 10/11 live failure: use_as_anchor with primary_source_present
+    # false displayed without any distinction from authenticated origin.
+    r = client.post("/api/v1/analyze", json={
+        "text": ("Anthropic announced Claude Fable 5.2 today. The new model "
+                 "scored 49.1% on FrontierCode 2.0 and costs $8 per million "
+                 "input tokens. The announcement is dated November 9, 2026."),
+        "source_type": "auto",
+    })
+    d = r.get_json()
+    if d["recommended_action"] == "use_as_anchor":
+        assert "claimed, not independently authenticated" in d["verdict"], \
+            f"anchor verdict must carry the origin distinction, got {d['verdict']}"
 
 
 # ── runner ─────────────────────────────────────────────────────────────────────
