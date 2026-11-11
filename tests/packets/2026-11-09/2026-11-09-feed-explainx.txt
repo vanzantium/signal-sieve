@@ -1,0 +1,23 @@
+COVERAGE — explainx.ai, "Agent Memory: Anthropic's Dreaming Tests, 13% to 48%"
+URL: https://explainx.ai/blog/anthropic-components-of-agent-memory-dreaming-cl-bench-pokemon-wiki-stainless-2026
+Published: 2026-11-06 (blog; details accurate as of November 6, 2026).
+
+Anthropic has published its working theory of agent memory, and the headline idea is dreaming: an offline pass in which Claude rereads its session transcripts to fix wrong notes, build linked wikis, and decide which facts get loaded into every future session. The post, "The components of agent memory", is by Lance Martin. It is a design write-up with test results, not a product launch.
+
+A wiki built over 128 sessions took one test from 13% to 48% of graded criteria. A single wrong note sent a Pokemon run into a loop until dreaming corrected it. Telling a strong model how to remember made it worse.
+
+The figure's alt text in Anthropic's page gives the mean rewards, stateless baseline then memory store: Opus 5.5 0.655 and 0.838, Sonnet 5.5 0.644 and 0.833, Opus 5 0.564 and 0.828, Opus 4.7 0.383 and 0.700, Sonnet 5 0.306 and 0.610, Sonnet 4.6 0.330 and 0.364. Newer models gain far more from the same folder, and Sonnet 4.6 barely moved.
+
+Sonnet 3.7 wrote 413 memory files across 225 folders and earned one badge; Fable 5 wrote nine files in two folders plus a top-level global.md, and earned four badges. Opus 5.5 took a similar small-folder approach and beat the game. One run per model, as Anthropic notes.
+
+With "record only failures", both Opus 5 and Opus 4.7 lost much of their gain. The figure's alt text gives the change in gain: Opus 5 minus 0.234, Opus 4.7 minus 0.150, Sonnet 4.6 minus 0.020. Prompting Sonnet 4.6 to read memory first and test theories nearly doubled its score, from 0.330 at baseline to 0.641 with memory plus refined instruction. Sonnet 5 read memory before answering 9 of 10 times unprompted; Sonnet 4.6 did so less than half the time.
+
+Mt. Moon: Claude wrote wrongly that the PokeCenter was on the east side, announced "Mt Moon is behind me" and wrote "Mt Moon DONE", fell off the ledge, concluded "I overshot far west", and kept the wrong belief. Dreaming checked the note against the transcript, caught the error and rewrote it; with the corrected note it went back into the cave and reached Cerulean City. In the run with the uncorrected note, Claude dropped back onto the earlier route three times, was told by the harness to continue, and walked all the way back to Pewter City. It never reached Cerulean. The no-memory run did not get past the mountain either.
+
+Wiki test: about 350,000 internal files, roughly 420M tokens, from Stainless, a software company Anthropic says it acquired in May. 25 questions. Search only: 53%. Wiki only, 2 sessions: 13%. Wiki only, 128 sessions: 48%. Search plus wiki, as wiki grew: 54% to 61%. Using search and wiki also saved about 20,000 tokens per question. The wiki grew from 103 pages and 766 links after two sessions to 222 pages and 12,893 links after 128. A wiki alone did not beat search here; the combination did.
+
+On 24 merger questions, more than half needing several documents, Claude scored 87% with the wiki versus 73% with search alone on items needing cross-document judgment or math. On a LAB task where criteria sat in single documents, the wiki showed no clear gain. On another, the wiki grew larger than the source: a 10-document, 115 KB corpus turned into a 68-page, 203 KB wiki, 1.77 times the corpus.
+
+In one acquisition task, several agents wrote to one shared table of contract terms and overwrote each other. Only 41 of 57 facts survived, or 72%. After the instruction loop, each contract got its own page, written by one agent, quoting terms word for word. Then 57 of 57 facts survived, and the brief met 100% of criteria, up from 72%.
+
+Limits of this evidence: all results come from Anthropic's own post. Several are single runs, such as the Pokemon folders. The CL-Bench figures are read from chart text, and the wiki tests use Anthropic's internal Stainless corpus, which outside readers cannot inspect. The author has not reproduced any of it. Treat the numbers as directional, and test on your own tasks.
