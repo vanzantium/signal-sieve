@@ -32,7 +32,9 @@ from app import (
     _ACTION_ENUM, _SOURCE_TYPE_ENUM,
 )
 from signal_compare import extract_numeric_claims
+from signal_compare import extract_generic_quantitative_claims, extract_date_claims
 from signal_sieve import _hosted_release_artifact
+from signal_sieve import _infer_source_type_from_signals
 from signal_sieve import _hosted_artifact_candidate, _hosted_ownership_verified
 from signal_sieve import _hosted_namespace_matched
 from signal_sieve import _has_first_party_primary_evidence, _first_person_research
@@ -1005,7 +1007,15 @@ def _():
     unique = [(c["entity_key"], c["value"]) for c in d.get("unique_claims", [])]
     assert ("swe-bench", 82.2) in unique, f"Verified 82.2 must be unique, got {unique}"
     assert ("hle", 44.1) in unique, f"HLE (text) 44.1 must be unique, got {unique}"
-    assert not any(v == 13.1 for _k, v in unique), "Terminal-Bench is unmapped — 13.1% must stay invisible"
+    # v1.8.8 r2: Terminal-Bench joined the generic benchmark phrases,
+    # so 13.1% now surfaces as a generic Terminal-Bench score instead
+    # of staying invisible — but it is still NOT credited to HLE (the
+    # preceding benchmark); the following-benchmark guard is the point
+    # of this test, not the invisibility.
+    assert ("generic|percentage|score|bench=terminal-bench||unstated", 13.1) in unique, \
+        f"Terminal-Bench 13.1% must surface as a generic score, got {unique}"
+    assert not any(k == "hle" and v == 13.1 for k, v in unique), \
+        "13.1% must not be credited to HLE"
 
 
 @test("POST /api/v1/compare does not mint a measurement setting as a score (v1.8.5)")
@@ -1666,10 +1676,13 @@ def _():
     d = r.get_json()
     aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
                for c in d.get("alignment", [])}
-    assert "generic|percentage|speed|nodes=30;turns=200||unstated" in aligned, \
+    # v1.8.8: "23% faster" and "9% lower" are relative deltas, so the
+    # keys carry the "rel" marker — the figures still align, under the
+    # relative identity.
+    assert "generic|percentage|speed|nodes=30;turns=200;rel||unstated" in aligned, \
         f"expected speed aligned, got {list(aligned)}"
-    assert aligned["generic|percentage|speed|nodes=30;turns=200||unstated"] == [23.0, 23.0]
-    assert aligned.get("generic|percentage|memory|nodes=30;turns=200||unstated") == [9.0, 9.0], \
+    assert aligned["generic|percentage|speed|nodes=30;turns=200;rel||unstated"] == [23.0, 23.0]
+    assert aligned.get("generic|percentage|memory|nodes=30;turns=200;rel||unstated") == [9.0, 9.0], \
         f"expected memory aligned, got {list(aligned)}"
     assert aligned.get("generic|task_count|modules|||unstated") == [26.0, 26.0]
     assert aligned.get("generic|task_count|features|||unstated") == [16.0, 16.0]
@@ -2157,6 +2170,1191 @@ def _():
     if d["recommended_action"] == "use_as_anchor":
         assert "claimed, not independently authenticated" in d["verdict"], \
             f"anchor verdict must carry the origin distinction, got {d['verdict']}"
+
+
+# ── v1.8.8 residuals (run 11) ─────────────────────────────────────────────
+
+@test("POST /api/v1/compare does not double-mint a table-row score (v1.8.8)")
+def _():
+    # Run 11: the primary's CVE row minted 89.6% TWICE (once as a
+    # "vulnerabilities" claim from the sentence loop, once as a
+    # score/bench claim from the table-row pass) because the upgrade
+    # comparison kept the list bullet on one side. The same doc twice
+    # must align each CVE value exactly twice — never four times.
+    text = ("- CVE Rediscovery: Mythos 5.2 89.6%, Mythos 5.1 78.3%, "
+            "Opus 5.5 81.3% without safeguards.")
+    r = client.post("/api/v1/compare", json={
+        "documents": [{"text": text, "source_name": "A"},
+                      {"text": text, "source_name": "B"}],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"same doc twice must never conflict, got {d.get('conflicts')}"
+    for val in (89.6, 78.3, 81.3):
+        hits = [a for a in d.get("alignment", [])
+                if val in [v["value"] for v in a.get("values", [])]]
+        assert len(hits) == 1, f"{val} must align in exactly one group, got {len(hits)}"
+        assert len(hits[0]["values"]) == 2, \
+            f"{val} must have exactly 2 values (one per doc), got {len(hits[0]['values'])}"
+
+
+@test("POST /api/v1/compare aligns InfoWorld 89.6% three-way (v1.8.8)")
+def _():
+    # Run 11: InfoWorld's prose phrasing ("identified 89.6% of
+    # vulnerabilities in its internal CVE Rediscovery evaluation")
+    # minted as a vulnerabilities count and never attached to the
+    # table-row score. It must now align 3-way with the primary and
+    # TechTimes; the 78.3% and 81.3% baselines align 2-way each.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("- CVE Rediscovery: Mythos 5.2 89.6%, Mythos 5.1 78.3%, "
+                      "Opus 5.5 81.3% without safeguards."),
+             "source_name": "primary"},
+            {"text": ("Anthropic said Mythos 5.2 identified 89.6% of vulnerabilities "
+                      "in its internal CVE Rediscovery evaluation, compared with "
+                      "78.3% for Mythos 5.1."),
+             "source_name": "infoworld"},
+            {"text": ("On an internal CVE Rediscovery run in October across 1,829 CVEs, "
+                      "Mythos 5.2 scored 89.6%, against 81.3% for Opus 5.5 without safeguards."),
+             "source_name": "techtimes"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"CVE rows must never conflict, got {d.get('conflicts')}"
+    by_key = {a["entity_key"]: [v["value"] for v in a.get("values", [])]
+              for a in d.get("alignment", [])}
+    assert by_key.get("generic|percentage|score|bench=cve-rediscovery||mythos-5-2") == [89.6, 89.6, 89.6], \
+        f"89.6% must align 3-way, got {by_key}"
+    assert sorted(by_key.get("generic|percentage|score|bench=cve-rediscovery||mythos-5-1", [])) == [78.3, 78.3], \
+        f"78.3% must align 2-way, got {by_key}"
+    assert sorted(by_key.get("generic|percentage|score|bench=cve-rediscovery||opus-5-5", [])) == [81.3, 81.3], \
+        f"81.3% must align 2-way, got {by_key}"
+
+
+@test("POST /api/v1/compare aligns bare-fragment row scores (v1.8.8)")
+def _():
+    # Run 11 medium coverage 0.38: bare "Model N%" fragments in later
+    # clauses of a benchmark row line ("Fable 5.1 31.4% matches")
+    # never minted, because the row parser only reads a row's first
+    # clause and the sentence has no metric cue. They must now mint
+    # as that row's benchmark score and align with the primary's rows.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("- AutomationBench: Fable 5.2 51.4%, Opus 5.5 42.5%, Astra 41.4%, "
+                      "Carbon 53.9% — owner board: 51.45%, 42.47%, 41.40%, 53.88%; matches. "
+                      "Fable 5.1 31.4% matches (without fallback 22.37%).\n"
+                      "- Terminal-Bench-Science 0.1: Astra 68.1% matches. Fable 5.1 52.6% "
+                      "and Opus 5.5 58.7% differ: owner board shows 40.0% and 63.3%."),
+             "source_name": "medium"},
+            {"text": ("- AutomationBench: Fable 5.2 51.4%, Fable 5.1 31.4%, Opus 5.5 42.5%, "
+                      "Astra 41.4%, Carbon 53.9%\n"
+                      "- Terminal-Bench-Science: Fable 5.2 74.6%, Mythos 5.2 75.3%, "
+                      "Fable 5.1 52.6%, Opus 5.5 58.7%, Astra 68.1%, Carbon 64.8%"),
+             "source_name": "primary"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"fragment scores must never conflict, got {d.get('conflicts')}"
+    by_key = {a["entity_key"]: [v["value"] for v in a.get("values", [])]
+              for a in d.get("alignment", [])}
+    assert sorted(by_key.get("generic|percentage|score|bench=automationbench||fable-5-1", [])) == [31.4, 31.4], \
+        f"31.4% AutomationBench fragment must align, got {by_key}"
+    assert sorted(by_key.get("generic|percentage|score|bench=terminal-bench-science||fable-5-1", [])) == [52.6, 52.6], \
+        f"52.6% Terminal-Bench-Science fragment must align, got {by_key}"
+
+
+@test("POST /api/v1/analyze omits x_post_assessment for articles, keeps it for X posts (v1.8.8)")
+def _():
+    # Run 11: every analyze result carried "x_post_assessment": {} —
+    # the live v1.8.6 response included the empty dict for article
+    # genres. v1.8.7 omits the key unless the genre is x_news_post;
+    # this pins that behaviour so it cannot regress silently.
+    r = client.post("/api/v1/analyze", json={
+        "text": ("Anthropic released Claude Fable 5.2 on 9 November 2026. "
+                 "FrontierCode 2.0 scores 49.1%."),
+        "source_type": "secondary",
+        "source_name": "test-article",
+        "source_url": "https://example.com/article",
+    })
+    d = r.get_json()
+    assert d.get("source_genre") != "x_news_post"
+    assert "x_post_assessment" not in d, \
+        f"article genres must omit x_post_assessment, got {d.get('x_post_assessment')}"
+    r = client.post("/api/v1/analyze", json={
+        "text": ("BREAKING: Officials confirm the bridge is closed after a fire. "
+                 "2026-06-19 09:42 PDT statement linked from the city. "
+                 "Official update: https://city.example.gov/bridge-fire-update"),
+        "source_url": "https://x.com/example/status/1234567890",
+        "source_type": "auto",
+    })
+    d = r.get_json()
+    assert d.get("source_genre") == "x_news_post"
+    assert "x_post_assessment" in d and d["x_post_assessment"], \
+        "x_news_post must carry a non-empty x_post_assessment"
+
+
+@test("POST /api/v1/compare mints a split-as block figure (v1.8.8)")
+def _():
+    # Run 11 medium: '"about 55% fewer blocks", split as "about 60%
+    # fewer in cybersecurity..."' — the 60% never minted because the
+    # "blocks" cue belongs to the 55% and no comparison marker joined
+    # them. "split as" is now a comparison marker, so the 60% inherits
+    # the blocks family — and the compare unifies the medium's unstated
+    # subject with the primary's stated one, so it aligns 2-way.
+    # v1.8.8 r3: the primary's subject is Fable 5.2, not Fable 5.1 —
+    # "55% fewer blocks with Fable 5.2 compared with Fable 5.1" names
+    # 5.1 as the comparison BASELINE, and a baseline is never the
+    # subject (Arch audit 2026-11-17). This test used to pin the
+    # baseline-as-subject mis-binding.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ('Anthropic adds "up to 30% faster" output, "about 55% fewer blocks", '
+                      'split as "about 60% fewer in cybersecurity and 40% fewer in biology".'),
+             "source_name": "medium"},
+            {"text": ("Based on early testing, Anthropic observed about 55% fewer blocks with "
+                      "Fable 5.2 compared with Fable 5.1 — about 60% fewer in cybersecurity "
+                      "and 40% fewer in biology."),
+             "source_name": "primary"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"block figures must never conflict, got {d.get('conflicts')}"
+    by_key = {a["entity_key"]: [v["value"] for v in a.get("values", [])]
+              for a in d.get("alignment", [])}
+    # v1.8.8: "60% fewer" is a relative delta, so the key carries the
+    # "rel" marker — the figure still aligns 2-way as a blocks claim.
+    assert sorted(by_key.get("generic|percentage|blocks|rel||fable-5-2", [])) == [60.0, 60.0], \
+        f"medium's 60% must align as a blocks claim, got {by_key}"
+
+
+@test("POST /api/v1/compare splits a sequenced price change instead of conflicting (v1.8.8)")
+def _():
+    # Nov 11 live failure: "$2 vs $4 vs $0.10" and "$10 vs $20" read as
+    # conflicts — a sequenced price change ("$2 through Nov. 30, then
+    # $4 starting Dec. 1") is two identities, not a dispute, and a
+    # cached price ("Cached input: $0.10") is its own tier.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("Carbon costs $2 per million input tokens and $10 per million "
+                      "output tokens through November 30, 2026, then $4 and $20 "
+                      "starting December 1."),
+             "source_name": "trendy"},
+            {"text": ("Carbon costs $2 per million input tokens and $10 per million "
+                      "output tokens."),
+             "source_name": "primary"},
+            {"text": ("- Cached input: $0.10 through November 30, 2026; $0.20 starting "
+                      "December 1, 2026."),
+             "source_name": "price-list"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"sequenced prices must never conflict, got {d.get('conflicts')}"
+    aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
+               for c in d.get("alignment", [])}
+    assert sorted(aligned.get("pricing-input", [])) == [2.0, 2.0], \
+        f"current input must align at 2, got {aligned}"
+    assert sorted(aligned.get("pricing-output", [])) == [10.0, 10.0], \
+        f"current output must align at 10, got {aligned}"
+    nc = {n["entity_key"] for n in d.get("not_comparable", [])}
+    assert "pricing-input" in nc and "pricing-output" in nc, \
+        f"split pricing keys must be recorded not_comparable, got {nc}"
+    cached = [c for c in d.get("unique_claims", [])
+              if c.get("entity_key") == "pricing-cached"]
+    assert cached and cached[0]["value"] == 0.1, \
+        f"$0.10 must surface as a unique pricing-cached claim, got {cached}"
+
+
+@test("POST /api/v1/compare treats an undated price as not comparable with a dated one (v1.8.8 repair)")
+def _():
+    # Arch audit 2026-11-13, fresh counterexample in the actual
+    # candidate, sentences verbatim: A states "$2 today" (current)
+    # and B states "$4 per million tokens" with no date at all. An
+    # undated price must not contradict a dated one — and must not
+    # silently align with one either. The undated era is "unknown"
+    # and partitions apart.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("Carbon input costs $2 today, the price will "
+                      "increase to $4 on December 1."),
+             "source_name": "A"},
+            {"text": "Carbon input costs $4 per million tokens.",
+             "source_name": "B"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"undated vs dated must never conflict, got {d.get('conflicts')}"
+    nc = [n for n in d.get("not_comparable", [])
+          if n.get("entity_key") == "pricing-input"]
+    assert nc, f"undated vs dated input must be recorded not_comparable, got {d.get('not_comparable')}"
+    eras = {i["era"]: [v["value"] for v in i["values"]] for i in nc[0]["identities"]}
+    assert eras.get("current") == [2.0] and eras.get("unknown") == [4.0], \
+        f"identities must be current $2 vs unknown $4, got {eras}"
+    # Source spans preserved: every value carries the excerpt it came from.
+    cur = [i for i in nc[0]["identities"] if i["era"] == "current"][0]
+    assert "$2 today" in cur["values"][0].get("context", ""), \
+        f"current $2 span must show its sentence, got {cur['values']}"
+    for ident in nc[0]["identities"]:
+        for v in ident["values"]:
+            assert v.get("context"), f"not_comparable value must carry its source span, got {v}"
+    assert not [a for a in d.get("alignment", [])
+                if a.get("entity_key") == "pricing-input"], \
+        f"dated $2 and undated $4 must not align, got {d.get('alignment')}"
+
+
+@test("POST /api/v1/compare does not silently align a dated price with an undated one of the same value (v1.8.8 repair)")
+def _():
+    # Same figure, different temporal identity: "$3 today" and an
+    # undated "$3" are not the same claim. They must split into a
+    # not_comparable record, never an alignment.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Carbon input costs $3 per million tokens today.",
+             "source_name": "A"},
+            {"text": "Carbon input costs $3 per million tokens.",
+             "source_name": "B"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"same-value dated vs undated must never conflict, got {d.get('conflicts')}"
+    nc = [n for n in d.get("not_comparable", [])
+          if n.get("entity_key") == "pricing-input"]
+    assert nc, f"same-value dated vs undated must be recorded not_comparable, got {d.get('not_comparable')}"
+    eras = {i["era"] for i in nc[0]["identities"]}
+    assert eras == {"current", "unknown"}, f"identities must be current vs unknown, got {eras}"
+    assert not [a for a in d.get("alignment", [])
+                if a.get("entity_key") == "pricing-input"], \
+        f"dated and undated $3 must not align, got {d.get('alignment')}"
+
+
+@test("POST /api/v1/compare flags two undated prices that disagree for source clarification (v1.8.8 r3)")
+def _():
+    # Two reports that both state no era still compare with each
+    # other — that is the November 11 replay's behaviour, where all
+    # four $2/$10 reports state no era and align.
+    # v1.8.8 r3 (Arch audit 2026-11-17, core invariant): a CONFLICT
+    # needs the reference era on every side. Two undated prices that
+    # disagree may simply be from different dates, so they are listed
+    # under needs_source_clarification (missing: era) — never a
+    # conflict, never an alignment. Until r3 this test asserted a
+    # conflict. The dated pair below ("today" vs "now") is the
+    # positive control that still conflicts.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Carbon input costs $2 per million tokens.",
+             "source_name": "A"},
+            {"text": "Carbon input costs $3 per million tokens.",
+             "source_name": "B"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), \
+        f"two undated prices must never conflict, got {d.get('conflicts')}"
+    clar = [c for c in d.get("needs_source_clarification", [])
+            if c["entity_key"] == "pricing-input"]
+    assert clar and clar[0]["missing"] == ["era"], \
+        f"undated $2 vs $3 must need clarification on era only, got {d.get('needs_source_clarification')}"
+    assert {v["subject"] for v in clar[0]["values"]} == {"gemini-4-carbon"}, \
+        f"both sides must carry the stated subject, got {clar[0]['values']}"
+    assert not [a for a in d.get("alignment", []) if a["entity_key"] == "pricing-input"], \
+        f"undated $2 vs $3 must not align, got {d.get('alignment')}"
+    assert "need source clarification" in d["triage_summary"], d["triage_summary"]
+    assert "NEEDS SOURCE CLARIFICATION" in d["capsule"], d["capsule"]
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Carbon input costs $2 per million tokens.",
+             "source_name": "A"},
+            {"text": "Carbon input costs $2 per million tokens.",
+             "source_name": "B"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"two undated $2 must not conflict, got {d.get('conflicts')}"
+    aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
+               for c in d.get("alignment", [])}
+    assert sorted(aligned.get("pricing-input", [])) == [2.0, 2.0], \
+        f"two undated $2 must align, got {aligned}"
+
+
+@test("POST /api/v1/compare still contradicts two dated prices that disagree (v1.8.8 repair)")
+def _():
+    # Two prices that both state they are current and disagree ARE a
+    # contradiction. The repair must not turn every price dispute
+    # into a shrug.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Carbon input costs $2 per million tokens today.",
+             "source_name": "A"},
+            {"text": "Carbon input costs $3 per million tokens now.",
+             "source_name": "B"},
+        ],
+    })
+    d = r.get_json()
+    assert len(d.get("conflicts", [])) == 1, \
+        f"two dated prices that disagree must still conflict, got {d.get('conflicts')}"
+    assert d["conflicts"][0]["entity_key"] == "pricing-input", \
+        f"conflict must be on pricing-input, got {d.get('conflicts')}"
+    # v1.8.8 r3: the conflict carries the identity it was compared as.
+    assert d["conflicts"][0].get("identity") == {"subject": "gemini-4-carbon", "era": "current"}, \
+        f"conflict identity must be Carbon / current, got {d['conflicts'][0].get('identity')}"
+
+
+@test("POST /api/v1/compare reads current markers in equivalent wording (v1.8.8 repair)")
+def _():
+    # Held-out phrasing check, not the exact audit sentences: the
+    # same dated-vs-undated split must hold when the current marker
+    # is "currently" before the amount, or "at present" just after
+    # it. A marker in an earlier clause must not leak onto a later
+    # price in the same sentence.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Carbon input currently costs $5 per million tokens.",
+             "source_name": "A"},
+            {"text": "Carbon input costs $5 per million tokens.",
+             "source_name": "B"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"'currently' vs undated must never conflict, got {d.get('conflicts')}"
+    nc = [n for n in d.get("not_comparable", [])
+          if n.get("entity_key") == "pricing-input"]
+    assert nc and {i["era"] for i in nc[0]["identities"]} == {"current", "unknown"}, \
+        f"'currently' must read as current vs unknown, got {d.get('not_comparable')}"
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "Carbon input costs $2 per million tokens at present.",
+             "source_name": "A"},
+            {"text": "Carbon input costs $2 per million tokens.",
+             "source_name": "B"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"'at present' vs undated must never conflict, got {d.get('conflicts')}"
+    nc = [n for n in d.get("not_comparable", [])
+          if n.get("entity_key") == "pricing-input"]
+    assert nc and {i["era"] for i in nc[0]["identities"]} == {"current", "unknown"}, \
+        f"'at present' must read as current vs unknown, got {d.get('not_comparable')}"
+    assert not [a for a in d.get("alignment", [])
+                if a.get("entity_key") == "pricing-input"], \
+        f"dated and undated $2 must not align, got {d.get('alignment')}"
+
+
+@test("POST /api/v1/compare keeps per-task prices apart by thinking level and model (v1.8.8)")
+def _():
+    # Nov 11 live failure: "$7.76 vs $6.59 vs $9.95" read as a
+    # conflict — three different qualified identities: Carbon at high
+    # thinking, Carbon at medium, and Argon.
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("Artificial Analysis reports that running its Intelligence Index "
+                      "cost $7.76 per task on Carbon at high thinking, $6.59 at medium."),
+             "source_name": "trendy"},
+            {"text": ("AA measurement 60.0 (high), second, $7.76 per task. 9.6 points "
+                      "above Argon (high) at 50.4, at about 22% less per task "
+                      "(Argon: $9.95)."),
+             "source_name": "sw"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"per-task prices must never conflict, got {d.get('conflicts')}"
+    aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
+               for c in d.get("alignment", [])}
+    assert sorted(aligned.get("pricing-per-task", [])) == [7.76, 7.76], \
+        f"Carbon at high thinking must align at 7.76, got {aligned}"
+    nc = {n["entity_key"] for n in d.get("not_comparable", [])}
+    assert "pricing-per-task" in nc, \
+        f"split per-task key must be recorded not_comparable, got {nc}"
+
+
+@test("POST /api/v1/compare keeps a relative delta apart from an absolute rate, and a plan price apart from a per-unit price (v1.8.8)")
+def _():
+    # Nov 11 live failure: "92% vs 22%" and "$19.99 vs $8.00" read as
+    # conflicts — a relative delta ("22% less per task") is not an
+    # absolute pass rate ("92% of tasks"), and a subscription-plan
+    # price ("the $19.99 plan") is not a per-unit API price ("$8 input").
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": ("New results show that on our 375-task agentic honesty benchmark, "
+                      "it passed 92% of tasks. Google AI Pro, the $19.99 plan, is not "
+                      "named in the launch post."),
+             "source_name": "primary"},
+            {"text": ("At 64.6 on AA's Intelligence Index v5 it passes Gemini 4 Carbon "
+                      "(60.0) for first place, and at $8 input and $40 output it costs "
+                      "20% less than Fable 5.1. 9.6 points above Argon (high) at 50.4, "
+                      "at about 22% less per task (Argon: $9.95)."),
+             "source_name": "sw"},
+        ],
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"generic figures must never conflict, got {d.get('conflicts')}"
+    keys = {c["entity_key"] for c in d.get("unique_claims", [])}
+    assert "generic|percentage|tasks|rel||unstated" in keys, \
+        f"22% less must mint as a relative tasks claim, got {keys}"
+    assert "generic|cost|cost|plan||unstated" in keys, \
+        f"$19.99 plan must mint as a plan cost claim, got {keys}"
+
+
+@test("POST /api/v1/analyze takes the publisher from the feed declaration, never the body (v1.8.8)")
+def _():
+    # Nov 11 live failure: SQ Magazine -> "cloud", TrendyTechTribe ->
+    # "antigravity", SW Architect -> "aa" — words found in the body
+    # became the claimed publisher. The publisher is the feed's own
+    # declaration (source_name, then the feed header); a body mention
+    # is recorded as mentioned, never as the publisher.
+    r = client.post("/api/v1/analyze", json={
+        "text": ("Google Antigravity's coding tool is included for Ultra subscribers. "
+                 "The new model scored 49.1% on FrontierCode 2.0."),
+        "source_type": "secondary",
+        "source_name": "SQ Magazine — Google Unleashes Gemini 4 Carbon, Its Most Powerful AI Model",
+        "source_url": "https://sqmagazine.co.uk/google-releases-gemini-4-carbon/",
+    })
+    d = r.get_json()
+    cb = d["custody_breakdown"]
+    assert cb["claimed_publisher_org"] == "sq magazine", \
+        f"publisher must be sq magazine, got {cb['claimed_publisher_org']}"
+    assert cb["claimed_publisher_org_reason"] == "feed-declared publisher (source name)", \
+        f"reason must name the source name, got {cb['claimed_publisher_org_reason']}"
+    assert cb["feed_declared_publisher"] == "sq magazine"
+    assert "antigravity" in cb["organizations_mentioned"], \
+        f"antigravity must be recorded as mentioned, got {cb['organizations_mentioned']}"
+    # No source_name and no feed header: the publisher is UNKNOWN,
+    # with a reason — never a body word.
+    r = client.post("/api/v1/analyze", json={
+        "text": ("Antigravity Team announced a coding tool. AA's top spot "
+                 "went to Fable 5.2 at 64.6. The new model scored 49.1% on "
+                 "FrontierCode 2.0."),
+        "source_type": "secondary",
+    })
+    d = r.get_json()
+    cb = d["custody_breakdown"]
+    assert cb["claimed_publisher_org"] is None, \
+        f"publisher must be unknown without a declaration, got {cb['claimed_publisher_org']}"
+    assert cb["claimed_publisher_org_reason"] == \
+        "no publisher declared in feed header or source name", \
+        f"reason must say no publisher was declared, got {cb['claimed_publisher_org_reason']}"
+    assert "antigravity" in cb["organizations_mentioned"]
+    assert "aa" in cb["organizations_mentioned"]
+
+
+@test("POST /api/v1/analyze keeps a benchmark name out of the data providers (v1.8.8)")
+def _():
+    # Nov 11 live failure: "SEC-bench Pro" was read as the US SEC
+    # regulator and named as a data provider on 3 of 4 docs.
+    r = client.post("/api/v1/analyze", json={
+        "text": ("On SEC-bench Pro, the model scored 58.8%. The benchmark "
+                 "is run by an independent lab and the results were "
+                 "published this week."),
+        "source_type": "secondary",
+        "source_name": "bench-note",
+    })
+    d = r.get_json()
+    providers = d["custody_breakdown"]["named_data_providers"]
+    assert "SEC" not in providers, \
+        f"SEC-bench must never name the SEC as a data provider, got {providers}"
+    r = client.post("/api/v1/analyze", json={
+        "text": ("The company filed its quarterly report with the SEC. "
+                 "The filing discloses revenue of $1.2 billion."),
+        "source_type": "secondary",
+        "source_name": "filing-note",
+    })
+    d = r.get_json()
+    providers = d["custody_breakdown"]["named_data_providers"]
+    assert "SEC" in providers, \
+        f"a real SEC filing reference must still name the SEC, got {providers}"
+
+
+# ── v1.8.8 r2: run-17 gaps + bracketed price-list tiering leak ──────────────
+
+@test("POST /api/v1/compare tiers a bracketed price list without leaking (v1.8.8 r2)")
+def _():
+    # Held-out tiering leak: "[$4 in · $0.2 cached · $20 out / 1M]"
+    # mis-tiered the $20 output price as pricing-cached (a false
+    # conflict). Each amount now takes the tier word in its own "·"
+    # segment, including the "in"/"out" abbreviations, and a tier word
+    # that directly trails a $ amount belongs to that amount.
+    row = "Pricing: [$4 in · $0.2 cached · $20 out / 1M] for the new model."
+    claims = extract_numeric_claims(row)
+    tiers = {(c["entity_key"], c["numeric_value"]) for c in claims}
+    assert ("pricing-input", 4.0) in tiers, f"$4 must be input, got {tiers}"
+    assert ("pricing-cached", 0.2) in tiers, f"$0.2 must be cached, got {tiers}"
+    assert ("pricing-output", 20.0) in tiers, f"$20 must be output, got {tiers}"
+    assert not any(k == "pricing-cached" and v == 20.0 for k, v in tiers), \
+        "$20 must never be cached"
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": row, "source_name": "A"},
+            {"text": row, "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"bracketed list must not conflict, got {d.get('conflicts')}"
+    aligned = {c["entity_key"]: [v["value"] for v in c["values"]] for c in d.get("alignment", [])}
+    assert aligned.get("pricing-input") == [4.0, 4.0], f"input must align, got {aligned}"
+    assert aligned.get("pricing-cached") == [0.2, 0.2], f"cached must align, got {aligned}"
+    assert aligned.get("pricing-output") == [20.0, 20.0], f"output must align, got {aligned}"
+
+
+@test("POST /api/v1/compare does not mint a benchmark name as a number (v1.8.8 r2)")
+def _():
+    # Run-17 gap 3: "Work360 benchmark score: Qwen4-Max 52.69" minted
+    # "360" as a task-count claim (twice, across entities) and the real
+    # 52.69 never minted. A digit run glued to a preceding letter is
+    # part of an identifier, not a value.
+    claims = extract_generic_quantitative_claims(
+        "Work360 benchmark score: Qwen4-Max 52.69.")
+    vals = [c["numeric_value"] for c in claims]
+    assert 360.0 not in vals, f"Work360 must never mint 360, got {vals}"
+    assert 52.69 in vals, f"the real score 52.69 must mint, got {vals}"
+
+
+@test("POST /api/v1/compare mints a glued percentage and an index-points score (v1.8.8 r2)")
+def _():
+    # Run-17 gaps 4/6: "89.0%with tools" never minted (the % suffix
+    # plus a following letter skipped it), and "Artificial Analysis
+    # gives it 43 points" never minted ("points" was not a score cue).
+    claims = extract_generic_quantitative_claims(
+        "Chartography 89.0%with tools and OSWorld 81.8%partial scores.")
+    keys = {(c["entity_key"], c["numeric_value"]) for c in claims}
+    assert ("generic|percentage|score|bench=chartography||unstated", 89.0) in keys, \
+        f"Chartography 89.0% must mint, got {keys}"
+    assert ("generic|percentage|score|bench=osworld||unstated", 81.8) in keys, \
+        f"OSWorld 81.8% must mint, got {keys}"
+    claims = extract_generic_quantitative_claims(
+        "Artificial Analysis gives it 43 points, nine more than its predecessor.")
+    keys = {(c["entity_key"], c["numeric_value"]) for c in claims}
+    assert ("generic|task_count|score|bench=artificial-analysis||unstated", 43.0) in keys, \
+        f"AA Index 43 points must mint, got {keys}"
+
+
+@test("POST /api/v1/compare reads a slash date into the shared-date set (v1.8.8 r2)")
+def _():
+    # Run-17 gap 11: the primary's "2026/11/15" never minted, so it
+    # never joined the shared-date set.
+    assert [c["date_key"] for c in extract_date_claims("Dated 2026/11/15.")] == ["2026-11-15"], \
+        "slash date must mint as 2026-11-15"
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "The post is dated 2026/11/15 and announces the model.", "source_name": "A"},
+            {"text": "Published November 15, 2026: the model is out.", "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    shared_keys = [c.get("date_key") for c in (d.get("shared_dates") or [])]
+    assert "2026-11-15" in shared_keys, \
+        f"slash date must join the shared dates, got {d.get('shared_dates')}"
+
+
+@test("POST /api/v1/compare does not mint a feed-header line as a claim (v1.8.8 r2)")
+def _():
+    # Run-17 gap 8: the InfoWorld "Source: ..." header line minted its
+    # "62%" as a bench=infoworld claim (double-counted with the body).
+    claims = extract_generic_quantitative_claims(
+        "Source: InfoWorld — 'Qwen4-Max review' 62% of tasks.\n"
+        "The model scores 62% of tasks.")
+    keys = {(c["entity_key"], c["numeric_value"]) for c in claims}
+    assert not any("bench=infoworld" in k for k, _v in keys), \
+        f"header line must never mint a claim, got {keys}"
+    assert any(v == 62.0 for _k, v in keys) and len(keys) == 1, \
+        f"the body 62% must still mint exactly once, got {keys}"
+
+
+@test("POST /api/v1/compare mints a bare-number table-row score (v1.8.8 r2)")
+def _():
+    # Run-17 gap 4: "- DeepSWE v1.1 (agentic coding): 75.7" minted
+    # nothing — the row parser only read "Model Version %" pairs.
+    # A bare number after the row's colon IS the row's score.
+    row = "- DeepSWE v1.1 (agentic coding): 75.7"
+    claims = extract_generic_quantitative_claims(row)
+    keys = {(c["entity_key"], c["numeric_value"]) for c in claims}
+    assert ("generic|measurement|score|bench=deepswe||unstated", 75.7) in keys, \
+        f"bare row score must mint, got {keys}"
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": row, "source_name": "A"},
+            {"text": row, "source_name": "B"},
+        ]
+    })
+    d = r.get_json()
+    assert not d.get("conflicts"), f"identical bare rows must not conflict, got {d.get('conflicts')}"
+    aligned = [c["entity_key"] for c in d.get("alignment", [])]
+    assert "generic|measurement|score|bench=deepswe||unstated" in aligned, \
+        f"bare row score must align, got {aligned}"
+
+
+@test("POST /api/v1/analyze keeps a declared primary on its own domain (v1.8.8 r2)")
+def _():
+    # Run-17 gap 2: the Qwen primary feed — a third-person summary of
+    # the vendor's own blog post, hosted on qwen.ai — was downgraded
+    # three runs in a row for lack of first-person announcement voice.
+    # The feed-declared publisher matching the source URL's own domain
+    # corroborates the declaration; the summary's voice is the
+    # pipeline's, not the source's. Same vetoes as the announcement
+    # exemption: a third-party attribution cue still voids it.
+    text = ("Source: Qwen Team — 'Qwen4-Max: Your New Teammate Has Arrived' "
+            "(Qwen Blog, dated 2026/11/15). The post introduces Qwen4-Max, "
+            "a new flagship model with stronger performance across nearly "
+            "every capability evaluated.")
+    r = client.post("/api/v1/analyze", json={
+        "text": text,
+        "source_type": "primary",
+        "source_name": "Qwen Team — Qwen4-Max",
+        "source_url": "https://qwen.ai/blog/qwen4-max/",
+    })
+    d = r.get_json()
+    assert d["source_type"] == "primary", \
+        f"own-domain primary must keep its type, got {d['source_type']}"
+    assert not any("downgraded" in f for f in d.get("flags", [])), \
+        f"no downgrade flag allowed, got {d.get('flags')}"
+    # Negative: the same declaration on a third-party host that still
+    # reads as a news article (a /blog/ URL) still downgrades.
+    r = client.post("/api/v1/analyze", json={
+        "text": text,
+        "source_type": "primary",
+        "source_name": "Qwen Team — Qwen4-Max",
+        "source_url": "https://example.com/blog/qwen4-max/",
+    })
+    d = r.get_json()
+    assert d["source_type"] != "primary", \
+        f"third-party host must not keep the primary type, got {d['source_type']}"
+
+
+@test("POST /api/v1/analyze does not misread a host or a mention as a type (v1.8.8 r2)")
+def _():
+    # Run-17 gap 9: "x.com" matched inside "wixx.com" and called a
+    # Reuters wire 'social'; a negated body mention ("not from the
+    # official press release") called an analysis 'official'.
+    assert _infer_source_type_from_signals(
+        "Alibaba unveiled a new flagship model.", "https://wixx.com/2026/11/15/x/") != "social", \
+        "wixx.com must not read as x.com"
+    body = "x " * 400 + ("not from the official press release, and the "
+                         "announcement does not mention it either.")
+    assert _infer_source_type_from_signals(
+        body, "https://www.askthisguy.com/en/blog/x/") != "official", \
+        "a body mention of a press release must not infer official"
+    # Positive controls: a real social host and a real press-release
+    # header still fire.
+    assert _infer_source_type_from_signals(
+        "Breaking news.", "https://x.com/someone/status/1") == "social"
+    assert _infer_source_type_from_signals(
+        "PRESS RELEASE: Acme announces a new model today.",
+        "https://example.com/news/") == "official"
+
+
+@test("POST /api/v1/analyze a benchmark named after a number does not own it (v1.8.8 r2)")
+def _():
+    # Run-17 gap 3, follow-on: the sentence-level single-benchmark
+    # fallback used the WHOLE sentence, so a SWE-bench score was
+    # mislabeled Terminal-Bench ("scores 77.2 against 76.2; on
+    # Terminal-Bench 2.0, 59.3") and a scale marker ("out of 100")
+    # was mislabeled OSWorld. Only benchmarks named BEFORE the
+    # number count. (The 59.3/52.5 themselves stay unminted in both
+    # builds — bare numbers in a cue-less clause — a known residual,
+    # not a regression.)
+    claims = extract_generic_quantitative_claims(
+        "On SWE-bench Verified, the dense model scores 77.2 against "
+        "76.2; on Terminal-Bench 2.0, 59.3 against 52.5.")
+    by_val = {c["numeric_value"]: c["entity_key"] for c in claims}
+    assert by_val.get(76.2, "").find("terminal-bench") == -1, \
+        "the SWE-bench 76.2 must not carry a Terminal-Bench key"
+    assert 59.3 not in by_val and 52.5 not in by_val, \
+        "the bare Terminal-Bench figures stay unminted (known residual)"
+    # The documented use case still works: the benchmark sits
+    # before the number.
+    claims = extract_generic_quantitative_claims(
+        "In its internal CVE Rediscovery evaluation, the model "
+        "scored 78.3%.")
+    by_val = {c["numeric_value"]: c["entity_key"] for c in claims}
+    assert "cve" in by_val.get(78.3, "").lower() or \
+        "rediscovery" in by_val.get(78.3, "").lower(), \
+        "a benchmark named before the number must still attach"
+
+
+@test("POST /api/v1/analyze a benchmark lead-in owns its clause's percentages (v1.8.8 r2)")
+def _():
+    # Run-17 gap 4, follow-on: "- On Last Secure Code Bench,
+    # function-level pass rate rose from 22.0% to 31.8%" minted
+    # nothing — the benchmark sat in the preceding clause, and the
+    # clause-scoped score rule never saw it. A lead-in (On/For/In +
+    # benchmark, no verb) owns the percentages in the clause it
+    # introduces. The rule is deliberately one clause deep: the
+    # all-three-granularities figures later in the same sentence
+    # (8%, 14.7%) stay unminted — a lead-in that owned the whole
+    # sentence would also own unrelated later metrics ("On HLE,
+    # scored 51.7%, and improved 12% on efficiency").
+    claims = extract_generic_quantitative_claims(
+        "- On Last Secure Code Bench, function-level pass rate rose "
+        "from 22.0% to 31.8%, and the rate of passing all three "
+        "granularities rose from 8% to 14.7%.")
+    by_val = {c["numeric_value"]: c["entity_key"] for c in claims}
+    for v in (22.0, 31.8):
+        assert "last-secure-code-bench" in by_val.get(v, ""), \
+            f"{v} must mint as a Last Secure Code Bench score"
+    assert 8.0 not in by_val and 14.7 not in by_val, \
+        "the two-clauses-back figures stay unminted by design"
+    # Guard: a complete earlier statement never owns a later
+    # percentage.
+    claims = extract_generic_quantitative_claims(
+        "HLE was 51.7%. The model also improved 12% on efficiency.")
+    assert not any(c["numeric_value"] == 12.0 and
+                   "hle" in c["entity_key"] for c in claims), \
+        "a complete HLE statement must not own the later 12%"
+
+
+@test("POST /api/v1/compare a bench-less score never joins a benchmark its sentence never names (v1.8.8 r2)")
+def _():
+    # Run-17 gap 3, follow-on: the merge attached the bench-less
+    # SWE-bench 76.2 to the nearest benched group by value alone —
+    # DeepSWE 75.7 (a false alignment; before the extraction fix
+    # it was a false Terminal-Bench conflict). Two halves: the
+    # phrase list now names SWE-bench at extraction, and the merge
+    # refuses an attach when the claim's sentence names other
+    # benchmarks but not the target.
+    claims = extract_generic_quantitative_claims(
+        "On SWE-bench Verified, the dense model scores 77.2 against "
+        "76.2; on Terminal-Bench 2.0, 59.3 against 52.5.")
+    by_val = {c["numeric_value"]: c["entity_key"] for c in claims}
+    assert "swe-bench" in by_val.get(76.2, ""), \
+        "the SWE-bench 76.2 must carry its own bench, not another's"
+    assert "swe-bench" in by_val.get(77.2, ""), \
+        "the SWE-bench 77.2 must carry its own bench"
+    # Merge guard, direct: a bench-less score whose span names
+    # Terminal-Bench must not attach to a DeepSWE group.
+    from signal_compare import _span_bench_slugs
+    slugs = _span_bench_slugs(
+        "On SWE-bench Verified, the dense model scores 77.2 against "
+        "76.2; on Terminal-Bench 2.0, 59.3 against 52.5.")
+    assert "deepswe" not in slugs and "terminal-bench" in slugs, \
+        "the span names Terminal-Bench, never DeepSWE"
+    assert not _span_bench_slugs("The model scored 78.3%."), \
+        "a sentence naming no benchmark yields an empty set"
+
+
+# ── v1.8.8 r3: conflict integrity (Arch audit 2026-11-17) ─────────────────────
+
+_NOV16_DIR = SCRIPT_DIR / "tests" / "packets" / "2026-11-16"
+
+
+def _nov16_docs():
+    docs = []
+    for f in sorted(_NOV16_DIR.glob("*.txt")):
+        docs.append({"text": f.read_text(encoding="utf-8"),
+                     "source_name": f.stem.rsplit("-feed-", 1)[-1]})
+    return docs
+
+
+def _packet_docs(name):
+    d = SCRIPT_DIR / "tests" / "packets" / name
+    docs = []
+    for f in sorted(d.glob("*.txt")):
+        docs.append({"text": f.read_text(encoding="utf-8"),
+                     "source_name": f.stem.rsplit("-feed-", 1)[-1]})
+    return docs
+
+
+@test("POST /api/v1/compare reports zero conflicts on the Nov 16 five-feed packet (v1.8.8 r3)")
+def _():
+    # Arch audit 2026-11-17: r2 reported six conflicts on this packet,
+    # all mis-scoped (HLE across models, three pooled price lists, a
+    # "62 percent" read as 62 tasks, 35% vs 50% tokens). None is a
+    # same-identity contradiction, so none may be a conflict.
+    docs = _nov16_docs()
+    assert len(docs) == 5, f"expected the five Nov 16 feeds, got {[d['source_name'] for d in docs]}"
+    r = client.post("/api/v1/compare", json={"documents": docs})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    d = r.get_json()
+    assert d.get("conflicts") == [], \
+        f"no misleading conflicts allowed, got {[(c['entity_key'], [v['value'] for v in c['values']]) for c in d['conflicts']]}"
+    aligned = {}
+    for a in d.get("alignment", []):
+        aligned.setdefault(a["entity_key"], []).append(
+            (a.get("identity", {}).get("subject", ""),
+             sorted({v["value"] for v in a["values"]}),
+             sorted({v["source"] for v in a["values"]})))
+    # The genuine same-model price agreements survive, scoped by model.
+    assert ("qwen-4-max", [1.5], ["askthisguy", "digitaltrends"]) in aligned.get("pricing-input", []), aligned
+    assert ("qwen-4-max", [4.5], ["askthisguy", "digitaltrends"]) in aligned.get("pricing-output", []), aligned
+    assert ("opus-5-5", [20.0], ["digitaltrends", "infoworld"]) in aligned.get("pricing-output", []), aligned
+    # Every alignment shows the identity it was compared as. (An
+    # alignment may have an unstated subject — the $4.43 per-task
+    # figure all three sources repeat names no model — but the gap is
+    # visible on the entry, and such a group can never conflict.)
+    for a in d["alignment"]:
+        if a["entity_key"].startswith("pricing") or a["entity_key"].startswith("generic|"):
+            assert "identity" in a and "subject" in a["identity"], a
+    # "62 percent reduction in task costs" is a percentage, never a task count.
+    for bucket in ("alignment", "unique_claims", "needs_source_clarification"):
+        for c in d.get(bucket, []):
+            if c["entity_key"].startswith("generic|task_count|tasks"):
+                vals = [v["value"] for v in c.get("values", [])] or [c.get("value")]
+                assert 62.0 not in vals, f"62 percent minted as a task count in {bucket}: {c}"
+    # Whatever stays unresolved is listed with its gaps and spans, never hidden.
+    for c in d.get("needs_source_clarification", []):
+        assert c["missing"], c
+        assert all(v.get("context") for v in c["values"]), c
+
+
+@test("POST /api/v1/compare binds chart series positionally on the Nov 16 packet (v1.8.8 r4)")
+def _():
+    # r3 recommendation 1: "for A, B and C: Bench v1, v2 and v3" binds
+    # value i to model i. The Nov 16 clarification closes — the HLE
+    # values now carry their owners — and the group becomes a visible
+    # not_comparable record (different models, different scores), never
+    # a conflict and never an alignment.
+    docs = _nov16_docs()
+    d = client.post("/api/v1/compare", json={"documents": docs}).get_json()
+    assert d.get("conflicts") == [], d.get("conflicts")
+    assert d.get("needs_source_clarification") == [], \
+        f"the last Nov 16 clarification must close, got {d.get('needs_source_clarification')}"
+    hle = [n for n in d.get("not_comparable", []) if n["entity_key"] == "hle"]
+    assert len(hle) == 1, f"one HLE not_comparable record expected, got {d.get('not_comparable')}"
+    owners = {i["subject"]: sorted(v["value"] for v in i["values"]) for i in hle[0]["identities"]}
+    assert owners == {
+        "qwen-3-6-27b": [24.0],
+        "qwen-3-8-27b": [30.8],
+        "opus-4-6-max": [40.0],
+        "": [51.7],
+    }, owners
+    # The 30.8 and 40.0 never minted before r4; the 53.4/61.7 SWE-bench
+    # and 89.2/91.3 GPQA values mint too. All are unique claims — no
+    # second document reports any chart value for any model — so no
+    # 12th alignment exists in this data; the honest Nov 16 outcome
+    # is 11 aligned / 0 conflicts / 3 not-comparable / 0 clarification.
+    uniques = {(u["entity_key"], u["value"], u["found_in"])
+               for u in d.get("unique_claims", [])}
+    for want in (("swe-bench", 61.7, "askthisguy"), ("swe-bench", 53.4, "askthisguy"),
+                 ("gpqa", 89.2, "askthisguy"), ("gpqa", 91.3, "askthisguy")):
+        assert want in uniques, f"chart value {want} must mint as a unique claim"
+
+
+@test("extract_numeric_claims binds 'for A, B and C:' chart series positionally (v1.8.8 r4)")
+def _():
+    line = ("Bar chart of scores published by Qwen, out of 100, for Qwen 3.6 27B, "
+            "Qwen 3.8 27B and Opus 4.6 Max: SWE-bench Pro 53.5, 61.7 and 53.4; "
+            "Terminal Bench 2.1 63.4, 73.0 and 78.2; HLE 24.0, 30.8 and 40.0.")
+    claims = extract_numeric_claims(line)
+    got = {(c["entity_key"], c["numeric_value"], c["subject"], c["variant"]) for c in claims}
+    assert ("swe-bench", 53.5, "qwen-3-6-27b", "pro") in got, got
+    assert ("swe-bench", 61.7, "qwen-3-8-27b", "pro") in got, got
+    assert ("swe-bench", 53.4, "opus-4-6-max", "pro") in got, got
+    assert ("hle", 24.0, "qwen-3-6-27b", "") in got, got
+    assert ("hle", 30.8, "qwen-3-8-27b", "") in got, got
+    assert ("hle", 40.0, "opus-4-6-max", "") in got, got
+    # Terminal Bench is unmapped: nothing mints for it, and the "2.1"
+    # version token is never read as a score.
+    assert not any(c["numeric_value"] in (2.1, 63.4, 73.0, 78.2) for c in claims), got
+    # A prose "for" line is not a chart: no positional binding fires.
+    prose = extract_numeric_claims("For best results, GPQA: 61.3%.")
+    assert not any(c["subject"] for c in prose if c["entity_key"] == "gpqa"), prose
+    # A series whose value count does not match the model count fails
+    # closed: only the inline pass's first value mints, subject-less.
+    mismatch = extract_numeric_claims(
+        "for Qwen 3.6 27B and Qwen 3.8 27B: HLE 24.0, 30.8 and 40.0.")
+    hle = [c for c in mismatch if c["entity_key"] == "hle"]
+    assert len(hle) == 1 and hle[0]["numeric_value"] == 24.0 and hle[0]["subject"] == "", hle
+
+
+@test("POST /api/v1/compare reports has_unresolved_comparisons on Nov 16 and false on a clean packet (v1.8.8 r4)")
+def _():
+    # Arch audit 2026-11-17, risk 1: "aligned" must never read as a
+    # clean bill of health while comparisons sit unresolved. The flag
+    # is additive; the agreement_status enum is unchanged.
+    d = client.post("/api/v1/compare", json={"documents": _nov16_docs()}).get_json()
+    assert d.get("agreement_status") == "aligned", d
+    assert d.get("has_unresolved_comparisons") is True, d
+    assert len(d.get("not_comparable", [])) == 3, d.get("not_comparable")
+    assert "UNRESOLVED: 0 discrepancy(ies) need source clarification, 3 claim key(s) are not comparable" in d["triage_summary"], d["triage_summary"]
+    assert "UNRESOLVED: 3 (0 clarification, 3 not comparable)" in d["capsule"], d["capsule"]
+    assert "AGREEMENT: aligned — with 3 unresolved comparison(s)" in d["capsule"], d["capsule"]
+    # A fully clean packet: Nov 07, 16 aligned / 0 conflicts /
+    # 0 not-comparable / 0 clarification.
+    d7 = client.post("/api/v1/compare", json={"documents": _packet_docs("2026-11-07")}).get_json()
+    assert d7.get("agreement_status") == "aligned", d7
+    assert d7.get("has_unresolved_comparisons") is False, d7
+    assert "AGREEMENT: aligned — no unresolved comparisons" in d7["capsule"], d7["capsule"]
+    assert "UNRESOLVED: 0 (0 clarification, 0 not comparable)" in d7["capsule"], d7["capsule"]
+
+
+@test("POST /api/v1/compare sets has_unresolved_comparisons only for clarification / not-comparable (v1.8.8 r4)")
+def _():
+    # Undated Carbon $2 vs $3: a safe abstention — clarification, flag
+    # true, and nothing was actually compared, so the status is
+    # not_established rather than aligned.
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": "Carbon input costs $2 per million tokens.", "source_name": "A"},
+        {"text": "Carbon input costs $3 per million tokens.", "source_name": "B"},
+    ]}).get_json()
+    assert d.get("has_unresolved_comparisons") is True, d
+    assert d.get("agreement_status") == "not_established", d
+    assert "UNRESOLVED" in d["triage_summary"], d["triage_summary"]
+    assert "UNRESOLVED: 1 (1 clarification, 0 not comparable)" in d["capsule"], d["capsule"]
+    # Two agreeing docs: clean, flag false.
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": "Carbon input costs $2 per million tokens today.", "source_name": "A"},
+        {"text": "Carbon input costs $2 per million tokens today.", "source_name": "B"},
+    ]}).get_json()
+    assert d.get("has_unresolved_comparisons") is False, d
+    assert d.get("agreement_status") == "aligned", d
+    # A dated conflict IS a comparison — resolved, not "unresolved".
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": "Carbon input costs $2 per million tokens today.", "source_name": "A"},
+        {"text": "Carbon input costs $3 per million tokens now.", "source_name": "B"},
+    ]}).get_json()
+    assert d.get("has_unresolved_comparisons") is False, d
+    assert d.get("agreement_status") == "conflicts_present", d
+
+
+@test("POST /api/v1/compare keeps a genuine same-model price conflict inside a multi-feed packet (v1.8.8 r3)")
+def _():
+    # Positive control against a blanket suppressor: the Nov 16 packet
+    # plus one feed that states a DIFFERENT current Qwen4-Max price.
+    # Same model, same tier, same stated era, same unit — that is a
+    # real contradiction and must still be a conflict.
+    docs = _nov16_docs() + [
+        {"text": ("Qwen4-Max now costs $1.80 per million input tokens and $5.40 "
+                  "per million output tokens."), "source_name": "contrarian"},
+    ]
+    d = client.post("/api/v1/compare", json={"documents": docs}).get_json()
+    conf = [c for c in d.get("conflicts", []) if c["entity_key"] == "pricing-input"]
+    assert len(conf) == 1, f"the dated Qwen4-Max input price dispute must conflict, got {d.get('conflicts')}"
+    assert conf[0]["identity"] == {"subject": "qwen-4-max", "era": "current"}, conf[0]
+    assert sorted(v["value"] for v in conf[0]["values"]) == [1.5, 1.8], conf[0]
+    out = [c for c in d.get("conflicts", []) if c["entity_key"] == "pricing-output"]
+    assert len(out) == 1 and sorted(v["value"] for v in out[0]["values"]) == [4.5, 5.4], \
+        f"the dated Qwen4-Max output price dispute must conflict, got {d.get('conflicts')}"
+
+
+@test("POST /api/v1/compare keeps a genuine same-model benchmark conflict (v1.8.8 r3)")
+def _():
+    # Positive control: same model, same benchmark, no stated variant
+    # or version on either side — a real disagreement stays a conflict.
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": "On GPQA, Opus 5.5 scored 87.0%.", "source_name": "A"},
+        {"text": "On GPQA, Opus 5.5 scored 83.5%.", "source_name": "B"},
+    ]}).get_json()
+    conf = [c for c in d.get("conflicts", []) if c["entity_key"] == "gpqa"]
+    assert len(conf) == 1, f"same-model GPQA dispute must conflict, got {d.get('conflicts')} / {d.get('needs_source_clarification')}"
+    assert conf[0]["identity"]["subject"] == "opus-5-5", conf[0]
+    # The same two scores with the model named on one side only are a
+    # clarification, not a conflict.
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": "On GPQA, Opus 5.5 scored 87.0%.", "source_name": "A"},
+        {"text": "GPQA: 83.5%.", "source_name": "B"},
+    ]}).get_json()
+    assert not d.get("conflicts"), f"subject on one side only must not conflict, got {d.get('conflicts')}"
+    assert not [a for a in d.get("alignment", []) if a["entity_key"] == "gpqa"], d.get("alignment")
+    # Not silently two uniques either: the split is a visible
+    # not_comparable record naming both identities.
+    nc = [n for n in d.get("not_comparable", []) if n["entity_key"] == "gpqa"]
+    assert nc and {i["subject"] for i in nc[0]["identities"]} == {"opus-5-5", ""}, \
+        f"stated vs unstated model must be recorded not_comparable, got {d.get('not_comparable')}"
+    # Unstated on BOTH sides and disagreeing: clarification, not conflict.
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": "GPQA: 87.0%.", "source_name": "A"},
+        {"text": "GPQA: 83.5%.", "source_name": "B"},
+    ]}).get_json()
+    assert not d.get("conflicts"), f"unstated models must never conflict, got {d.get('conflicts')}"
+    clar = [c for c in d.get("needs_source_clarification", []) if c["entity_key"] == "gpqa"]
+    assert clar and "subject" in clar[0]["missing"], d.get("needs_source_clarification")
+
+
+@test("POST /api/v1/compare keeps a genuine same-subject generic conflict and gates an unstated one (v1.8.8 r3)")
+def _():
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": "Qwen4-Max uses 35% fewer tokens than its predecessor.", "source_name": "A"},
+        {"text": "Qwen4-Max uses 20% fewer tokens than its predecessor.", "source_name": "B"},
+    ]}).get_json()
+    conf = [c for c in d.get("conflicts", []) if "tokens" in c["entity_key"]]
+    assert len(conf) == 1 and conf[0]["identity"]["subject"] == "qwen-4-max", \
+        f"same-subject token figures that disagree must conflict, got {d.get('conflicts')}"
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": "The new model uses 35% fewer tokens than its predecessor.", "source_name": "A"},
+        {"text": "The new model uses 20% fewer tokens than its predecessor.", "source_name": "B"},
+    ]}).get_json()
+    assert not d.get("conflicts"), f"unstated subjects must never conflict, got {d.get('conflicts')}"
+    assert [c for c in d.get("needs_source_clarification", []) if "tokens" in c["entity_key"]], \
+        f"unstated-subject disagreement must be listed for clarification, got {d.get('needs_source_clarification')}"
+
+
+@test("POST /api/v1/compare never turns one source's two values into a cross-source conflict (v1.8.8 r3)")
+def _():
+    # A states $4 and (elsewhere) $5 for the same model, tier and era;
+    # B states $4. A agrees with B on $4 — A's extra $5 is ambiguity
+    # inside A, listed for clarification, not a conflict with B.
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": "Opus 5.5 now costs $4 per million input tokens. Opus 5.5 now costs $5 per million input tokens.",
+         "source_name": "A"},
+        {"text": "Opus 5.5 now costs $4 per million input tokens.", "source_name": "B"},
+    ]}).get_json()
+    assert not d.get("conflicts"), f"intra-source values must not conflict, got {d.get('conflicts')}"
+    clar = [c for c in d.get("needs_source_clarification", []) if c["entity_key"] == "pricing-input"]
+    assert clar and "one source reports several values" in clar[0]["missing"], d.get("needs_source_clarification")
+
+
+@test("extraction coverage does not count dates, URLs, times or identifiers as candidates (v1.8.8 r3)")
+def _():
+    # Arch audit 2026-11-17: Reuters' 0/10 mint ratio was a measure
+    # problem — its "numbers" were a timestamp, a URL date, "Nov 15",
+    # "3D" and "Qwen4". A document with no numeric propositions is not
+    # a recall defect.
+    wire = ("Published: 2026-11-16T04:29:29+00:00. Fetched via "
+            "https://wixx.com/2026/11/15/alibaba-unveils/\n"
+            "Nov 15 (Reuters) - Alibaba unveiled Qwen4-Max, spanning 3D modeling and "
+            "game development, and said it outperforms Qwen3.8-Max.")
+    d = client.post("/api/v1/compare", json={"documents": [
+        {"text": wire, "source_name": "wire"},
+        {"text": "Qwen4-Max is priced at $1.50 per million input tokens.", "source_name": "B"},
+    ]}).get_json()
+    cov = {c["source"]: c for c in d["extraction_coverage"]}
+    assert cov["wire"]["numbers_seen"] == 0, f"no candidate numbers in the wire text, got {cov['wire']}"
+    assert "wire" not in d["triage_summary"].split("Extraction coverage")[-1].split("See extraction_coverage")[0] \
+        or "Extraction coverage" not in d["triage_summary"], d["triage_summary"]
+    assert all(0.0 <= c["coverage"] <= 1.0 for c in d["extraction_coverage"])
+
+
+@test("POST /api/v1/compare never binds a comparison baseline as the subject (v1.8.8 r3)")
+def _():
+    # "outperforms its predecessor, Qwen3.8-Max ... 35% fewer tokens":
+    # the 35% is Qwen4-Max's. "Outperforms Qwen3.8-Max with ~50% fewer
+    # tokens" names no subject at all. Binding the baseline made the
+    # two read as one stated identity.
+    claims = extract_generic_quantitative_claims(
+        "Qwen4-Max outperforms its predecessor, Qwen3.8-Max, overall while "
+        "using 35% fewer tokens at High effort.", "A", [])
+    subj = {c["numeric_value"]: c["subject"] for c in claims}
+    assert subj.get(35.0) == "qwen-4-max", f"35% belongs to Qwen4-Max, got {subj}"
+    claims = extract_generic_quantitative_claims(
+        "Outperforms Qwen3.8-Max with up to ~50% fewer tokens.", "B", [])
+    subj = {c["numeric_value"]: c["subject"] for c in claims}
+    assert subj.get(50.0) == "", f"a baseline is never the subject, got {subj}"
+
+
+@test("extract_numeric_claims binds standard-tier prices to the model they are quoted for (v1.8.8 r3)")
+def _():
+    text = ("It costs $1.50 per million input tokens and $4.50 per million output tokens in "
+            "Singapore, against $2 and $6 for Qwen 3.8 Max. In comparison, Claude Opus 5.5 "
+            "costs $4 and $20 for input and output tokens, respectively. Google's Gemini 4 "
+            "Argon and Carbon both currently cost $2 and $10, respectively, for input and "
+            "output tokens. GPT-6.1 Terra charges more for output tokens at $5 per million.")
+    got = sorted((c["entity_key"], c["numeric_value"], c["subject"], c["era"])
+                 for c in extract_numeric_claims(text))
+    want = sorted([
+        ("pricing-input", 1.5, "", "unknown"),          # "It" — never guessed
+        ("pricing-output", 4.5, "", "unknown"),
+        ("pricing-input", 2.0, "qwen-3-8-max", "unknown"),
+        ("pricing-output", 6.0, "qwen-3-8-max", "unknown"),
+        ("pricing-input", 4.0, "opus-5-5", "unknown"),
+        ("pricing-output", 20.0, "opus-5-5", "unknown"),
+        ("pricing-input", 2.0, "gemini-4-argon", "current"),
+        ("pricing-input", 2.0, "gemini-4-carbon", "current"),
+        ("pricing-output", 10.0, "gemini-4-argon", "current"),
+        ("pricing-output", 10.0, "gemini-4-carbon", "current"),
+        ("pricing-output", 5.0, "gpt-6-1-terra", "unknown"),
+    ])
+    assert got == want, f"\n got  {got}\n want {want}"
+    # A model pair without "both/each" may be a respectively-series:
+    # unresolved, never guessed.
+    got = {(c["numeric_value"], c["subject"]) for c in extract_numeric_claims(
+        "Gemini 4 Argon and Carbon cost $2 and $3 per million input tokens.")}
+    assert got == {(2.0, ""), (3.0, "")}, got
+
+
+@test("price owners skip comparison baselines and stay fail-closed when ambiguous (v1.8.8 r3)")
+def _():
+    def owners(text):
+        return [(c["entity_key"], c["numeric_value"], c["subject"], c["era"])
+                for c in extract_numeric_claims(text)]
+    # "twice as much as Opus 5.5 ($8 / $40 against $4 / $20)": the
+    # first pair is Fable 5.2's, the second Opus 5.5's.
+    assert owners("Fable 5.2 costs twice as much as Opus 5.5 ($8 / $40 against $4 / $20 per million).") == [
+        ("pricing-input", 8.0, "fable-5-2", "unknown"), ("pricing-output", 40.0, "fable-5-2", "unknown"),
+        ("pricing-input", 4.0, "opus-5-5", "unknown"), ("pricing-output", 20.0, "opus-5-5", "unknown")]
+    # A baseline coordinated with a baseline is a baseline: never
+    # "Mythos 5.1" for the new price. The new pair is not marked
+    # "both", so the owner stays unresolved rather than guessed.
+    got = owners("Fable 5.2 and Mythos 5.2 are faster than Claude Fable 5.1 and Claude Mythos 5.1, "
+                 "and are available at a lower price: $8 per million input tokens.")
+    assert got == [("pricing-input", 8.0, "", "unknown")], got
+    # An "against" belongs to the price right after it: the batch
+    # pair after a closed cache-read pair is not a prior price.
+    got = owners("Fable 5.2 is cheaper than Fable 5.1: cache reads ($0.20 against $0.25) "
+                 "and batch ($4 / $20 against $5 / $25) are all 20% lower.")
+    assert ("pricing-batch-input", 4.0, "fable-5-1", "prior") not in got, got
+    assert ("pricing-batch-input", 5.0, "fable-5-1", "prior") in got, got
+    assert ("pricing-cached", 0.2, "fable-5-2", "unknown") in got, got
+    # "cheaper than Fable 5.2 at $4": after "than", "at" does not make
+    # the baseline the owner — the $4 is the subject's (Opus 5.5's).
+    got = owners("Opus 5.5 is cheaper than Fable 5.2 at $4 per million input tokens.")
+    assert got == [("pricing-input", 4.0, "opus-5-5", "unknown")], got
+    # ...whereas after "against"/"ahead of", "at" is the baseline's own.
+    got = owners("Fable 5.2 costs $8 per million input tokens, ahead of Opus 5.5 at "
+                 "$4 per million input tokens.")
+    assert got == [("pricing-input", 8.0, "fable-5-2", "unknown"),
+                   ("pricing-input", 4.0, "opus-5-5", "unknown")], got
+
+
+@test("fresh phrasings: conflicts only on a complete identity, both directions (v1.8.8 r3)")
+def _():
+    # Ten two-document cases written for r3, not copied from any
+    # packet. r2 reported a conflict on all five "none" cases;
+    # the three "conflict" cases are positive controls that must keep
+    # firing so a blanket suppressor cannot pass.
+    cases = [
+        ("align", "Qwen4-Max costs $1.50 per million input tokens.",
+                  "Qwen 4 Max costs $1.50 per million input tokens."),
+        ("none", "Qwen4-Max now costs $1.50 per million input tokens.",
+                 "Qwen3.8-Max now costs $2 per million input tokens."),
+        ("none", "The new Qwen model costs $1.50 per million input tokens today.",
+                 "Qwen4-Max costs $2 per million input tokens today."),
+        ("conflict", "Qwen4-Max costs $1.50 per million input tokens today.",
+                     "Qwen4-Max currently costs $2 per million input tokens."),
+        ("none", "Qwen4-Max scored 51.7% on Humanity's Last Exam.",
+                 "On HLE, Qwen 3.6 27B scored 24.0%."),
+        ("conflict", "Qwen4-Max scored 51.7% on Humanity's Last Exam.",
+                     "On HLE, Qwen4-Max scored 48.2%."),
+        ("none", "Qwen4-Max beats Qwen3.8-Max with 35% fewer tokens.",
+                 "Qwen3.8-Max used 50% fewer tokens than Qwen 3.5."),
+        ("conflict", "Qwen4-Max cut average task costs by 62%.",
+                     "Qwen4-Max cut average task costs by 45%."),
+        ("not-conflict", "Qwen4-Max cut average task costs by 62%.",
+                         "Qwen4-Max cut average task costs by around 60%."),
+        ("none", "Alibaba considers this a 62 percent reduction in task costs.",
+                 "Work360 covers 721 specialized fields of tasks."),
+    ]
+    for want, a, b in cases:
+        d = client.post("/api/v1/compare", json={"documents": [
+            {"text": a, "source_name": "A"}, {"text": b, "source_name": "B"}]}).get_json()
+        got = "conflict" if d["conflicts"] else ("align" if d["alignment"] else "none")
+        ok = got == want or (want == "not-conflict" and got != "conflict")
+        assert ok, f"want {want}, got {got}: {a!r} / {b!r} -> {d['conflicts'] or d['alignment']}"
+
+
+@test("model tokens keep tier and size in the identity (v1.8.8 r3)")
+def _():
+    from signal_compare import _MODEL_TOKEN_RE, _model_slug
+    def slugs(t):
+        return [_model_slug(m.group(1)) for m in _MODEL_TOKEN_RE.finditer(t)]
+    assert slugs("Qwen 3.8 Max and Qwen 3.8 27B") == ["qwen-3-8-max", "qwen-3-8-27b"], \
+        "different Qwen 3.8 models must not share one slug"
+    assert slugs("Qwen4-Max") == slugs("Qwen 4 Max") == ["qwen-4-max"]
+    assert slugs("GPT6.1-Sol") == slugs("GPT-6.1 Sol") == ["gpt-6-1-sol"]
+    assert slugs("GPT-6.1 Terra") == ["gpt-6-1-terra"]
+    assert slugs("Pro users on the Max plan") == [], "a tier word alone is not a model"
+
+
+@test("generic extraction reads spelled-out percent and percentage ranges (v1.8.8 r3)")
+def _():
+    claims = extract_generic_quantitative_claims(
+        "Alibaba considers this a 62 percent reduction in task costs.", "A", [])
+    c62 = [c for c in claims if c["numeric_value"] == 62.0]
+    assert c62 and c62[0]["unit"] == "percent" and "task_count" not in c62[0]["entity_key"], \
+        f"62 percent must be a percentage, got {claims}"
+    claims = extract_generic_quantitative_claims(
+        "Qwen4-Max uses 24 to 35% fewer tokens than its predecessor.", "A", [])
+    units = {c["numeric_value"]: (c["unit"], c["subject"]) for c in claims}
+    assert units.get(24.0) == ("percent", "qwen-4-max") and units.get(35.0) == ("percent", "qwen-4-max"), \
+        f"both range endpoints are Qwen4-Max percentages, got {units}"
+    claims = extract_generic_quantitative_claims(
+        "The gap widened by 16 percentage points.", "A", [])
+    assert all(c["unit"] != "percent" or c["numeric_value"] != 16.0 or "point" in c["entity_key"]
+               for c in claims), f"percentage points are not a plain percent, got {claims}"
 
 
 # ── runner ─────────────────────────────────────────────────────────────────────
