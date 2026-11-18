@@ -1,0 +1,32 @@
+Source: Digital Trends — "Qwen4-Max is China's newest flagship AI model, and it makes GPT and Claude look expensive"
+Fetched 2026-11-16 via browser.open (https://www.digitaltrends.com/computing/qwen-4-max-aliababas-latest-flagship-ai-model-announced/)
+
+Alibaba has unveiled Qwen4-Max as its new flagship AI model. One of its major highlights is that it is priced well below what OpenAI, Anthropic, and Google charge for their top-of-the-line AI models in the GPT-6, Gemini 4, and Claude 5 portfolio. Frontier AI models can get expensive when you use them extensively for everyday work. Alibaba says Qwen4-Max can handle the same jobs for much less money.
+
+The new Qwen model has 2.4 trillion parameters but activates only 71 billion per token. The company says that average cost per task on its in-house Work360 benchmark dropped from $4.43 to $1.67 compared with Qwen3.8-Max. Alibaba considers this a 62 percent reduction in task costs. The new model also needs up to 35 percent fewer tokens to get the same work done.
+
+## So how cheap is it, really?
+
+According to Qwen's official blog, Qwen4-Max is priced at $1.50 per million input tokens and $4.50 per million output tokens through QwenCloud's API. In comparison, Claude Opus 5.5 costs $4 and $20 for input and output tokens, respectively. At this rate, Qwen's output pricing is less than a quarter of Anthropic's.
+
+> 📢 Meet Qwen4-Max, your new AI teammate for work, creativity, and discovery!
+>
+> Qwen4-Max is built on a new MoE architecture with native vision and a 1M-token context window.
+>
+> Highlights:
+>
+> – Outperforms Qwen3.8-Max with up to ~50% fewer tokens, while average cost per task drops over… pic.twitter.com/2Rlkoc6Dm3
+>
+> — Qwen (@Alibaba_Qwen) November 16, 2026
+
+Google's Gemini 4 Argon and Carbon both currently cost $2 and $10, respectively, for input and output tokens. These prices are set to increase twofold on December 1. GPT-6.1 Terra, OpenAI's budget-friendly model, charges more for output tokens at $5 per million.
+
+Readers should be aware that the above-mentioned 62 percent saving compares Qwen4-Max with Alibaba's own older model rather than its rivals. Those interested in using the new model can do so through QwenCloud's API or Token Plan. It is also available in Qwen Work, Qoder, and Qwen Studio. While smaller open-source Qwen4 models are expected to arrive in the future, there is no official word on their availability.
+
+## Alibaba is betting big on security guardrails
+
+During an internal test in July, OpenAI models broke out of their sandbox and compromised parts of Hugging Face's systems. This incident significantly highlighted the potential security risks associated with advanced AI models.
+
+When it comes to security, Alibaba says it filtered Qwen4-Max's training data by purpose. It retained material for defensive work, such as finding and fixing vulnerabilities, while removing data intended to improve attack capabilities. Internal experts then reviewed long-running task sessions that included the models' full chains of thought. The company concludes that "no capabilities posing large-scale cybersecurity risks have been observed."
+
+The model also writes safer code, with its pass rate on the Last Secure Code Bench for code that both works and is secure rising from 22 percent to 31.8 percent. The company says it conducted dedicated safety training to address chemical and biological risks, as well as radiological and nuclear threats. It should be noted that these safety claims are based on Alibaba's own reviews. No external red team has tested the model yet.
