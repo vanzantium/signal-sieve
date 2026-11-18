@@ -1,0 +1,18 @@
+PRIMARY COMPANION — OpenAI, "A thousand fewer paths to root", 4 November 2026
+URL: https://openai.com/index/a-thousand-fewer-paths-to-root/
+
+Security research that once required a separate, sustained investigation for each finding can increasingly be run as a systematic process. We built a prototype to look for security flaws in the Linux kernel inside a controlled research environment. Our prototype identified and analyzed 2,308 candidate Linux kernel findings, dynamically reproduced 1,724 vulnerabilities, and produced 948 local privilege escalation (LPE) exploits that could allow an unprivileged local user to gain root access.
+
+In June, as part of our Patch the Planet initiative, we shared that GPT-5.5 Cyber had identified Linux kernel vulnerabilities and developed 24 local privilege escalation exploits. We expanded that work into a pipeline, powered by an upcoming cyber model, covering vulnerability discovery, dynamic validation, exploitability assessment, and patch generation.
+
+Scout agents identified 5,034 audit targets, about 2.8 million lines of code, roughly 7% of the whole Linux kernel code base. This step cost $3,426 in API credits. Analyst agents produced 2,308 candidate findings after deduplication within 12 hours. This stage cost $316,549 in API credits.
+
+Within 30 hours, our system reproduced 1,724 vulnerabilities, ~74.7% of the 2,308 candidate findings. Only 3.1% reflected incorrect analysis by the model. The validation stage cost $73,330 in API credits.
+
+ExploitDev agents produced 291 proofs of concept for information leaks and 1,169 working local privilege escalation exploits. We performed variant analysis and developed 948 distinct patches for the vulnerabilities behind those exploits. Successful exploits cost an average of $359 in credits to develop.
+
+The exploitation stage cost $775,929 in API credits in total. In late July 2026, GPT-5.6 Sol found and exploited 166 unique LPE vulnerabilities for an end-to-end $513,690 cost in API credits. In the second scan, in mid-October 2026, the newer cyber model found and exploited 948 unique LPE vulnerabilities for an end-to-end $1,213,430 cost in API credits. For both campaigns, we scanned the latest Linux kernel master branch at the time. That is $1,279 per LPE exploit by OpenAI's arithmetic.
+
+During this research, we observed the Linux maintainers moving quickly to fix vulnerabilities. The scan was performed on the latest Linux kernel in mid-October 2026. When the autonomous scan and manual analysis finished after 10 days, 61 LPEs had already been patched upstream, 43 had staging patches, and 299 were being reported and discussed publicly.
+
+We sampled 166 exploits and analyzed the exploitation techniques used. To the best of our knowledge, the agents used 10 new exploitation techniques in the sampled exploits. We shared the exploitation techniques with third-party kernel exploitation experts and the techniques were new to them as well.
