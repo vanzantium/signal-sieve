@@ -26,6 +26,36 @@ It scores text across four dimensions and returns a `recommended_action`:
 
 It is a **receipt clerk, not an oracle**. It can flag a propaganda piece. It cannot confirm that a clean-looking primary source is telling the truth.
 
+## Limitations — read this first
+
+Signal Sieve is a **cautious triage tool, not a fact-checker**. It checks the
+*shape* of a text — named sources, numeric anchors, custody, attribution —
+and compares numeric claims across documents. It does **not** certify truth,
+and it does **not** find everything:
+
+- **Claim recall is low.** On a held-out packet of 20 claims (2026-11-13),
+  the extractor found 9 — **45% recall**, not remeasured on this build.
+  A clean report means "nothing comparable disagreed", not "everything
+  checked out".
+- **Comparison improves precision of a subset of numeric comparisons,
+  not completeness.** It aligns claims it can normalize and identify;
+  unmapped benchmarks, unparsed values, and claims in prose it cannot
+  parse simply do not enter the comparison.
+- **`agreement_status: aligned` covers only the claims that were actually
+  compared.** Check `has_unresolved_comparisons` (and the UNRESOLVED count
+  in the summary) before reading "aligned" as full agreement: claims that
+  differ under an incomplete identity sit in `needs_source_clarification`,
+  and claims reported for different identities sit in `not_comparable`.
+- **An abstention is not agreement.** When two undated prices disagree
+  ($2 vs $3 with no era given), the tool declines to call a conflict —
+  a safe abstention, because the two prices may be from different eras.
+  It is also not an alignment: it lands in `needs_source_clarification`
+  and sets `has_unresolved_comparisons`.
+
+No claim of general reliability follows from a green run of the test
+suites: the suites check the tool against its own packets, not against
+the world.
+
 ---
 
 ## Live web app
@@ -230,6 +260,12 @@ indicators, benchmark scores) so different surface forms still match.
   NOT_OBSERVED / UNKNOWN per entity per document. Only explicit absence
   language ("no Gold row", "Gold not listed") counts as absence; a
   merely-missing entity is NOT_OBSERVED and never becomes a conflict.
+- **"Aligned" is not "nothing left open."** The response carries
+  `has_unresolved_comparisons` (true when `needs_source_clarification`
+  or `not_comparable` is non-empty) and the summary states the unresolved
+  counts immediately next to the status. A safe abstention — two undated
+  prices that disagree — lands in `needs_source_clarification`, sets the
+  flag, and is neither a conflict nor an agreement.
 
 ## Custody notes (v1.7.0)
 
@@ -284,6 +320,7 @@ These are **open questions**, not bugs. Contributions and field data welcome.
 - **A namespace match is not ownership.** (Arch notes 2026-11-06, v1.8.3.) Namespace matching and ownership verification are recorded as separate facts: a hosting location can match the claimed identity without any independent evidence that the claimant controls it, and the source URL itself is caller-supplied, so comparing it against the text is a consistency check between two caller-supplied values, not authentication. Until a trusted verification mechanism exists (a verified-org registry, or a trusted official link from an authenticated retrieval record), ownership is never "verified" here — a namespace match yields a candidate with uncertain ownership, capped below the verified-primary bar.
 - **A citation is not authorship, and a hostname is not an institution.** (Arch review 2026-11-06, v1.8.4.) A quoted DOI proves the cited work exists; it does not prove this document authored it — and neither does merely mentioning arXiv, EDGAR, or sec.gov. What counts as research evidence is the authors speaking in the first person about work they did. Likewise an academic host must BE the institution or its subdomain: a hostname merely containing "stanford.edu" or "arxiv.org" as a substring is not that institution. And a hosted candidate's ownership cap lifts only on verified ownership — never on document-internal suggestion such as announcement voice or a quoted DOI, which is the same self-certification the hosted repair distrusts.
 - **A bare entity name is not a claim identity.** (Sieve gap 2026-11-06, v1.8.5.) A benchmark claim is benchmark + variant + version + shot + metric + score + unit. "SWE-bench Pro" and "SWE-bench Verified" are different benchmarks that happen to share a family name, and pricing tiers (input / output / cached / per-task) are different claims. Differing versions, shots, or variants block comparison with a visible note instead of manufacturing a conflict; the same claim present in two or more documents aligns. A number that is the score of a following benchmark belongs to that benchmark, and a number that is a measurement setting ("Standard 10") is not a score. Genre follows the document's main claim, not incidental mentions: a model release whose only financial word is "index" is not a market snapshot.
+- **A conflict needs a complete identity on every side.** (Arch audit 2026-11-17, v1.8.8 r3.) Two values are called a conflict only when every side states the same subject (model/product), metric, condition or benchmark, tier, reference era and unit. A value whose model, era or measurement condition is unstated — or a source that reports two values under one identity — can still align, but a disagreement under an incomplete identity goes to `needs_source_clarification` with the missing fields and each value's span, never to `conflicts`. A model named as the baseline of a comparison ("than X", "outperforms its predecessor, X") is never the subject of the figure beside it, and a price carries the model it is quoted for. The positive controls stay in the suite so the gate can never become a blanket conflict suppressor.
 - **Zero dependencies.** Standard library only. Drop `signal_sieve.py` anywhere Python 3.8+ runs.
 - **Tunable.** All scoring weights are named constants. The test corpus makes regression easy.
 
