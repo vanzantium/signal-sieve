@@ -1,0 +1,19 @@
+Source: Reuters (via 101 WIXX) — "Alibaba unveils new flagship AI model with safety upgrades"
+Published: 2026-11-16T04:29:29+00:00. Reporting by Harishankar Manoj in Bengaluru and Eduardo Baptista in Beijing; Editing by Nivedita Bhattacharjee.
+Fetched 2026-11-16 via browser.open (https://wixx.com/2026/11/15/alibaba-unveils-new-flagship-ai-model-with-safety-upgrades/)
+
+Nov 15 (Reuters) – China's Alibaba unveiled its new flagship artificial intelligence model Qwen4-Max on Sunday, saying it enhanced the system's ability to handle complex professional and scientific work while improving protections against safety risks.
+
+Here are some more details:
+
+• "It can take on a wide range of creative and professional work, spanning 3D modeling, game development, precision manufacturing, finance, law, healthcare, and frontier scientific discovery," the company said
+
+• Chinese tech companies — a huge force in open-weight AI models globally — are locked in a fierce and fast-moving battle to build more powerful systems without making them prohibitively expensive to run
+
+• The Chinese tech giant said that Qwen4-Max outperforms Qwen3.8-Max, unveiled in August this year, with fewer tokens and cost efficiency
+
+• Alibaba said Qwen4-Max's training included security checks alongside coding tests, helping reduce vulnerabilities such as code injection, memory-safety flaws and broken access controls
+
+• Safeguards to prevent misuse of the model in areas such as cybercrime and hazardous materials were strengthened, while internal testing found no evidence of significant high-risk capabilities, the company added
+
+• Chinese AI model developers have in recent months increased safety disclosures in new model releases, amid growing global concern surrounding "rogue AI" and loss-of-control risks

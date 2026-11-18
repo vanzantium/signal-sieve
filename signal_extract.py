@@ -232,9 +232,13 @@ def detect_genre(text: str, url: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 # Data providers / research services / government statistics agencies
+# v1.8.8, Fix 2: "SEC" never matches inside a benchmark name —
+# "SEC-bench" / "SEC Bench" / "SECbench" is a benchmark, not the US
+# Securities and Exchange Commission. A bare "SEC" (SEC filings, the
+# SEC) still matches.
 _DATA_PROVIDER_RE = re.compile(
     r"\b(Finnhub|Bloomberg|Reuters|FactSet|Refinitiv|S&P Global|S&P 500|"
-    r"Moody'?s|Fitch|EDGAR|SEC|SEDAR|"
+    r"Moody'?s|Fitch|EDGAR|SEC(?![-\s]?[Bb]ench)|SEDAR|"
     r"Yahoo Finance|Google Finance|Morningstar|CapIQ|PitchBook|Crunchbase|"
     r"CoinMarketCap|CoinGecko|Glassnode|Dune Analytics|"
     r"Alpha Vantage|Quandl|FRED|World Bank|IMF|BLS|BEA|Census Bureau|"
@@ -248,9 +252,10 @@ _MARKET_VENUE_RE = re.compile(
 )
 
 # Combined — keeps backward-compat for code that calls _find_named_sources()
+# (Same SEC-bench exclusion as _DATA_PROVIDER_RE above.)
 _DATA_SOURCES = re.compile(
     r"\b(Finnhub|Bloomberg|Reuters|FactSet|Refinitiv|S&P Global|S&P 500|"
-    r"Moody'?s|Fitch|EDGAR|SEC|SEDAR|NYSE|NASDAQ|TSX|CSE|OTC(?:\s+Markets)?|"
+    r"Moody'?s|Fitch|EDGAR|SEC(?![-\s]?[Bb]ench)|SEDAR|NYSE|NASDAQ|TSX|CSE|OTC(?:\s+Markets)?|"
     r"Yahoo Finance|Google Finance|Morningstar|CapIQ|PitchBook|Crunchbase|"
     r"CoinMarketCap|CoinGecko|Glassnode|Dune Analytics|"
     r"Alpha Vantage|Quandl|FRED|World Bank|IMF|BLS|BEA|Census Bureau|"
@@ -417,6 +422,10 @@ def build_custody_breakdown(
     hosted_ownership_reason: str = "",
     source_url_provenance: str = "none",
     claimed_publisher_org: str = "",
+    claimed_publisher_org_reason: str = "",
+    feed_declared_publisher: str = "",
+    organizations_mentioned: Optional[List[str]] = None,
+    byline: Optional[str] = None,
     hosting_namespace: str = "",
     speaks_as_originator: bool = False,
 ) -> Dict:
@@ -468,6 +477,17 @@ def build_custody_breakdown(
     inputs, and `speaks_as_originator` records whether the document
     speaks in the originator's own voice (passed through from the
     caller's voice check; a wording fact, not a custody verdict).
+
+    v1.8.8, Fix 2: source identities are separate fields, never
+    merged into one guessed publisher. `claimed_publisher_org` is
+    the feed-declared publisher (caller source_name) first, then the
+    feed header in the text, else None — a word found in the body
+    never becomes the claimed publisher. `claimed_publisher_org_reason`
+    says which of those three produced it. `feed_declared_publisher`
+    is the caller-declared publisher on its own. `organizations_mentioned`
+    lists every org the body's authorship constructions name (mentioned,
+    not claimed). `byline` is the individual "by X" in the byline zone,
+    or None.
     """
     data_providers = _find_data_providers(text)
     market_venues  = _find_market_venues(text)
@@ -520,6 +540,10 @@ def build_custody_breakdown(
         "hosted_ownership_reason":     hosted_ownership_reason,
         "source_url_provenance":       source_url_provenance,
         "claimed_publisher_org":       claimed_publisher_org or None,
+        "claimed_publisher_org_reason": claimed_publisher_org_reason or None,
+        "feed_declared_publisher":     feed_declared_publisher or None,
+        "organizations_mentioned":     organizations_mentioned or [],
+        "byline":                      byline,
         "hosting_namespace":           hosting_namespace or None,
         "independently_verified_owner": independently_verified_owner,
         "primary_origin_status":        primary_origin_status,
@@ -554,9 +578,32 @@ def build_custody_breakdown(
                 "prior, not a measurement of this document."
             ),
             "claimed_publisher_org": (
-                "The org the document itself names as releaser/author "
-                "(feed header first, then authorship constructions). A "
-                "claim, never a verification."
+                "The org the feed declares as publisher: the "
+                "caller-declared source_name first, then the feed "
+                "header in the text, else None. A word found in the "
+                "body never becomes the claimed publisher. A claim, "
+                "never a verification."
+            ),
+            "claimed_publisher_org_reason": (
+                "Which declaration produced the claimed publisher "
+                "org: feed-declared publisher (source name), feed "
+                "header in text, or no publisher declared in feed "
+                "header or source name."
+            ),
+            "feed_declared_publisher": (
+                "The publisher the caller declared in source_name "
+                "(<Publisher> — <Title>), on its own — the feed's "
+                "declaration, not a verification."
+            ),
+            "organizations_mentioned": (
+                "Every org the body's authorship constructions name, "
+                "in first-mention order. Mentioned, not claimed: a "
+                "body mention is never the publisher."
+            ),
+            "byline": (
+                "The individual byline ('by X') when one sits in the "
+                "byline zone (the first ~600 chars), as written; None "
+                "otherwise. A person's name, not an org."
             ),
             "hosting_namespace": (
                 "Where the document is hosted: the artifact host's "

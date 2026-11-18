@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.8.7"
+ANALYSIS_VERSION  = "v1.8.8"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -386,10 +386,15 @@ _OPENAPI_SPEC: dict = {
         "title":       "Signal Sieve API",
         "version":     API_VERSION,
         "description": (
-            "Heuristic receipt clerk for signal/noise triage. "
-            "Checks whether text has usable signal-quality markers: named sources, "
+            "Heuristic receipt clerk for signal/noise triage — a cautious triage tool, "
+            "not a fact-checker. Checks whether text has usable signal-quality markers: named sources, "
             "numeric anchors, source custody, attribution, caveats, pressure language. "
-            "NOT a fact-checker. overall_confidence measures signal markers, not truth.\n\n"
+            "NOT a fact-checker. overall_confidence measures signal markers, not truth. "
+            "Held-out claim recall was 9/20 (45%) on the 2026-11-13 packet — not remeasured "
+            "on this build — and the comparison feature improves precision of a subset of numeric "
+            "comparisons, not completeness or truth certification. An 'aligned' comparison covers "
+            "only the claims actually compared: check has_unresolved_comparisons before reading "
+            "it as full agreement.\n\n"
             "**Interactive docs:** `/docs` (Swagger UI)\n"
             "**OpenAPI spec:** `/openapi.json` and `/.well-known/openapi.json`\n\n"
             "**Endpoints:**\n"
@@ -664,9 +669,34 @@ _OPENAPI_SPEC: dict = {
                                         "description": "Same benchmark in different variants (Pro vs Verified) — not comparable, not conflicts."},
                     "timeline_reconciliation": {"type": "array", "items": {"type": "object"},
                                         "description": "Shared-year date/precision notes — needs clarification, not conflicts."},
+                    "benchmark_mismatches": {"type": "array", "items": {"type": "object"},
+                                        "description": "Same generic identity under different named benchmarks — not comparable, not conflicts."},
+                    "not_comparable": {"type": "array", "items": {"type": "object"},
+                                        "description": "One pricing key held several stated identities (model / era / thinking level); values compare only within an identity. Each value carries its source span."},
+                    "needs_source_clarification": {"type": "array", "items": {"type": "object"},
+                                        "description": ("Values differ beyond tolerance but the claim identity is incomplete "
+                                                        "(subject, era or measurement condition unstated, or unequal, on some side). "
+                                                        "Never a conflict and never an alignment; 'missing' names the gaps and each "
+                                                        "value carries its identity and source span.")},
+                    "unmatched_claims": {"type": "array", "items": {"type": "object"},
+                                        "description": "Claims that minted but could not be typed for comparison (e.g. a price with no tier) — span + reason each."},
+                    "extraction_coverage": {"type": "array", "items": {"type": "object"},
+                                        "description": "Per document: numbers seen vs claims minted. A recall floor, not a precision measure."},
                     "agreement_status": {"type": "string",
                                         "enum": ["aligned", "conflicts_present", "not_established"],
-                                        "description": "not_established when nothing was actually compared."},
+                                        "description": ("not_established when nothing was actually compared. "
+                                                        "Conflicts require a complete claim identity; discrepancies "
+                                                        "under an incomplete identity are in needs_source_clarification "
+                                                        "and do not count toward this status. 'aligned' covers only "
+                                                        "the claims that were actually compared — check "
+                                                        "has_unresolved_comparisons before reading it as full agreement.")},
+                    "has_unresolved_comparisons": {"type": "boolean",
+                                        "description": ("True when needs_source_clarification or not_comparable is "
+                                                        "non-empty. An 'aligned' response with this flag set still has "
+                                                        "open comparisons: values that differ under an incomplete "
+                                                        "identity (clarification) or under different identities "
+                                                        "(not comparable). A safe abstention, such as two undated "
+                                                        "prices that disagree, sets this flag — it is not agreement.")},
                     "comparable_claims": {"type": "integer",
                                         "description": "Claims that went through alignment/conflict comparison."},
                     "crude_note":      {"type": "string", "description": "WTI/Brent benchmark note if both found."},
@@ -961,10 +991,16 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
     tag = f"SIGNAL_SIEVE {ANALYSIS_VERSION} COMPARE"
     lines.append(f"{tag} | {request_id}" if request_id else tag)
     lines.append(f"DOCS:      {cmp_result.get('doc_count', '?')}")
+    # v1.8.8 r4 (Arch audit 2026-11-17, risk 1): the unresolved count
+    # rides on the headline line, immediately next to the status, so
+    # "aligned" can never be skimmed as a clean bill of health.
+    n_clarify = len(cmp_result.get("needs_source_clarification", []))
+    n_notcmp = len(cmp_result.get("not_comparable", []))
     lines.append(
         f"SHARED:    {len(shared)}"
         f"  CONFLICTS: {len(conflicts)}"
         f"  ALIGNED: {len(alignment)}"
+        f"  UNRESOLVED: {n_clarify + n_notcmp} ({n_clarify} clarification, {n_notcmp} not comparable)"
     )
 
     if conflicts:
@@ -1021,6 +1057,23 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
                 f"  · {m['entity_label']}: variants {', '.join(m.get('variants', []))}"
             )
 
+    if cmp_result.get("needs_source_clarification"):
+        lines.append("NEEDS SOURCE CLARIFICATION (identity incomplete — not conflicts, not agreement):")
+        for c in cmp_result["needs_source_clarification"][:5]:
+            val_str = "  vs  ".join(
+                f"{v['source']}: {v['raw']}" for v in c.get("values", [])[:3]
+            )
+            lines.append(
+                f"  · {c['entity_label']}: {val_str}  [missing: {', '.join(c.get('missing', []))}]"
+            )
+
+    if cmp_result.get("not_comparable"):
+        lines.append("NOT COMPARABLE (different identities, not conflicts):")
+        for n in cmp_result["not_comparable"][:5]:
+            lines.append(
+                f"  · {n['entity_label']}: {len(n.get('identities', []))} identities"
+            )
+
     if cmp_result.get("timeline_reconciliation"):
         lines.append("TIMELINE RECONCILIATION (needs clarification, not conflicts):")
         for t in cmp_result["timeline_reconciliation"][:5]:
@@ -1028,6 +1081,15 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
 
     if cmp_result.get("agreement_status") == "not_established":
         lines.append("AGREEMENT: not established — zero conflicts here means no detected disagreement")
+
+    if cmp_result.get("agreement_status") == "aligned":
+        if n_clarify or n_notcmp:
+            lines.append(
+                f"AGREEMENT: aligned — with {n_clarify + n_notcmp} unresolved comparison(s); "
+                "'aligned' covers only the compared claims, not these"
+            )
+        else:
+            lines.append("AGREEMENT: aligned — no unresolved comparisons")
 
     if cmp_result.get("crude_note"):
         lines.append("NOTE:      WTI ≠ Brent — different benchmarks, not comparable")

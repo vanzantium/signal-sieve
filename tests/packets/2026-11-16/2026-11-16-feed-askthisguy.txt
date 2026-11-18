@@ -1,0 +1,70 @@
+Source: Ask This Guy — "Qwen 4 27B vs Qwen 3.8 27B: What to Expect from Qwen 4" (Qwen4-Max sections)
+Fetched 2026-11-16 via browser.open (https://www.askthisguy.com/en/blog/qwen-4-vs-qwen-3-8-27b/) — excerpt, lines 0–164 of the page; the Qwen4-Max material is in full, the later Qwen 27B comparison sections are cut.
+
+Qwen4-Max shipped on November 16 without weights; Qwen 4 27B is still not out. What is confirmed, and how Qwen 3.8 27B compares with Mistral models.
+
+On November 16, Alibaba launched Qwen4-Max, the first model of the Qwen 4 generation, after a five-day subscription-only preview. It is a 2,400-billion-parameter MoE, available only through Alibaba's API: its weights are not published. Artificial Analysis gives it 43 points, nine more than its predecessor. In the same announcement, Alibaba promises that smaller open-weight Qwen 4 models will be released "soon", with no size or date. Qwen 4 27B, for its part, is still not on Hugging Face as of November 16. The model you can actually download today is Qwen 3.8 27B, released on August 14 under the Apache 2.0 license.
+
+Some context: Qwen (short for Tongyi Qianwen) is the AI model family of Alibaba, the Chinese e-commerce giant (Taobao, Tmall, AliExpress), which is also China's largest high-end cloud provider. Launched in April 2023, Qwen has released most of its models as open weights since August 2023: anyone can download them and run them on their own machines. The range goes from under one billion parameters to 2,400 billion.
+
+## Qwen 4 and Qwen 4 27B: what is actually confirmed?
+
+Qwen4-Max, a closed model, and a promise of small open ones. The name "Qwen4-27B" has been circulating since Alibaba's Apsara conference, but it comes from keynote slides and write-ups, not from the official press release, and the Qwen4-Max announcement does not mention it either. Where things stand on November 16, 2026:
+
+| Information | Status |
+| --- | --- |
+| Qwen 4 is in training | Confirmed by Alibaba on September 22, with a roadmap to Qwen 4.5 and Qwen 5 |
+| A Max, Plus, Flash and 27B lineup | Names seen on slides, absent from Alibaba's written statements; only Qwen4-Max is out |
+| "Qwen4 next week" | Attributed to the CTO on October 29 by a single attendee, unconfirmed; the week passed with no release |
+| "The becoming begins" teaser | Posted on November 6 by the official Qwen account, with no model name, date or size |
+| Qwen4-Max preview | Announced by Qwen on November 11; open until November 25 through Alibaba Cloud's Token Plan subscription |
+| Qwen4-Max release | On November 16, via API and in Alibaba's apps; MoE with 2,400 billion parameters, 71 billion active; weights not published |
+| Smaller open-weight Qwen 4 models | Promised "soon" by Alibaba on November 16, with no size, date or license |
+| Weights on Hugging Face | No Qwen 4 repository in the Qwen organization |
+| License, actual size, architecture of Qwen 4 27B | Unknown |
+
+### Qwen4-Max: what Alibaba released on November 16
+
+Qwen4-Max is an MoE with 2,400 billion parameters, 71 billion of them active per token, against 95 billion for Qwen 3.8 Max. It reads text, images and video, and its documentation lists a one-million-token context window, up to 262,144 output tokens including thinking, and three thinking effort levels: low, high by default, and xhigh. It costs $1.50 per million input tokens and $4.50 per million output tokens in Singapore, against $2 and $6 for Qwen 3.8 Max, and slightly less in Alibaba Cloud's other regions, Frankfurt included. It cannot be fine-tuned or self-deployed: it only runs on Alibaba's servers, through its API and in its apps (QwenWork, QwenStudio, Qoder).
+
+Alibaba's main pitch is efficiency. On Work360, an in-house benchmark of professional tasks, Qwen4-Max uses 24 to 35% fewer tokens than its predecessor depending on the effort level, and the average cost per task goes from $4.43 to $1.67, 62% less. Qwen's blog post compares it on sixteen benchmarks with Qwen 3.8 Max, Claude Opus 5.5, GPT-6.1 Sol, GPT-6 Astra and Kimi K3.1: it comes first on four, including DeepSWE for coding (75.7 against 74.2 for Opus 5.5), but trails far behind on others, such as Terminal-Bench 4.0 (48.5 against 59.6 for Opus 5.5 and 67.2 for Kimi K3.1) or ProgramBench (31.5 against 65.0 for Opus 5.5). Some of these scores come from third-party leaderboards (Artificial Analysis, Arena, Vals), the rest from the vendor's own runs.
+
+Independent measurements came quickly. Artificial Analysis gives Qwen4-Max 43 points on its index, against 34 for Qwen 3.8 Max, but Kimi K3.1 Pro, Moonshot's open-weight model, stays ahead at 46. Qwen4-Max is still verbose: 127 million tokens produced to complete the index, against a median of 78.6 million, about as many as Qwen 3.8 27B. On Code Arena's web development leaderboard, it enters 6th, with a provisional score, behind the best models from Anthropic, Google and OpenAI.
+
+The preview opened on November 11 remains available through the Token Plan subscription until November 25, then will be retired. If you want weights, Qwen4-Max changes nothing: it is a closed model, like Qwen 3.7 Max and Plus before it. The previous generation had raised hopes: Qwen 3.8 2.4T-A95B, the open version of Qwen 3.8 Max, came out on August 12, nine days after the API model. This time, Alibaba only promises weights for the smaller models.
+
+### Qwen 4 27B release date: what precedent suggests
+
+Soon, if Alibaba is taken at its word. Its November 16 announcement says that "open-weight, smaller-scale models from the Qwen4 series will soon be released to developers worldwide", without naming a size. Qwen's blog post adds that they will be "built on the same lineage and trained with the same generation of techniques", in other words on the same architecture as Qwen4-Max. Precedent points the same way: Qwen 3.8 Max came out on August 3, and Qwen 3.8 27B followed about ten days later. On the code side, a "qwen4-27b" showed up in late October in a change to compute kernels for Intel GPUs, in a third-party repository, which quickly prompted a support request on llama.cpp, without confirming a date. On Manifold, a play-money prediction market, forecasters gave on November 16 a 78% chance of Qwen 4 weights on Hugging Face by November 25, up from 62% two days earlier. A bet is not an announcement.
+
+In the meantime, Hugging Face already lists 51 repositories named "Qwen4-27B", created by about ten third-party accounts since November 9. The ones we opened contain only a description file, with no weights at all: they are names reserved ahead of the release. Alibaba publishes its models in the Qwen organization, and nowhere else.
+
+## The Qwen 27B family: three versions in six months
+
+Qwen 27B is the mid-sized model of Alibaba's Qwen family: a dense 27-billion-parameter language model, multimodal (text, image, video), released as open weights under the Apache 2.0 license. It went through three versions in 2026, all built on the same architecture:
+
+| Version | Release | License | Cumulative Hugging Face downloads as of Nov 14 |
+| --- | --- | --- | --- |
+| Qwen 3.5 27B | February 2026 | Apache 2.0 | 22.6 million |
+| Qwen 3.6 27B | April 22, 2026 | Apache 2.0 | 31.2 million |
+| Qwen 3.8 27B | August 14, 2026 | Apache 2.0 | 22.5 million, 7.0 million in the last 30 days |
+
+There was no Qwen 3.7 27B. The 3.7 generation, Qwen 3.7 Max in May and Qwen 3.7 Plus on June 1, shipped as API-only models, with no published weights: no Qwen 3.7 repository exists on Hugging Face. Trackers expected open 27B and 35B versions, which never came. The open 27B went straight from version 3.6 to 3.8. The previous dense model of this size from Qwen was Qwen 3 32B, released in April 2025 with a conventional architecture.
+
+Timeline of Qwen releases in 2026: Dense 27B with open weights: Qwen 3.5 27B on February 24, Qwen 3.6 27B on April 22 (two months later), Qwen 3.8 27B on August 14 (nearly four months later). Other open models: Qwen 3.5 397B on February 16, Qwen 3.6 35B-A3B on April 16, Qwen 3.8 2.4T under a custom license on August 12, Qwen 3.8 Flash-Next, a Qwen 4 preview, on August 26. Closed models: Qwen 3.7 Max on May 20, Qwen 3.7 Plus on June 1, Qwen 3.8 Max on August 3, Qwen4-Max on November 16 after a preview opened on the 11th. Qwen 4: announced as in training on September 22, "Qwen4 next week" reported on October 29, official teaser on November 6.
+
+Since Qwen 3.5, these models have been hybrid: of the network's 64 layers, three out of four use so-called linear attention (Gated DeltaNet), which is lighter on memory, and one in four uses full attention. The Qwen 3.8 27B model card lists a 262,144-token context window, extendable to one million, and a thinking mode that is on by default and can be turned off, with three effort levels: low, medium and xhigh. Qwen describes it as a "compact, deployment-friendly dense model".
+
+### What Qwen claims
+
+From one version to the next, Qwen keeps the architecture and changes the training, and the announced gains are large. A selection of the scores published by Qwen: Bar chart of scores published by Qwen, out of 100, for Qwen 3.6 27B, Qwen 3.8 27B and Opus 4.6 Max: SWE-bench Pro 53.5, 61.7 and 53.4; Terminal Bench 2.1 63.4, 73.0 and 78.2; OSWorld-Verified 63.9, 84.3 and 72.7; IFBench 69.1, 79.5 and 62.5; GPQA Diamond 87.8, 89.2 and 91.3; HLE 24.0, 30.8 and 40.0.
+
+These are the vendor's own numbers, measured with its own settings, and several coding benchmarks, SWE-bench Pro among them, were run with Claude Code as the harness. The "Qwen 3.8 27B beats Opus" headlines on YouTube overstate it: it beats Opus on SWE-bench Pro in this table, not on Terminal Bench or HLE.
+
+The most interesting number is in the previous table, the one for Qwen 3.6 27B. Qwen compares its dense model with its own MoE from the previous generation, Qwen 3.5 397B, fifteen times heavier. On SWE-bench Verified, the dense model scores 77.2 against 76.2; on Terminal-Bench 2.0, 59.3 against 52.5. On agentic coding, a dense 27B matched a 397-billion-parameter MoE. The big model keeps the edge on knowledge (MMLU-Pro, GPQA, HLE), which makes sense: knowledge is stored in parameters, and it has fifteen times more of them.
+
+### What independent benchmarks show
+
+Artificial Analysis runs the same battery of tests on every model. On version 4.3.2 of its index, recorded on October 21, Qwen 3.8 27B scored 34 points, against 21 for Qwen 3.6 27B, 18 for Qwen 3.5 397B, 15 for Google's Gemma 4 31B and 12 for OpenAI's gpt-oss-120b. The site has since moved to version 5.0.1, on a harsher scale: Qwen 3.8 27B now sits at 20 points, while the median for comparable models is 8. In the November 14 leaderboard, that is about five times the score of Gemma 4 31B or gpt-oss-120b, at 4 points each.
+
+The same page shows the downside. To complete the index, Qwen 3.8 27B produced 128 million tokens, against a median of 77.7 million, and took 44.1 minutes per task against 14.9. The model thinks at length before it answers. At 42 tokens per second on Alibaba's API, you pay for that in waiting time, and in money when you are billed per output token.

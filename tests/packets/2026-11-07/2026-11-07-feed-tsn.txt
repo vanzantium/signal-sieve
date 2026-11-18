@@ -1,0 +1,25 @@
+COVERAGE — TSN Media, "GPT-6 Cyber: OpenAI's Aligned Cybersecurity Model", updated 2026-11-07T08:53:19+00:00
+URL: https://tsnmedia.org/gpt-6-cyber/
+
+OpenAI has introduced GPT-6 Cyber, a cybersecurity-focused model trained to find and validate exploitable vulnerabilities while staying inside researcher-set scope, the company said on 5 November 2026. @OpenAI announced the launch on X the same day, pointing to the blog and saying the model is available to select Daybreak Red customers with access expanding over time.
+
+A companion research post published a day earlier, "A thousand fewer paths to root", describes an autonomous discovery-to-patch pipeline that OpenAI says used an upcoming cyber model — identified in the GPT-6 Cyber launch as this one — to reproduce 1,724 Linux kernel vulnerabilities and generate 948 working local privilege escalation exploits in a controlled research environment, at $1,213,430 in API credits ($1,279 per LPE exploit by OpenAI's arithmetic).
+
+Every score and count below is OpenAI's own claim unless another source is named.
+
+In brief:
+- GPT-6 Cyber: OpenAI says 48.5% on ExploitGym (vs 32.1% for GPT-5.6 Cyber); Critical under its Preparedness Framework (up from High).
+- Linux pipeline (OpenAI): 1,724 vulns reproduced, 948 LPE exploits, 304 critical findings disclosed with candidate patches; 81 novel high-severity Firefox issues (Mozilla classification).
+- Access: API and Codex for select approved Daybreak Red customers first; access expanding over time, OpenAI says.
+
+On ExploitGym, which OpenAI describes as testing whether models can exploit a specified vulnerability, GPT-6 Cyber scores 48.5%, up from 32.1% for GPT-5.6 Cyber — a gap OpenAI calls about 16 percentage points and a 51% relative improvement. In an alignment evaluation, OpenAI says the model avoided exploiting out-of-scope services in 99.93% of tests without its deployment prompt and 100% with that prompt. Under OpenAI's Preparedness Framework, the company classifies GPT-6 Cyber as Critical in cybersecurity, up from High for GPT-5.6 Cyber.
+
+OpenAI also reports a new RemoteExploitBench (known vulns in apps such as GitLab, PostgreSQL and Jenkins in a controlled environment) where GPT-6 Cyber completed 95% of tasks while GPT-6 Astra with Daybreak Blue refused 100%. A separate web penetration eval without source code is said to have reached 40.3% recall versus 32.0% for GPT-6 Astra. Full settings are pointed to a system card on OpenAI's site.
+
+The Linux pipeline post adds operational colour: Scout and Analyst agents narrowed audit targets, dynamic validation in isolated VMs reproduced about three-quarters of candidate findings, and ExploitDev agents produced LPE exploits against a stock desktop threat model with standard mitigations enabled. OpenAI says it disclosed 304 critical findings to maintainers with candidate patches and is working through further reports with Patch the Planet partners. Separately, the GPT-6 Cyber blog says a vulnerability research campaign produced evidence for 81 novel Firefox vulnerabilities that Mozilla classified as high severity, with Mozilla releasing fixes for many after disclosure with proposed patches.
+
+OpenAI's public pitch is defensive: find flaws, validate impact, propose patches, expand Daybreak grants ($1 billion Daybreak for Frontline Defenders) and a Daybreak Red for Critical Infrastructure track for approved defenders, with Dragos cited for OT lab evaluations that informed safeguards.
+
+Treat ExploitGym, RemoteExploitBench and the 948 LPE figure as OpenAI measuring OpenAI inside environments it designed. The Linux work is explicitly a controlled research environment; the dollar-per-exploit maths and hypothetical Pwn2Own bounty multiples are OpenAI's framing of defensive ROI, not market prices. What independent parties have said on the record in OpenAI's posts is narrower: Mozilla's Brian Grinstead is quoted praising high-severity finds and fixes after prior frontier-model hardening, and several vendor CISOs/CTOs supply customer blurbs.
+
+Watch next for wider Daybreak Red availability, maintainer uptake of the Linux patches, and any third-party replication of the ExploitGym numbers. Until those arrive, GPT-6 Cyber is a gated cybersecurity model whose performance story is told in OpenAI's own words — useful for defenders who get access, opaque to everyone else.
