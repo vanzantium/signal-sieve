@@ -106,13 +106,18 @@ URGENCY = re.compile(
     re.I,
 )
 EVIDENCE_MARKERS = re.compile(
-    r"\b(dataset|raw data|methodology|sample size|n\s*=|confidence interval|"
+    r"\b(dataset|raw data|benchmarks?|methodology|sample size|n\s*=|confidence interval|"
     r"p[- ]value|appendix|supplementary|replication|trial|control group|"
     r"filing|court record|transcript|audit|minutes|invoice|receipt|photo metadata|"
     r"source code|commit|log file|primary source|full report|downloaded data|"
     r"direct quote|interview transcript|official record|SEC|10-Q|EDGAR|limitations section)\b",
     re.I,
 )
+# v1.8.8 r2: "benchmark" joins the evidence markers — in this system's
+# domain (model releases) a benchmark citation with a number nearby is
+# anchored evidence, and news articles carry almost none of the
+# research-grade markers above, so their evidence_breakdown read 0/0
+# (run-17 gap 10, Digital Trends).
 # Specificity: numbers-with-units, ISO dates, named dates, times, proper-noun pairs, URLs, n=
 SPECIFICITY = re.compile(
     r"(https?://\S+|\b\d{4}-\d{2}-\d{2}\b|\b\w+ \d{1,2}, \d{4}\b|\b\d{1,2}:\d{2}\b|"
@@ -409,7 +414,7 @@ def _infer_source_type_from_signals(text: str, source_url: str = "") -> str:
     """Infer source type from text content and URL signals only."""
     t = text.lower()
     host = urlparse(source_url).netloc.lower() if source_url else ""
-    if any(h in host for h in SOCIAL_HOSTS):
+    if any(_host_is_or_subdomain(host, h) for h in SOCIAL_HOSTS):
         return "social"
     if any(host.endswith(d) for d in INSTITUTIONAL_DOMAINS):
         return "official"
@@ -417,7 +422,11 @@ def _infer_source_type_from_signals(text: str, source_url: str = "") -> str:
         return "primary"
     if _ANONYMOUS_CUES_RE.search(t):
         return "anonymous"
-    if any(x in t for x in ["press release", "we are excited to announce"]):
+    # v1.8.8 r2: "press release" counts only in the header zone (the
+    # first 600 chars) — a document's FORM is declared up top. A body
+    # mention ("not from the official press release") is reporting
+    # about a press release, not being one (run-17 gap 9b).
+    if "press release" in t[:600] or "we are excited to announce" in t:
         return "official"
     # Hosted release artifact (Arch review 2026-11-05, v1.8.1): a
     # vendor's own release artifact hosted on a third-party page (a
@@ -565,6 +574,55 @@ def _first_party_announcement(text: str) -> Tuple[bool, str]:
     if _ANNOUNCEMENT_RE.search(text):
         return True, "first-person announcement voice about the publisher's own action"
     return False, "no first-person announcement voice found"
+
+
+def _own_domain_exemption(text: str, source_url: str = "") -> Tuple[bool, str]:
+    """Own-domain corroboration for a declared high-trust type (v1.8.8
+    r2, run-17 gap 2): the feed header's declared publisher matches
+    the source URL's own domain. The Qwen primary feed is a
+    third-person summary of the vendor's own blog post, hosted on
+    qwen.ai — the summary's voice is the pipeline's, not the source's,
+    and the domain corroborates the declaration. The same vetoes as
+    the announcement exemption apply (a third-party attribution or
+    secondary-reporting cue anywhere in the text voids it), and it
+    does NOT grant anchor status — it only stops the genre downgrade.
+    The match is exact on the org's first slug token ("Qwen Team" ↔
+    qwen.ai); a slug that merely contains the label never matches.
+    A namespace match is a consistency check between two
+    caller-supplied values, never verified ownership (see Q2b) — so
+    this exemption holds the declared type, it never upgrades an
+    inferred one.
+    Returns (fires, reason)."""
+    if not source_url:
+        return False, "no source URL: own-domain check cannot run"
+    org = _header_claimed_org(text)
+    if not org:
+        return False, "no feed-declared publisher in the text header"
+    low = text.lower()
+    for cue in _THIRD_PARTY_ATTRIBUTION_CUES:
+        if _cue_in_text(cue, low):
+            return False, f"third-party attribution cue present ({cue!r})"
+    for cue in _SECONDARY_REPORTING_CUES:
+        if _cue_in_text(cue, low):
+            return False, f"secondary-reporting cue present ({cue!r})"
+    host = urlparse(source_url).netloc.lower()
+    labels = host.split(".")
+    if len(labels) >= 3 and labels[-2] in _SECOND_LEVEL_SUFFIXES:
+        domain_label = labels[-3]
+    elif len(labels) >= 2:
+        domain_label = labels[-2]
+    else:
+        return False, f"source URL host {host!r} has no registrable-domain label"
+    first_token = org.split()[0] if org.split() else ""
+    if first_token and first_token == domain_label:
+        return True, (
+            f"feed-declared publisher {org!r} matches the source URL's "
+            f"own domain ({host})"
+        )
+    return False, (
+        f"feed-declared publisher {org!r} does not match the source "
+        f"URL's own domain ({host})"
+    )
 
 
 def _speaks_as_originator(text: str) -> bool:
@@ -715,8 +773,11 @@ _RESERVED_ORG_LABELS = {
 # ADK" — ADK is the product, not the publisher) stops the capture at
 # "Google"; a leading all-caps word ("AI Weekly", "TSN Media") still
 # counts. SECONDARY / TERTIARY headers name the publisher the same way.
+# v1.8.8, Fix 2: the pipeline's other header form, "Source: <Org> —
+# <Title>" (the Nov 11 feeds' first line), names the publisher the
+# same way — a feed header is a feed header whichever label it wears.
 _HEADER_ORG_RE = re.compile(
-    r"^(?:PRIMARY SOURCE|PRIMARY COMPANION|SECONDARY(?: SOURCE)?|TERTIARY(?: SOURCE)?|COVERAGE)\s*[\u2014\-]\s*"
+    r"^(?:(?:PRIMARY SOURCE|PRIMARY COMPANION|SECONDARY(?: SOURCE)?|TERTIARY(?: SOURCE)?|COVERAGE)\s*[\u2014\-]\s*|[Ss]ource:\s*)"
     r"([A-Z][A-Za-z0-9_-]{1,30}(?: +[A-Z][a-z][A-Za-z0-9_-]{0,29}){0,3})",
     re.M,
 )
@@ -745,6 +806,87 @@ def _header_claimed_org(text: str) -> str:
     if org in _RESERVED_ORG_LABELS or org.split()[0] in _RESERVED_ORG_LABELS:
         return ""
     return org
+
+
+def _feed_declared_org(source_name: str) -> str:
+    """The publisher the CALLER declares in source_name ("<Publisher> —
+    <Title>"). Returns the lowercased slug or "" when source_name names
+    no publisher. The org capture reuses the feed header's own rule
+    (up to four capitalized words, Titlecase continuations, so a
+    trailing all-caps product token stops the capture) and requires
+    the " — " / " - " separator before a title: a bare name ("Google"),
+    a placeholder ("unknown"), or a fixture label ("fixture: ...")
+    declares no publisher and falls through to the text header.
+    Reserved feed labels can never be minted as an org."""
+    if not source_name:
+        return ""
+    name = source_name.strip()
+    if name.lower() in ("unknown",):
+        return ""
+    m = re.match(
+        r"([A-Z][A-Za-z0-9_-]{1,30}(?: +[A-Z][a-z][A-Za-z0-9_-]{0,29}){0,3})"
+        r"\s*[—\-]\s*\S",
+        name,
+    )
+    if not m:
+        return ""
+    org = m.group(1).lower()
+    if org in _RESERVED_ORG_LABELS or org.split()[0] in _RESERVED_ORG_LABELS:
+        return ""
+    return org
+
+
+def _mentioned_orgs(text: str) -> List[str]:
+    """Every org the document's authorship constructions name, in
+    first-mention order, lowercased slugs. These are MENTIONED
+    organizations, not the claimed publisher: a word found in the
+    body ('cloud', 'antigravity', 'aa') must never become the claimed
+    publisher, but it is still worth recording that the document
+    mentions it. The same tightenings as _extract_claimed_org apply
+    (stopwords, reserved labels, the "by X" byline gate, the model
+    token skip on "X's"), so the list never resurrects a misread the
+    tightenings exist to kill — it just collects every construction's
+    orgs instead of returning one winner."""
+    unquoted = re.sub(r'"[^"\n]{0,200}"|“[^”\n]{0,200}”', " ", text)
+    seen: List[str] = []
+    # The loose release-verb construction (index 5) is excluded: it
+    # is a last-resort CLAIM heuristic — any capitalized word before a
+    # release verb — so enumerating it lists mostly non-orgs
+    # ("because", "today", "in"). Patterns 0–4 are authorship
+    # constructions with enough structure (Team / Labs / by / X's /
+    # Copyright) to enumerate as mentioned orgs.
+    for idx, pat in enumerate(_CLAIMED_ORG_RES):
+        if idx == 5:
+            continue
+        for m in pat.finditer(unquoted):
+            org = m.group(1)
+            if len(org) < 2 or org.lower() in _ORG_STOPWORDS:
+                continue
+            if org.lower() in _RESERVED_ORG_LABELS:
+                continue
+            if idx == 2:
+                if m.start() > 600 and not _RELEASE_VERB_RE.search(
+                        unquoted[m.end():m.end() + 60]):
+                    continue
+            if idx == 3:
+                prev = _MODEL_TOKEN_RE.search(unquoted[:m.start()])
+                if prev:
+                    tok = prev.group(1)
+                    if tok[0].isupper() and any(c.isdigit() for c in tok):
+                        continue
+            slug = org.lower()
+            if slug not in seen:
+                seen.append(slug)
+    return seen
+
+
+def _byline_name(text: str) -> Optional[str]:
+    """The individual byline ("by X") when one sits in the byline
+    zone (the first ~600 chars), as written. None when the document
+    names no byline there — a mid-document "by X" is a mention, not a
+    byline. A person's name, not an org slug, so the case is kept."""
+    m = _CLAIMED_ORG_RES[2].search(text[:600])
+    return m.group(1) if m else None
 
 # Authorship constructions that name a releaser/author, in priority
 # order. The captured group is the claimed org. Patterns are
@@ -1117,6 +1259,26 @@ def resolve_source_type_v2(
             "inferred_primary_gated": gated,
         }
 
+    # Own-domain exemption (v1.8.8 r2, run-17 gap 2): a declared
+    # high-trust type on a document whose feed-declared publisher
+    # matches the source URL's own domain keeps its type even when
+    # the genre signals an article and the text carries no
+    # first-person announcement voice. Same vetoes as above; does NOT
+    # grant anchor status — custody, manipulation, and rumor gates
+    # still apply downstream; it only stops the genre downgrade.
+    if (
+        declared_norm in _HIGH_TRUST_TYPES
+        and genre in _ARTICLE_GENRES
+        and not fires
+    ):
+        own_fires, own_reason = _own_domain_exemption(text, source_url)
+        if own_fires:
+            return declared_norm, declared_norm, inferred, max(confidence, 0.70), False, {
+                "first_party_exemption": True,
+                "exemption_reason": own_reason,
+                "inferred_primary_gated": gated,
+            }
+
     # Declared high-trust but genre signals article/secondary → mismatch
     if declared_norm in _HIGH_TRUST_TYPES and genre in _ARTICLE_GENRES:
         confidence = min(confidence, 0.40)
@@ -1149,10 +1311,13 @@ def url_custody_bonus(text: str) -> Tuple[float, Dict[str, int]]:
         if any(host.endswith(d) for d in INSTITUTIONAL_DOMAINS):
             counts["institutional"] += 1
             bonus += 0.04
-        elif any(h in host for h in ACADEMIC_HOSTS):
+        # v1.8.8 r2: exact host / subdomain match, not substring —
+        # "x.com" inside "wixx.com" counted a Reuters wire as social
+        # (run-17 gap 9a, same class as the v1.8.4 academic-host fix).
+        elif any(_host_is_or_subdomain(host, h) for h in ACADEMIC_HOSTS):
             counts["academic"] += 1
             bonus += 0.05
-        elif any(h in host for h in SOCIAL_HOSTS):
+        elif any(_host_is_or_subdomain(host, h) for h in SOCIAL_HOSTS):
             counts["social"] += 1
             bonus -= 0.01
         else:
@@ -1995,7 +2160,32 @@ def analyze(
     # namespace are recorded as separate facts, so a reader can see
     # the claim, the location, and the (absent) verification side by
     # side instead of the system forcing them to agree.
-    claimed_publisher_org = _extract_claimed_org(raw)
+    # v1.8.8, Fix 2: the claimed publisher comes from the feed's own
+    # declaration, never from a word mined out of the body. The
+    # caller-declared source_name ("<Publisher> — <Title>") is read
+    # first; then the pipeline feed header in the text (PRIMARY SOURCE
+    # / COVERAGE / Source: ...); otherwise the publisher is UNKNOWN,
+    # with a reason — a body mention ('cloud', 'antigravity', 'aa')
+    # must never become the claimed publisher. The body-mined orgs
+    # are still recorded separately, as mentioned organizations, and
+    # the byline is its own field. (The hosted-artifact candidacy
+    # below still uses _extract_claimed_org's authorship
+    # constructions — that is a different question, about whether the
+    # document behaves like a first-party artifact, not who published
+    # it — and is untouched.)
+    feed_declared_publisher = _feed_declared_org(source_name)
+    header_publisher_org = _header_claimed_org(raw)
+    if feed_declared_publisher:
+        claimed_publisher_org = feed_declared_publisher
+        claimed_publisher_org_reason = "feed-declared publisher (source name)"
+    elif header_publisher_org:
+        claimed_publisher_org = header_publisher_org
+        claimed_publisher_org_reason = "feed header in text"
+    else:
+        claimed_publisher_org = None
+        claimed_publisher_org_reason = "no publisher declared in feed header or source name"
+    organizations_mentioned = _mentioned_orgs(raw)
+    byline = _byline_name(raw)
     hosting_namespace = _hosting_namespace(source_url)
     if _EXTRACT_AVAILABLE:
         custody_breakdown = build_custody_breakdown(
@@ -2008,6 +2198,10 @@ def analyze(
             hosted_ownership_reason=hosted_reason,
             source_url_provenance=source_url_provenance,
             claimed_publisher_org=claimed_publisher_org,
+            claimed_publisher_org_reason=claimed_publisher_org_reason,
+            feed_declared_publisher=feed_declared_publisher or None,
+            organizations_mentioned=organizations_mentioned,
+            byline=byline,
             hosting_namespace=hosting_namespace,
             speaks_as_originator=_speaks_as_originator(raw),
         )
