@@ -70,12 +70,15 @@ def _route(text: str, declared: Optional[str]) -> Dict:
     }
 
 
-def _score(text: str, pack) -> Dict[str, float]:
+def _score(text: str, pack, strong_custody: bool = False) -> Dict[str, float]:
     structural = extract_structural(text)
     if pack is None:
         return {
             "anchor_density": structural.anchor_density,
-            "has_strong_custody": float(structural.has_strong_custody),
+            # A caller-supplied custody hint (e.g. the main analyzer's
+            # verified first-party custody) counts even when the
+            # structural layer has nothing to read — see analyze().
+            "has_strong_custody": float(structural.has_strong_custody or strong_custody),
             "certainty_bias": 0.0,
             "hype": 0.0,
             "attack": 0.0,
@@ -104,7 +107,16 @@ def _score(text: str, pack) -> Dict[str, float]:
     gap = max(0.0, certainty_rate - evidence_strength / sentence_count)
     return {
         "anchor_density": structural.anchor_density,
-        "has_strong_custody": float(structural.has_strong_custody),
+        # v1.8.9 (run-20 gap 1): the structural layer only counts
+        # inline DOIs/URLs, so a clean first-party announcement with
+        # no inline URL scores has_strong_custody False and the
+        # verdict falls through to treat_as_lead for no lexical
+        # reason. A caller that has verified first-party custody
+        # (announcement voice / own-domain, with the usual vetoes)
+        # passes strong_custody=True; the hint supplies the custody
+        # the text cannot show, it never overrides a lexical risk
+        # finding (a real gap/hype/attack score still decides).
+        "has_strong_custody": float(structural.has_strong_custody or strong_custody),
         "certainty_bias": round(min(1.0, certainty_rate), 3),
         "hype": round(min(1.0, len(hype) / sentence_count), 3),
         "attack": round(min(1.0, len(attack) / sentence_count), 3),
@@ -137,10 +149,28 @@ def _verdict(scores: Dict[str, float], mode: str) -> str:
     return action
 
 
-def analyze(text: str, language: Optional[str] = None) -> Dict:
+def analyze(text: str, language: Optional[str] = None,
+            strong_custody: bool = False) -> Dict:
     route = _route(text, language)
     pack = _load_pack(route["lexicon"]) if route["lexicon"] else None
-    scores = _score(text, pack)
+    # The custody hint applies at document level only: a paragraph
+    # never inherits it (a hype paragraph inside an announcement
+    # must still be flaggable on its own).
+    scores = _score(text, pack, strong_custody=False)
+    if strong_custody:
+        # v1.8.9 (run-20 gap 1): a caller-verified first-party hint
+        # only counts when the text itself carries checkable
+        # evidence — at least two anchored evidence markers. A thin
+        # announcement (0–1 anchored markers: the pinned
+        # primary_blog_announcement / contraction / model-release
+        # fixtures) stays at lead however clean its voice; a full
+        # announcement (the run-20 primary: 8 anchored markers) earns
+        # verify_primary from the language layer and stops being
+        # downgraded for no lexical reason. The bar is a heuristic
+        # calibrated on those two clusters (0–1 vs 8), not a
+        # principled constant — flag it if it ever bites.
+        if scores["evidence_anchored"] >= 2:
+            scores = _score(text, pack, strong_custody=True)
     action = _verdict(scores, route["mode"])
 
     worst = None

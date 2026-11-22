@@ -116,6 +116,7 @@
   <div class="curl-card">
     <h3>Cross-document comparison — detect numeric conflicts across sources</h3>
     <div class="endpoint-tag">POST /api/v1/compare</div>
+    <p>Each document can contain up to 12,000 characters in public mode or 50,000 in keyed mode. An oversized document returns HTTP 413 and its index.</p>
     <pre class="curl">curl -s -X POST https://signal-sieve.onrender.com/api/v1/compare \
   -H "Content-Type: application/json" \
   -d '{

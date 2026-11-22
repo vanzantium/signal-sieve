@@ -1,0 +1,41 @@
+PRIMARY SOURCE — Google ADK (Agent Development Kit) Python release v2.14.0
+URL: https://github.com/google/adk-python/releases/tag/v2.14.0
+Release heading date: 2026-11-04. GitHub API published_at: 2026-11-07T00:58:18Z.
+Fetched 2026-11-08 via browser.open (page text, lines 0-98; the remainder is the full Features/Bug Fixes changelog).
+
+## 2.14.0 (2026-11-04)
+
+### Highlights
+
+This release graduates execution environments, A2A, evaluation, and core runtime modules from experimental, adds multi-run evaluation and semantic tool argument matching, adds Microsoft Teams and OpenAI Decisions integrations, and makes long multi-turn workflows faster.
+
+- Execution environments and sandboxes:
+  - BaseEnvironment, LocalEnvironment, EnvironmentToolset, DaytonaEnvironment, and E2BEnvironment are now stable.
+  - BaseEnvironment.read_file_stream streams files in chunks across LocalEnvironment, E2BEnvironment, and DaytonaEnvironment so ReadFileTool reads line ranges without loading the whole file into memory.
+  - AgentEngineEnvironment reads and writes large files in chunks and reports commands over 570 seconds as timed out before the service deadline.
+  - ContainerCodeExecutor supports input and output files, and RunSkillScriptTool runs skill scripts from validated paths and arguments instead of a shell command string.
+- Evaluation:
+  - MultiRunConfig (adk eval --num_runs) and --parallelism run each eval case multiple times concurrently and combine scores or pass rates across runs.
+  - AgentEvaluator accepts a BaseNode or App built at runtime, and --eval_storage_uri stores eval files outside a read-only agents_dir.
+  - ToolArgsMatcher compares tool call arguments in evaluations and EnvironmentSimulation using exact, case-insensitive, numeric-tolerance, or LLM-backed semantic checks.
+- A2A: The A2A integration is now stable, and adk generate_agent_card builds an A2A agent card from the CLI.
+- Integrations:
+  - TeamsRunner connects an ADK agent to Microsoft Teams chats and channels.
+  - OpenAIDecisionsClassifier classifies workflow and tool-gating questions with the OpenAI Decisions API.
+  - MongoDbMemoryService adds vector search retrieval (retrieval_mode="vector" or "auto") and TTL expiration (memory_ttl_days).
+- Stable APIs: 26 auth, environment, app, CLI and cache modules, 16 toolset and integration features, and the mature evaluation and user simulation classes graduate from experimental, so you can build on them without experimental warnings.
+- Workflow performance: Long multi-turn workflows run faster and use less memory; a 30-node workflow's 200-turn run is 23% faster with 9% lower peak memory.
+
+#### Breaking changes
+
+- Enum tool arguments arrive as members: FunctionTool parameters annotated Enum, Optional[Enum], or list[Enum] now receive enum members instead of the raw strings the model sent.
+- VertexAiSessionService.create_session accepts only session config options: extra keyword arguments are limited to display_name, ttl, expire_time, and labels (plus camelCase aliases). Other Sessions API config keys now raise ValueError.
+- RunSkillScriptTool no longer takes `command` in environment mode: with a SkillToolset environment, the model now passes args, short_options, and positional_args instead of a free-form shell command, scripts run from the skill directory instead of the environment working directory, and only .py, .sh, and .bash scripts are supported. Calls, eval sets, or prompts that pass `command` now return INVALID_ARGUMENTS. This closes a hole that let a prompt-injected model run arbitrary shell commands.
+
+#### Behavior changes
+
+- /run_live now closes the socket with code 1007 on a malformed frame and 1000 when the run ends.
+- OpenAPI tool query parameters now follow their declared style and explode.
+- DatabaseSessionService creates new PostgreSQL JSON columns as json instead of jsonb.
+- New teams and fsspec extras, and the e2b floor is raised to 2.29.5.
+- The 16 toolset and integration features promoted to stable are always available: ADK_DISABLE_<FEATURE>, override_feature_enabled(<FEATURE>, False), and --disable_features no longer block them.

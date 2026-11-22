@@ -1,0 +1,9 @@
+The new model scores 61 on the benchmark and completes most tasks in under 20 minutes, according to the release notes published on November 18, 2026. Reviewers praised its speed and its lower cost per task, and noted the long context window of 1 million tokens.
+
+The release includes new safety evaluations and a public changelog. The study was funded by the National Science Foundation. In internal testing, the model completed 39.0% of tasks on the SWE-sweep harness and 12.8% on the mini-SWE harness. Analysts expect the model to compete with other frontier systems on agentic tasks, and early benchmarks show strong results on coding and research.
+
+The company says more capability reports will follow next month. Independent testers confirmed the headline scores within a few points, and pricing starts at two dollars per million input tokens, with output at ten dollars per million tokens.
+
+The model was trained on a large corpus and evaluated by three independent labs. The labs reported consistent results across the test suites, with no material discrepancies in the published figures. The full evaluation report is linked in the release notes.
+
+All rights reserved. Contact the editor.

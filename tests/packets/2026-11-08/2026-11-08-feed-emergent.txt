@@ -1,0 +1,17 @@
+COVERAGE — Emergent, "Google ADK 2.14 Adds Teams Integration and Multi-Run Evals"
+URL: https://emergent.sh/news/google-adk-2-14-adds-teams-integration-multi
+Published: 2026-11-08T03:34:41.000Z. Fetched 2026-11-08.
+
+Google released ADK 2.14.0 on November 7, graduating 26 auth, environment, and runtime modules to stable status. New TeamsRunner integration embeds ADK agents in Microsoft Teams, while MultiRunConfig enables concurrent evaluation replays.
+
+Google released Agent Development Kit 2.14.0 on November 7, 2026, graduating 26 experimental modules to stable status and introducing Microsoft Teams integration for ADK agents. The release brings concurrent evaluation capabilities, semantic tool argument matching, and performance improvements that Google claims deliver 23% faster execution for long multi-turn workflows.
+
+Release Date and Availability: Officially released on November 7, 2026. The release transitions execution environments, A2A (Agent-to-Agent), evaluation classes, and core runtime modules from experimental to stable status. Sixteen toolset integrations also graduated alongside the 26 auth, environment, app, CLI, and cache modules.
+
+Microsoft Teams Integration and Multi-Run Evaluation: The headline feature is TeamsRunner, a new component that embeds ADK agents directly inside Microsoft Teams. Alongside the Teams runner, Google introduced MultiRunConfig, which executes each evaluation case multiple times concurrently. This enables developers to test agent reliability across varied execution conditions and catch non-deterministic failures that single-run tests miss. A new ToolArgsMatcher component adds flexible argument validation with four modes: exact matching, case-insensitive comparison, numeric tolerance checks, and LLM-backed semantic validation.
+
+Performance Claims and Benchmarks: Google states that a 30-node workflow executing 200 turns runs 23% faster with 9% lower peak memory consumption in ADK 2.14.0. The release notes provide no baseline hardware specification, no comparison against a named prior version, and no second benchmark to validate the claim across different workflow patterns. The performance improvement targets long multi-agent system interactions where agents chain multiple reasoning steps, though developers will need to validate gains on their own infrastructure.
+
+Breaking Changes and Additional Features: Three breaking changes accompany the release. Enum tool arguments now arrive as enum members rather than raw strings. VertexAiSessionService now raises ValueError when passed unrecognized keyword arguments. RunSkillScriptTool no longer accepts a free-form command parameter, restricting execution to validated Python, shell, and Bash scripts from a designated skill directory to close a potential security gap. The release also ships MongoDbMemoryService with vector-search retrieval and TTL expiration, plus an adk generate_agent_card CLI command that builds A2A agent cards from the command line. OpenAI Decisions third-party integration is included, though the release notes provide no detail on its functionality.
+
+What This Means: ADK 2.14.0 represents Google's most mature agent development release to date, with 42 components and features moving from experimental to stable in a single update. The claimed performance improvements are noteworthy but lack sufficient benchmark detail for independent validation, leaving teams to measure gains on their own workloads before committing to the upgrade.

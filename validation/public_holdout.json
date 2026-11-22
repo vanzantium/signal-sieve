@@ -1,0 +1,5 @@
+[
+ {"source":"https://www.bls.gov/news.release/archives/empsit_09062024.htm","text":"Total nonfarm payroll employment increased by 142,000 in August, and the unemployment rate changed little at 4.2 percent","targets":[[142000,"payroll","jobs"],[4.2,"unemployment","percent"]]},
+ {"source":"https://www.bls.gov/news.release/archives/cpi_09112024.htm","text":"The food index increased 0.1 percent in August, after rising 0.2 percent in July.","targets":[[0.1,"food","percent"],[0.2,"food","percent"]]},
+ {"source":"https://www.bls.gov/news.release/archives/ppi_09122024.htm","text":"The Producer Price Index for final demand increased 0.2 percent in August, seasonally adjusted","targets":[[0.2,"producer","percent"]]}
+]

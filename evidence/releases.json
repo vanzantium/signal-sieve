@@ -1,0 +1,44 @@
+[
+  {
+    "release_id": "empsit_09062024",
+    "publisher": "U.S. Bureau of Labor Statistics",
+    "release_date": "2024-09-06",
+    "url": "https://www.bls.gov/news.release/archives/empsit_09062024.htm",
+    "html_sha256": "a28f52593fd82c6d73ba18af91ccb45edc33a42a5c1346ef99ab0eb142e66a3b",
+    "passage": "Total nonfarm payroll employment increased by 142,000 in August, and the unemployment rate changed little at 4.2 percent"
+  },
+  {
+    "release_id": "cpi_09112024",
+    "publisher": "U.S. Bureau of Labor Statistics",
+    "release_date": "2024-09-11",
+    "url": "https://www.bls.gov/news.release/archives/cpi_09112024.htm",
+    "html_sha256": "bcbad97fb429961ff48c20980098f6df96a8befeda5c1035c0e20a1db5249f00",
+    "passage": "The food index increased 0.1 percent in August, after rising 0.2 percent in July."
+  },
+  {
+    "release_id": "ppi_09122024",
+    "publisher": "U.S. Bureau of Labor Statistics",
+    "release_date": "2024-09-12",
+    "url": "https://www.bls.gov/news.release/archives/ppi_09122024.htm",
+    "html_sha256": "ccf7fd9be80b7326a0a447e0cd9d041c1f314872d9a706c6c3781023b85b4885",
+    "passage": "The Producer Price Index for final demand increased 0.2 percent in August, seasonally adjusted"
+  },
+  {
+    "release_id": "cpi_10102024",
+    "publisher": "U.S. Bureau of Labor Statistics",
+    "release_date": "2024-10-10",
+    "url": "https://www.bls.gov/news.release/archives/cpi_10102024.htm",
+    "html_sha256": "1a2b2f4cf19e0eb95f4b408e77f699363a0986ff227a540daabc260cf06e3a27",
+    "passage": "The food index increased 0.4 percent in September, after rising 0.1 percent in August."
+  },
+  {
+    "release_id": "empsit_10042024",
+    "publisher": "U.S. Bureau of Labor Statistics",
+    "release_date": "2024-10-04",
+    "url": "https://www.bls.gov/news.release/archives/empsit_10042024.htm",
+    "html_sha256": "811f6d5fb21761f5155f5c0996c0ca43e1b2660517e143aaf223bac343d1fbb3",
+    "passage": "the change for August was revised up by 17,000, from +142,000 to +159,000.",
+    "revision_of": "empsit_09062024",
+    "revision_scope": "August 2024 nonfarm payroll employment change"
+  }
+]

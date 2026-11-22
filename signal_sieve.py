@@ -243,7 +243,15 @@ _ARTICLE_GENRES = {
 # disagreements (e.g. declared PRIMARY, inferred SECONDARY) stay flagged.
 _FORM_TYPES = {"article", "news_article", "generic_article"}
 _ROLE_TYPES = {"secondary", "secondary_market_article", "news_article"}
-# All financial secondary genres — shared logic (coherence flag, verify cap)
+# Genres a first-party announcement overrides (v1.8.9, run-20 gap 5):
+# the genre detector keys on $ amounts and index names and cannot see
+# voice, so a vendor announcement lands as a market snapshot or news
+# article. Regulatory filings, X posts and social posts keep their own
+# genre — the override is about article-form secondary genres only.
+_GENRE_OVERRIDE_ANNOUNCEMENT = {
+    "financial_market_snapshot", "global_macro_market_update",
+    "investment_strategy_commentary", "news_article", "opinion_article",
+}
 _FINANCIAL_SECONDARY_GENRES = {
     "financial_market_snapshot", "global_macro_market_update",
     "investment_strategy_commentary",
@@ -342,6 +350,9 @@ class Assessment:
     evidence_shape: Dict = field(default_factory=dict)
     signal_brief: Dict = field(default_factory=dict)
     x_post_assessment: Dict = field(default_factory=dict)
+    # v1.8.9 (run-20 gap 11b): footer sponsorship / funding disclosure
+    # (kind/org/snippet) — a directional-bias signal, recorded not scored.
+    sponsorship_disclosure: Dict = field(default_factory=dict)
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -614,6 +625,14 @@ def _own_domain_exemption(text: str, source_url: str = "") -> Tuple[bool, str]:
     else:
         return False, f"source URL host {host!r} has no registrable-domain label"
     first_token = org.split()[0] if org.split() else ""
+    # v1.8.9: brand-TLD host (blog.google) — the registrable domain
+    # is the last label itself ("google"); labels[-2] is a subdomain
+    # ("blog"), so the match below would compare the org against the
+    # wrong label. Only the last label ever equals the org token here,
+    # so this narrows nothing: a normal host (google.com) is
+    # untouched ("com" never equals an org slug).
+    if first_token and labels[-1] == first_token:
+        domain_label = labels[-1]
     if first_token and first_token == domain_label:
         return True, (
             f"feed-declared publisher {org!r} matches the source URL's "
@@ -864,6 +883,8 @@ def _mentioned_orgs(text: str) -> List[str]:
                 continue
             if org.lower() in _RESERVED_ORG_LABELS:
                 continue
+            if idx == 2 and _by_date(m, unquoted):
+                continue
             if idx == 2:
                 if m.start() > 600 and not _RELEASE_VERB_RE.search(
                         unquoted[m.end():m.end() + 60]):
@@ -880,13 +901,28 @@ def _mentioned_orgs(text: str) -> List[str]:
     return seen
 
 
+def _by_date(match, text):
+    month = match.group(1).casefold()
+    if month not in ("january", "february", "march", "april", "may", "june", "july",
+                     "august", "september", "october", "november", "december"):
+        return False
+    # RC6: a bare month in the "by X" slot is a date when what follows
+    # is a day number, punctuation, end of string — or a line break.
+    # "By December" alone on its line, body text following
+    # ("By December\n\n<body>"), is the realistic byline shape, not a
+    # person. Only spaces/tabs are consumed before the terminator, so
+    # a newline stays visible to the match; "By May Chen" still reads
+    # as a name (a same-line word follows the month).
+    return bool(re.match(r"[ \t]*(?:\d|[,.;:!?]|$|\r\n?|\n)", text[match.end():]))
+
+
 def _byline_name(text: str) -> Optional[str]:
     """The individual byline ("by X") when one sits in the byline
     zone (the first ~600 chars), as written. None when the document
     names no byline there — a mid-document "by X" is a mention, not a
     byline. A person's name, not an org slug, so the case is kept."""
-    m = _CLAIMED_ORG_RES[2].search(text[:600])
-    return m.group(1) if m else None
+    return next((m.group(1) for m in _CLAIMED_ORG_RES[2].finditer(text[:600])
+                 if not _by_date(m, text)), None)
 
 # Authorship constructions that name a releaser/author, in priority
 # order. The captured group is the claimed org. Patterns are
@@ -951,6 +987,8 @@ def _extract_claimed_org(text: str) -> str:
             if len(org) < 2 or org.lower() in _ORG_STOPWORDS:
                 continue
             if org.lower() in _RESERVED_ORG_LABELS:
+                continue
+            if idx == 2 and _by_date(m, unquoted):
                 continue
             if idx == 2:
                 # "by X": byline zone, or a release/authorship verb
@@ -1518,6 +1556,32 @@ def _table_list_split(text: str) -> Tuple[float, str]:
     return share, prose
 
 
+def _coherence_components(words: list, sentences: list) -> tuple:
+    """The three coherence components, each 0..1: (connective density,
+    lexical diversity, sentence-length variance). Kept separate from
+    _score_internal_coherence so the flag site can tell WHY a score
+    is low — a doc that is varied and non-uniform but uses no essay
+    connectives is not "repetitive or logically unconnected"."""
+    if len(words) < 10:
+        return (0.50, 0.50, 0.50)
+    text_lower = " ".join(words).lower()
+    connective_hits = len(CONNECTIVES.findall(text_lower))
+    connective_score = min(connective_hits / max(len(sentences), 1) / 0.25, 1.0)
+    lex_div = len(set(w.lower() for w in words)) / len(words)
+    diversity_score = min(max((lex_div - 0.25) / 0.40, 0.0), 1.0)
+    if len(sentences) >= 3:
+        lens = [len(s.split()) for s in sentences if s.strip()]
+        if len(lens) >= 3:
+            mean_l = sum(lens) / len(lens)
+            cv = (sum((l - mean_l) ** 2 for l in lens) / len(lens)) ** 0.5 / max(mean_l, 1)
+            variance_score = min(cv / 0.5, 1.0)
+        else:
+            variance_score = 0.5
+    else:
+        variance_score = 0.5
+    return (connective_score, diversity_score, variance_score)
+
+
 def _score_internal_coherence(words: list, sentences: list) -> float:
     """Estimate internal logical coherence of the text (CFT-inspired).
 
@@ -1537,31 +1601,99 @@ def _score_internal_coherence(words: list, sentences: list) -> float:
     if len(words) < 10:
         return 0.50
 
-    text_lower = " ".join(words).lower()
+    conn, div, var = _coherence_components(words, sentences)
+    return round(clamp(0.45 * conn + 0.40 * div + 0.15 * var), 3)
 
-    # 1. Logical connective density
-    connective_hits = len(CONNECTIVES.findall(text_lower))
-    # 0.25 connectives/sentence is a healthy rate for structured writing
-    connective_score = min(connective_hits / max(len(sentences), 1) / 0.25, 1.0)
 
-    # 2. Lexical diversity  (unique / total word tokens)
-    lex_div = len(set(w.lower() for w in words)) / len(words)
-    # <0.25 = very repetitive, 0.65+ = highly diverse
-    diversity_score = min(max((lex_div - 0.25) / 0.40, 0.0), 1.0)
+# ---------------------------------------------------------------------------
+# Footer sponsorship / financial-involvement disclosure (v1.8.9, run-20
+# gap 11b): most news runs a "Sponsored by X" / "Paid for by Y" /
+# "funded by Z" line at the foot of the article. That line is a
+# directional-bias signal, not informational certainty — the piece's
+# claims are positioned, not neutral. The disclosure is RECORDED
+# (kind/org/snippet) and flagged; kinds sponsored / paid_partnership /
+# funded also earn the +0.12 bias_risk bump (follow-on 2026-11-19 —
+# Taylor's yes). The two new kinds are footer-gated by design (see
+# analyze()): "paid partnership" and "funded by" are ordinary
+# reporting phrases in the body, so only a footer disclosure — the
+# piece disclosing its own financial involvement — earns the bump.
+# "partnership" (unpaid) and "affiliate" kinds do not bump.
+# Footer zone: the last 15% of characters, at least the final 200
+# characters so a short article still has a real footer window; a
+# text under 400 characters counts whole (short-form posts put the
+# disclosure anywhere). First matching pattern wins. Org capture is
+# best-effort (capitalized run after by/with); the snippet always
+# carries the full matched text.
+# ---------------------------------------------------------------------------
 
-    # 3. Sentence length variance (coefficient of variation)
-    if len(sentences) >= 3:
-        lens = [len(s.split()) for s in sentences if s.strip()]
-        if len(lens) >= 3:
-            mean_l = sum(lens) / len(lens)
-            cv = (sum((l - mean_l) ** 2 for l in lens) / len(lens)) ** 0.5 / max(mean_l, 1)
-            variance_score = min(cv / 0.5, 1.0)
-        else:
-            variance_score = 0.5
+# Org capture: a capitalized run of 1-4 words. A dot counts only when
+# followed by a word character ("U.S. Steel"), never as a sentence
+# end ("Acme Corp. All rights reserved" stops at "Corp").
+_ORG_WORD = r"(?:(?:[A-Z]\.){2,}|[A-Z][\w&'-]*)"
+_ORG = "(" + _ORG_WORD + r"(?:[ \t]+(?:and[ \t]+|&[ \t]+)?" + _ORG_WORD + "){0,3})"
+
+_SPONSORSHIP_PATTERNS = [
+    ("sponsored", re.compile(
+        r"(?i:\bsponsored\s+(?:content\s+)?by\s+(?:the\s+)?)" + _ORG)),
+    ("sponsored", re.compile(
+        r"(?i:\bthis\s+(?:article|post|story|piece|video)\s+is\s+sponsored\b)")),
+    ("sponsored", re.compile(r"(?i:\bsponsored\s+(?:content|post|article)\b)")),
+    ("paid_partnership", re.compile(
+        r"(?i:\bpaid\s+partnership\s+(?:with\s+(?:the\s+)?)?)" + _ORG)),
+    ("paid_partnership", re.compile(r"(?i:\bpaid\s+partnership\b)")),
+    ("paid_partnership", re.compile(
+        r"(?i:\bpaid\s+for\s+by\s+(?:the\s+)?)" + _ORG)),
+    ("partnership", re.compile(
+        r"(?i:\bin\s+partnership\s+with\s+(?:the\s+)?)" + _ORG)),
+    ("funded", re.compile(
+        r"(?i:\b(?:funded|funding\s+provided)\s+(?:in\s+part\s+)?by\s+(?:the\s+)?)"
+        + _ORG)),
+    ("affiliate", re.compile(r"(?i:\baffiliate\s+links?\b)")),
+    ("affiliate", re.compile(r"(?i:\bwe\s+may\s+earn\s+(?:a\s+)?commission\b)")),
+    ("affiliate", re.compile(r"(?i:\bas\s+an\s+affiliate\b)")),
+    ("affiliate", re.compile(r"(?i:\baffiliate\s+disclosure\b)")),
+]
+
+
+def _footer_sponsorship_disclosure(raw: str) -> Dict:
+    """Scan the footer zone for a sponsorship / funding disclosure.
+
+    Returns {"present", "kind", "org", "snippet", "zone"} — kind is one
+    of sponsored / paid_partnership / partnership / funded / affiliate.
+    A "sponsored" mention in the body is NOT a footer disclosure; only
+    the footer zone counts.
+    """
+    text = raw or ""
+    if not text.strip():
+        return {"present": False, "kind": "", "org": "",
+                "snippet": "", "zone": "footer"}
+    if len(text) <= 400:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        explicit = re.match(r"^(?:disclosure|funding|sponsorship)\s*:", lines[-1], re.I)
+        if len(lines) < 2 and not explicit:
+            return {"present": False, "kind": "", "org": "", "snippet": "", "zone": "unknown"}
+        footer = re.sub(r"^(?:disclosure|funding|sponsorship)\s*:\s*", "", lines[-1], flags=re.I)
     else:
-        variance_score = 0.5
-
-    return round(clamp(0.45 * connective_score + 0.40 * diversity_score + 0.15 * variance_score), 3)
+        footer_len = max(int(len(text) * 0.15), 200)
+        footer = text[-footer_len:]
+    for kind, pattern in _SPONSORSHIP_PATTERNS:
+        m = pattern.search(footer)
+        if not m or (len(text) <= 400 and m.start() != 0):
+            continue
+        if len(text) <= 400:
+            tail = footer[m.end():].strip()
+            if not re.fullmatch(r"[.!]?(?:\s*All rights reserved[.]?)?", tail, re.I):
+                continue
+        org = ""
+        if m.lastindex and m.group(1):
+            org = m.group(1).strip().rstrip(".,;:")
+        snippet = m.group(0).strip()
+        if len(snippet) > 120:
+            snippet = snippet[:117].rstrip() + "..."
+        return {"present": True, "kind": kind, "org": org,
+                "snippet": snippet, "zone": "footer"}
+    return {"present": False, "kind": "", "org": "",
+            "snippet": "", "zone": "footer"}
 
 
 # ---------------------------------------------------------------------------
@@ -1599,7 +1731,25 @@ def analyze(
     language_assessment: Dict = {}
     language_routing: Dict = {}
     if _I18N_AVAILABLE:
-        language_assessment = analyze_language_layer(raw, language=language)
+        # v1.8.9 (run-20 gap 1): the language layer is custody-blind —
+        # its has_strong_custody counts only inline DOIs/URLs in the
+        # text, so a clean first-party announcement with no inline URL
+        # always scores False and its verdict falls through to
+        # treat_as_lead, downgrading a custody-verified anchor for no
+        # lexical reason (four runs in a row). Pass the same
+        # first-party evidence the source-type resolution uses below
+        # (announcement voice, or own-domain corroboration, with the
+        # same third-party / secondary-reporting vetoes) as a custody
+        # hint. It tells the language layer what the main analyzer
+        # already knows; it never overrides a lexical risk finding,
+        # and a laundered or impersonating primary never earns it
+        # (the vetoes and the domain match fail for those).
+        _fp_fires, _fp_reason = _first_party_announcement(raw)
+        _own_fires, _own_reason = _own_domain_exemption(raw, source_url)
+        language_assessment = analyze_language_layer(
+            raw, language=language,
+            strong_custody=bool(_fp_fires or _own_fires),
+        )
         language_routing = language_assessment.get("language", {})
 
     if language_routing.get("mode") == "structural_only":
@@ -1637,6 +1787,21 @@ def analyze(
     source_genre = "generic_article"
     if _EXTRACT_AVAILABLE:
         source_genre = detect_genre(normalized, source_url)
+    # v1.8.9 (run-20 gap 5): a first-party announcement is a release,
+    # not a market snapshot — the detector keys on $ amounts and
+    # benchmark-index names and cannot see voice, so the run-20
+    # primary landed as financial_market_snapshot and the Nov 18 one
+    # as news_article. The announcement check carries the
+    # third-party / secondary-reporting vetoes, so a news article
+    # quoting announcement voice keeps its genre. official_release
+    # maps to "official" (high-trust) and is outside _ARTICLE_GENRES,
+    # so the override also stops the genre-mismatch downgrade for a
+    # declared primary — the same outcome the first-party exemption
+    # already produces downstream, stated at the genre instead.
+    if source_genre in _GENRE_OVERRIDE_ANNOUNCEMENT:
+        _ann_fires, _ann_reason = _first_party_announcement(raw)
+        if _ann_fires:
+            source_genre = "official_release"
     x_post_assessment: Dict = {}
     if source_genre == "x_news_post":
         x_post_assessment = assess_x_news_post(raw, source_url)
@@ -1662,6 +1827,21 @@ def analyze(
             "exemption_reason": _first_party_announcement(raw)[1],
             "inferred_primary_gated": gated_fallback,
         }
+
+    from statistical_evidence import LABELS, passage_evidence, statistics
+    economic_claims = statistics(raw)
+    receipt = passage_evidence(raw, source_url, declared_st, economic_claims, source_name,
+                               unresolved_genre=genre_mismatch and word_count <= 100)
+    if receipt:
+        effective_st = receipt["document_type"]
+        inferred_st = effective_st
+        genre_mismatch = False
+        resolve_notes["inferred_primary_gated"] = False
+        if receipt["status"] == "matched_release_excerpt":
+            source_genre = "official_release"
+            st_confidence = 0.95
+        elif effective_st == "unknown":
+            st_confidence = 0.40
 
     # Hosted-artifact ownership separation (Arch objection 2026-11-05,
     # v1.8.2; Arch notes 2026-11-06, v1.8.3): Q1 (behaves like a
@@ -1728,7 +1908,22 @@ def analyze(
     custody_gap = max(0.0, 0.55 - custody)
     evidence_gap = max(0.0, 0.40 - evidence)
     certainty_bias = clamp(cert_density * 1.3 - hedge_density * 0.5 + custody_gap * 0.4 + evidence_gap * 0.3)
-    bias_risk = clamp(bias_hits * 0.07 + attack_hits * 0.05 + (0.12 if "sponsored" in raw.lower() else 0.0))
+    # v1.8.9 (run-20 gap 11b + follow-on): footer sponsorship /
+    # funding disclosure. The +0.12 bias bump fires for the word
+    # "sponsored" anywhere in the text (pinned) AND for a footer
+    # disclosure of kind sponsored / paid_partnership / funded. The
+    # two new kinds are footer-gated by design: "paid partnership"
+    # and "funded by" are ordinary reporting phrases in the body
+    # ("funded by the National Science Foundation"), so only a footer
+    # disclosure — the piece disclosing its own financial involvement
+    # — earns the bump. "partnership" (unpaid) and "affiliate" kinds
+    # do not bump.
+    sponsorship = _footer_sponsorship_disclosure(raw)
+    _disclosure_bump = sponsorship["kind"] in (
+        "sponsored", "paid_partnership", "funded")
+    bias_risk = clamp(bias_hits * 0.07 + attack_hits * 0.05
+                      + (0.12 if ("sponsored" in raw.lower()
+                                  or _disclosure_bump) else 0.0))
     manipulation_risk = clamp(pressure * 0.48 + certainty_bias * 0.32 + bias_risk * 0.20)
     noise = clamp(0.18 + filler_load + pressure * 0.32 + (1.0 - signal) * 0.30)
     overall = clamp(signal * 0.40 + custody * 0.35 + evidence * 0.15 + attribution * 0.05 - manipulation_risk * 0.30 - certainty_bias * 0.15)
@@ -1765,6 +1960,7 @@ def analyze(
         _coh_sentences = sentence_split(_prose_only)
         internal_coherence = _score_internal_coherence(_coh_words, _coh_sentences)
     else:
+        _coh_words, _coh_sentences = words, sentences
         internal_coherence = _score_internal_coherence(words, sentences)
     certainty_to_evidence_gap = certainty_bias - evidence
     band_width = 0.10 + (manipulation_risk + certainty_bias) * 0.12
@@ -1785,6 +1981,16 @@ def analyze(
         flags.append("Evidence terms appear without nearby numbers, links, or names: unanchored, not anchored.")
     if bias_risk > 0.35:
         flags.append("Possible incentive/bias language: inspect who benefits.")
+    if sponsorship["present"]:
+        # v1.8.9 (run-20 gap 11b): a footer disclosure is a
+        # directional-bias signal vs informational certainty — the
+        # piece's claims are positioned, not neutral information.
+        _sp_org = f" — {sponsorship['org']}" if sponsorship["org"] else ""
+        flags.append(
+            f"Sponsorship disclosure in footer ({sponsorship['kind']}{_sp_org}): "
+            "a paid/financial involvement is disclosed — directional-bias "
+            "signal; weigh the claims as positioned, not as neutral information."
+        )
     if attack_hits:
         flags.append("Attack/dehumanizing language detected: may be identity bait, not analysis.")
     if word_count < 50:
@@ -1796,9 +2002,19 @@ def analyze(
                 "signal mode for this genre — use evidence shape and signal brief instead."
             )
         elif table_list_share <= 0.40:
-            # v1.8.7, B2: suppressed when table/list lines dominate the
-            # doc (>40%) — a list/table is not by itself contradictory.
-            flags.append("Low internal coherence: argument appears repetitive or logically unconnected.")
+            # v1.8.9 (run-20 gap 13): the flag's wording is "repetitive
+            # or logically unconnected" — but the score's connective
+            # component (45% weight) expects essay prose, and
+            # benchmark reporting uses almost no logical connectives
+            # (AlphaSignal: 0 in 63 sentences, score 0.28) while
+            # staying varied and non-uniform. When diversity and
+            # sentence variance are both healthy, the low score is
+            # connective-driven, not repetition-driven, and the flag
+            # is a false positive — suppress it. A genuinely
+            # repetitive or uniform doc still flags.
+            _conn, _div, _var = _coherence_components(_coh_words, _coh_sentences)
+            if _div < 0.35 or _var < 0.35:
+                flags.append("Low internal coherence: argument appears repetitive or logically unconnected.")
     # Phase 1.6: house-view and forward-looking flags for investment strategy commentary
     if source_genre == "investment_strategy_commentary":
         flags.append(
@@ -1847,7 +2063,7 @@ def analyze(
             "Candidate primary source with uncertain ownership — treat as "
             "a lead pending verification."
         )
-    if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and not genre_mismatch:
+    if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and not genre_mismatch and not receipt:
         flags.append(
             f"Declared source_type='{declared_st}' contradicts inferred='{inferred_st}'. "
             f"Custody is discounted for the contradiction; treat as a lead pending verification."
@@ -1981,6 +2197,12 @@ def analyze(
                 f"Language-aware guardrail selected '{language_action}' based on "
                 "declared-language lexical or paragraph-level risk."
             )
+
+    if receipt:
+        flags.append(LABELS[receipt["status"]])
+        if recommended_action in ("verify_primary", "use_as_anchor"):
+            recommended_action = "treat_as_lead"
+            verdict = LABELS[receipt["status"]]
 
     # Dynamic follow-up questions. Two-stage custody-aware (Arch
     # review 2026-11-05, v1.8.1): a VERIFIED primary gets dates/scope/
@@ -2232,6 +2454,25 @@ def analyze(
         _origin_note = "primary origin claimed, not independently authenticated"
         verdict = f"{verdict} ({_origin_note})"
         triage_summary = f"{triage_summary} {_origin_note.capitalize()}."
+    if sponsorship["present"]:
+        # v1.8.9 (run-20 gap 11b): footer disclosure rides the triage
+        # summary as a directional-bias note, not a score.
+        _sp_org = f" ({sponsorship['org']})" if sponsorship["org"] else ""
+        triage_summary = (
+            f"{triage_summary} Sponsorship disclosure in the footer "
+            f"({sponsorship['kind']}{_sp_org}): directional-bias signal — "
+            "the piece's claims are positioned, not neutral information."
+        )
+
+    if receipt:
+        triage_summary += " " + LABELS[receipt["status"]]
+        custody_breakdown["passage_status"] = receipt["status"]
+        if receipt["status"] == "matched_release_excerpt":
+            custody_breakdown["primary_source_present"] = True
+            custody_breakdown["primary_origin_status"] = "matched_publisher_passage"
+        elif effective_st == "unknown":
+            custody_breakdown["primary_source_present"] = False
+            custody_breakdown["primary_origin_status"] = "unresolved"
 
     assessment = Assessment(
         source_name=source_name,
@@ -2272,8 +2513,30 @@ def analyze(
         evidence_shape=evidence_shape_data,
         signal_brief=signal_brief,
         x_post_assessment=x_post_assessment,
+        sponsorship_disclosure=sponsorship,
     )
-    return asdict(assessment)
+    result = asdict(assessment)
+    if economic_claims:
+        result["statistical_claims"] = economic_claims
+    if receipt:
+        result["passage_evidence"] = {**receipt, "summary": LABELS[receipt["status"]]}
+    try:
+        from signal_compare import headline_diagnostic
+    except ModuleNotFoundError as exc:
+        if exc.name != "signal_compare":
+            raise
+        headline = []
+    else:
+        headline = headline_diagnostic(raw, source_name)
+    if headline:
+        result["headline_weighting"] = headline
+    if _disclosure_bump or "sponsored" in raw.lower():
+        result["bias_adjustment"] = {
+            "trigger": "footer_disclosure" if _disclosure_bump else "legacy_sponsored_text_marker",
+            "bias_risk_increment_before_clipping": 0.12,
+            "maximum_unrounded_overall_decrease_from_increment": 0.0072,
+            "calibration": "provisional; caps and rounding affect displayed scores"}
+    return result
 
 # ---------------------------------------------------------------------------
 # Pretty report (CLI / human)
@@ -2365,6 +2628,10 @@ def pretty_report(result: Dict) -> str:
                     lines.append(f"  • {item}")
 
     lines.append("\n" + result["ai_instruction"])
+    if result.get("passage_evidence"):
+        lines.append(result["passage_evidence"]["summary"])
+    for row in result.get("statistical_claims", []):
+        lines.append(f"{row['measure']} · {row['kind']} · {row['value']} {row['unit']} · {row['period'] or 'period unspecified'}")
     return "\n".join(lines)
 
 # ---------------------------------------------------------------------------

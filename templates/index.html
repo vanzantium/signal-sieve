@@ -195,6 +195,21 @@
             {% endfor %}
           </div>
 
+          {% if result.passage_evidence %}
+          <section><h3>Passage origin</h3><p>{{ result.passage_evidence.summary }}</p>
+          {% for r in result.passage_evidence.matched_releases %}<p><a href="{{ r.url }}">{{ r.publisher }} · {{ r.release_date }}</a></p>{% if r.revision_of %}<p>Revises {{ r.revision_scope }} in {{ r.revision_of }}.</p>{% endif %}{% endfor %}
+          {% for r in result.passage_evidence.later_revisions %}<p>Later revision · <a href="{{ r.url }}">{{ r.release_date }}</a> · {{ r.revision_scope }}</p>{% endfor %}
+          {% if result.passage_evidence.comparison_release %}{% for diff in result.passage_evidence.differing_numbers %}<p>Submitted <strong>{{ diff.submitted }}</strong> · Publisher <strong>{{ diff.publisher }}</strong></p>{% endfor %}<p>Publisher wording</p><blockquote>{{ result.passage_evidence.comparison_release.passage }}</blockquote><a href="{{ result.passage_evidence.comparison_release.url }}">Open dated release</a>{% endif %}</section>
+          {% endif %}
+          {% if result.statistical_claims %}<section><h3>Figures in the submitted text</h3>
+          <ul>{% for row in result.statistical_claims %}<li>{{ row.measure }} · {{ row.kind }} {% if row.direction %}{{ row.direction }}{% endif %} · {{ row.value }} {{ row.unit }} · {{ row.period or 'period unspecified' }}{% if row.assertion == 'review' %} · wording needs review{% endif %}<br><q>{{ row.span }}</q></li>{% endfor %}</ul></section>{% endif %}
+          {% if result.headline_weighting %}
+          <details open><summary>What the headline emphasizes</summary>
+            {% for item in result.headline_weighting %}<p>{{ item.headline }}</p>
+            <ul>{% for figure in item.figures %}<li>{{ figure.entity_label }} · {{ figure.value }}{{ figure.unit }}</li>{% endfor %}</ul>{% endfor %}
+            <p class="mini">These figures describe the publisher’s framing. Check the body and the original measurements for support.</p>
+          </details>
+          {% endif %}
           {% if result.flags %}
           <details open><summary>Flags</summary>
             <ul>{% for f in result.flags %}<li>{{ f }}</li>{% endfor %}</ul>

@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.8.8"
+ANALYSIS_VERSION  = "v1.8.9-first-party-rc6"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -310,7 +310,7 @@ _SAFE_USE = (
 
 
 def _make_request_id() -> str:
-    date = datetime.datetime.utcnow().strftime("%Y%m%d")
+    date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d")
     uid  = uuid.uuid4().hex[:8]
     return f"req_{date}_{uid}"
 
@@ -345,6 +345,13 @@ def _check_api_key() -> "str | None":
     return None
 
 
+def _source_fields_valid(payload):
+    return isinstance(payload, dict) and all(
+        isinstance(payload.get(key, ""), str)
+        for key in ("source_url", "source_name", "source_type")
+    )
+
+
 def _validate_analyze_payload(payload: dict, request_id: str, max_chars: int | None = None):
     """Return (text, source_type, source_name, source_url, error_response).
 
@@ -353,6 +360,11 @@ def _validate_analyze_payload(payload: dict, request_id: str, max_chars: int | N
     """
     if max_chars is None:
         max_chars = MAX_TEXT_CHARS
+
+    if not _source_fields_valid(payload):
+        return None, None, None, None, _api_error(
+            400, "bad_request", "Send a JSON object with text-valued source fields.", request_id
+        )
 
     text        = payload.get("text", "")
     source_url  = (payload.get("source_url",  "") or "")[:MAX_SOURCE_URL_CHARS]
@@ -386,15 +398,12 @@ _OPENAPI_SPEC: dict = {
         "title":       "Signal Sieve API",
         "version":     API_VERSION,
         "description": (
-            "Heuristic receipt clerk for signal/noise triage — a cautious triage tool, "
-            "not a fact-checker. Checks whether text has usable signal-quality markers: named sources, "
+            "Heuristic receipt clerk for signal/noise triage. "
+            "Checks whether text has usable signal-quality markers: named sources, "
             "numeric anchors, source custody, attribution, caveats, pressure language. "
             "NOT a fact-checker. overall_confidence measures signal markers, not truth. "
-            "Held-out claim recall was 9/20 (45%) on the 2026-11-13 packet — not remeasured "
-            "on this build — and the comparison feature improves precision of a subset of numeric "
-            "comparisons, not completeness or truth certification. An 'aligned' comparison covers "
-            "only the claims actually compared: check has_unresolved_comparisons before reading "
-            "it as full agreement.\n\n"
+            "An 'aligned' comparison covers only the claims actually compared: check "
+            "has_unresolved_comparisons before reading it as full agreement.\n\n"
             "**Interactive docs:** `/docs` (Swagger UI)\n"
             "**OpenAPI spec:** `/openapi.json` and `/.well-known/openapi.json`\n\n"
             "**Endpoints:**\n"
@@ -468,6 +477,8 @@ _OPENAPI_SPEC: dict = {
             "AnalyzeResponse": {
                 "type": "object",
                 "properties": {
+                    "statistical_claims": {"type":"array","items":{"type":"object"}, "description":"Submitted economic measures, levels or changes, periods and verbatim spans."},
+                    "passage_evidence": {"type":"object","description":"Passage-scoped comparison with dated publisher records. See status, matched_releases, comparison_release and later_revisions."},
                     "kind":              {"type": "string", "enum": ["heuristic_signal_triage"]},
                     "verdict_type":      {"type": "string", "enum": ["signal_shape_assessment"]},
                     "safe_use":          {"type": "string"},
@@ -589,6 +600,18 @@ _OPENAPI_SPEC: dict = {
                             "engagement-bait markers."
                         ),
                     },
+                    "sponsorship_disclosure": {
+                        "type": "object",
+                        "description": (
+                            "Present only when a sponsorship / funding disclosure "
+                            "is found in the footer zone (last 15% of the text). "
+                            "Keys: present, kind (sponsored / paid_partnership / "
+                            "partnership / funded / affiliate), org (best-effort "
+                            "name after by/with, may be empty), snippet, zone. "
+                            "A directional-bias signal, never a score: the piece's "
+                            "claims are positioned, not neutral information."
+                        ),
+                    },
                     "missing_receipts": {
                         "type": "array", "items": {"type": "string"},
                         "description": "Top-level shortcut to signal_brief.missing_receipts.",
@@ -675,13 +698,16 @@ _OPENAPI_SPEC: dict = {
                                         "description": "One pricing key held several stated identities (model / era / thinking level); values compare only within an identity. Each value carries its source span."},
                     "needs_source_clarification": {"type": "array", "items": {"type": "object"},
                                         "description": ("Values differ beyond tolerance but the claim identity is incomplete "
-                                                        "(subject, era or measurement condition unstated, or unequal, on some side). "
+                                                        "(subject or measurement condition unstated, or unequal, on some side). "
                                                         "Never a conflict and never an alignment; 'missing' names the gaps and each "
                                                         "value carries its identity and source span.")},
+                    "temporal_comparisons": {"type": "array", "items": {"type": "object"},
+                                        "description": ("Before→after pairs: the two values are endpoints of one trajectory "
+                                                        "described in a source span (e.g. baseline → with-memory), not two "
+                                                        "measurements of the same state. Never a conflict and never an alignment "
+                                                        "of equal values; 'before'/'after' carry the values and their sources.")},
                     "unmatched_claims": {"type": "array", "items": {"type": "object"},
                                         "description": "Claims that minted but could not be typed for comparison (e.g. a price with no tier) — span + reason each."},
-                    "extraction_coverage": {"type": "array", "items": {"type": "object"},
-                                        "description": "Per document: numbers seen vs claims minted. A recall floor, not a precision measure."},
                     "agreement_status": {"type": "string",
                                         "enum": ["aligned", "conflicts_present", "not_established"],
                                         "description": ("not_established when nothing was actually compared. "
@@ -695,8 +721,7 @@ _OPENAPI_SPEC: dict = {
                                                         "non-empty. An 'aligned' response with this flag set still has "
                                                         "open comparisons: values that differ under an incomplete "
                                                         "identity (clarification) or under different identities "
-                                                        "(not comparable). A safe abstention, such as two undated "
-                                                        "prices that disagree, sets this flag — it is not agreement.")},
+                                                        "(not comparable).")},
                     "comparable_claims": {"type": "integer",
                                         "description": "Claims that went through alignment/conflict comparison."},
                     "crude_note":      {"type": "string", "description": "WTI/Brent benchmark note if both found."},
@@ -788,7 +813,7 @@ _OPENAPI_SPEC: dict = {
                     "400": {"description": "Bad request (missing text)",
                             "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}}},
                     "401": {"description": "Unauthorized — API key required"},
-                    "413": {"description": "Text too long (> 10 000 chars)"},
+                    "413": {"description": "Text exceeds the per-request character limit"},
                     "429": {"description": "Rate limited"},
                     "500": {"description": "Internal error"},
                 },
@@ -887,6 +912,7 @@ _OPENAPI_SPEC: dict = {
                     },
                     "400": {"description": "Bad request (fewer than 2 documents, or missing text)"},
                     "401": {"description": "Unauthorized"},
+                    "413": {"description": "A document exceeds the active character limit. The error identifies its index and the limit."},
                     "503": {"description": "signal_compare module not available"},
                 },
             }
@@ -947,6 +973,8 @@ def build_signal_capsule(result: dict, request_id: str = "") -> str:
     if genre_display:
         lines.append(f"GENRE:     {genre_display}")
     lines.append(f"SOURCE:    {stype_display}{wc_str}")
+    if result.get("passage_evidence"):
+        lines.append("PASSAGE:   " + result["passage_evidence"]["summary"])
     language = result.get("language", {})
     language_name = language.get("lexicon") or language.get("requested_language")
     if language_name or language.get("mode") == "structural_only":
@@ -991,9 +1019,9 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
     tag = f"SIGNAL_SIEVE {ANALYSIS_VERSION} COMPARE"
     lines.append(f"{tag} | {request_id}" if request_id else tag)
     lines.append(f"DOCS:      {cmp_result.get('doc_count', '?')}")
-    # v1.8.8 r4 (Arch audit 2026-11-17, risk 1): the unresolved count
-    # rides on the headline line, immediately next to the status, so
-    # "aligned" can never be skimmed as a clean bill of health.
+    # v1.8.8 r4 (restored v1.8.9 correction, Fix 3): the unresolved
+    # count rides on the headline line, immediately next to the status,
+    # so "aligned" can never be skimmed as a clean bill of health.
     n_clarify = len(cmp_result.get("needs_source_clarification", []))
     n_notcmp = len(cmp_result.get("not_comparable", []))
     lines.append(
@@ -1072,6 +1100,13 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
         for n in cmp_result["not_comparable"][:5]:
             lines.append(
                 f"  · {n['entity_label']}: {len(n.get('identities', []))} identities"
+            )
+
+    if cmp_result.get("temporal_comparisons"):
+        lines.append("TEMPORAL COMPARISONS (before→after pairs, not conflicts):")
+        for t in cmp_result["temporal_comparisons"][:5]:
+            lines.append(
+                f"  · {t['entity_label']}: {t['before']['value']} → {t['after']['value']}"
             )
 
     if cmp_result.get("timeline_reconciliation"):
@@ -1199,6 +1234,9 @@ def run_sieve():
 def api_analyze():
     payload = request.get_json(silent=True) or {}
 
+    if not _source_fields_valid(payload) or not isinstance(payload.get("url", ""), str):
+        return jsonify({"error": "Send a JSON object with text-valued source fields and URL."}), 400
+
     # Support optional url field in API too
     text = payload.get("text", "")
     url  = payload.get("url", "")
@@ -1321,12 +1359,24 @@ def api_v1_analyze():
         "ai_instruction":          result.get("ai_instruction", ""),
     }
 
+    for field in ("passage_evidence", "statistical_claims"):
+        if field in result:
+            response[field] = result[field]
     if result.get("evidence_shape"):
         response["evidence_shape"] = result["evidence_shape"]
     if result.get("custody_breakdown"):
         response["custody_breakdown"] = result["custody_breakdown"]
     if result.get("x_post_assessment"):
         response["x_post_assessment"] = result["x_post_assessment"]
+    if result.get("bias_adjustment"):
+        response["bias_adjustment"] = result["bias_adjustment"]
+    if result.get("headline_weighting"):
+        response["headline_weighting"] = result["headline_weighting"]
+    if result.get("sponsorship_disclosure", {}).get("present"):
+        # v1.8.9 (run-20 gap 11b): footer sponsorship / funding
+        # disclosure — present only when one is found, so clean texts
+        # keep the existing response shape.
+        response["sponsorship_disclosure"] = result["sponsorship_disclosure"]
 
     if include_brief and result.get("signal_brief"):
         response["signal_brief"]      = result["signal_brief"]
@@ -1392,6 +1442,10 @@ def api_v1_analyze_txt():
     if result.get("source_url"):
         lines.append(f"URL: {result['source_url']}")
 
+    if result.get("passage_evidence"):
+        lines.append("PASSAGE: " + result["passage_evidence"]["summary"])
+    for claim in result.get("statistical_claims", []):
+        lines.append(f"STATISTIC: {claim['measure']} | {claim['kind']} | {claim['value']} {claim['unit']} | {claim['period'] or 'period unspecified'}")
     if es:
         providers = ", ".join(es.get("named_data_providers", [])) or "none"
         venues    = ", ".join(es.get("markets_venues_mentioned", [])) or "none"
@@ -1508,6 +1562,8 @@ def api_v1_compare():
         )
 
     payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return _api_error(400, "bad_request", "Send a JSON object containing documents.", request_id)
     docs    = payload.get("documents", [])
 
     if not isinstance(docs, list) or len(docs) < 2:
@@ -1527,14 +1583,16 @@ def api_v1_compare():
 
     prepared: list[dict] = []
     for i, doc in enumerate(docs):
-        if not isinstance(doc, dict):
-            return _api_error(400, "bad_request", f"Document {i} must be an object.", request_id)
+        if not _source_fields_valid(doc):
+            return _api_error(400, "bad_request", f"Document {i} must be an object with text-valued source fields.", request_id)
         text = doc.get("text", "")
         if not isinstance(text, str) or not text.strip():
             return _api_error(400, "bad_request",
                               f"Document {i} missing required field: text", request_id)
+        if len(text) > max_chars:
+            return _api_error(413, "text_too_long", f"Document {i} exceeds the text limit.", request_id, max_chars=max_chars)
         prepared.append({
-            "text":        text[:max_chars],
+            "text":        text,
             "source_name": (doc.get("source_name") or f"doc_{i + 1}")[:MAX_SOURCE_NAME_CHARS],
             "source_type": doc.get("source_type", "auto"),
             "source_url":  (doc.get("source_url") or "")[:MAX_SOURCE_URL_CHARS],

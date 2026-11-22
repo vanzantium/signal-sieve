@@ -1,0 +1,13 @@
+COVERAGE — Forkast, "Google ADK v2.14.0 replaces shell-command input for skill scripts" (analysis)
+URL: https://forkast.news/google-adk-v2-14-0-replaces-shell-command-input-for-skill-scripts/
+By Blair Hayes, 2026-11-07 10:45 PM UTC. Fetched 2026-11-08.
+
+Google ADK v2.14.0 changes how RunSkillScriptTool is called when it runs in environment mode with a SkillToolset. The tool no longer accepts a free-form shell command string; callers instead provide args, short_options and positional_args. The scope is specific: the release notes describe this contract for that environment-backed configuration, not a change to every ADK tool or every way a script might be run.
+
+The interface change is one part of the update. The release notes say scripts run from the skill directory through validated paths, rather than from the environment working directory. They also limit supported script types to .py, .sh and .bash. Calls, evaluation sets or prompts that still pass command return INVALID_ARGUMENTS; unsupported script types return UNSUPPORTED_SCRIPT_TYPE.
+
+The release notes carry a 2026-11-04 date in the version heading. The GitHub API record lists published_at as 2026-11-07T00:58:18Z. These are separate source fields, so the heading date and API publication timestamp should retain their own labels.
+
+Google's stated security rationale is specific: the release notes say, This closes a hole that let a prompt-injected model run arbitrary shell commands. That explains why the command-string route changed. It does not independently establish how often the route was used, what effect the fix has in deployments, or that prompt injection and command execution risks are eliminated more broadly. The defensible claim is narrower: this tool contract removes free-form command input in the described mode and substitutes structured arguments and path validation.
+
+For builders, the practical work is to inspect only the affected configuration and its callers, rather than assume every ADK integration needs a change. A focused migration check would cover: calls to RunSkillScriptTool in environment-mode SkillToolset setups, especially any that still supply command; prompts and evaluation sets that encode the old field; script references under the new skill-directory execution behavior and the supported .py, .sh and .bash types; separate tests for legacy command inputs returning INVALID_ARGUMENTS and unsupported file types returning UNSUPPORTED_SCRIPT_TYPE.

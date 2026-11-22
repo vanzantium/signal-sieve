@@ -19,6 +19,8 @@ A check is one of:
   "signal_brief_min"         : {brief_key: min_count} (Phase 1.2)
   "evidence_shape"           : {field: expected_value} (Phase 1.2)
   "custody_breakdown"        : {field: expected_value} (v1.8.1)
+  "sponsorship_disclosure"   : {"present": bool, "kind": str, "org": str,
+                                "org_contains": str} (v1.8.9)
 
 A test passes only when ALL checks pass.
 
@@ -727,6 +729,71 @@ EXPECTATIONS = {
             "action_in": ["treat_as_lead"],
         },
     },
+    # ── v1.8.9 fixtures (run-20 gap 11b) ─────────────────────────────────────
+    "sponsored_footer.txt": {
+        # Footer sponsorship disclosure: "Sponsored by Acme Corp" at the
+        # foot is recorded (kind/org) and flagged as a directional-bias
+        # signal. Kind sponsored earns the +0.12 bias bump (0.07 bias
+        # word + 0.12); the action stays the clean-text action.
+        "source_type": "secondary",
+        "checks": {
+            "action_in": ["treat_as_lead"],
+            "warning_in": ["watch"],
+            "flag_contains": ["Sponsorship disclosure"],
+            "sponsorship_disclosure": {
+                "present": True,
+                "kind": "sponsored",
+                "org": "Acme Corp",
+            },
+        },
+    },
+    # ── v1.8.9 fixtures (run-20 follow-on: footer bias bump) ───────────────
+    "paid_partnership_footer.txt": {
+        # Footer disclosure kind paid_partnership earns the +0.12 bias
+        # bump (follow-on 2026-11-19): 0.07 (bias word) + 0.12 = 0.19.
+        "source_type": "secondary",
+        "checks": {
+            "action_in": ["treat_as_lead"],
+            "warning_in": ["watch"],
+            "flag_contains": ["Sponsorship disclosure"],
+            "sponsorship_disclosure": {
+                "present": True,
+                "kind": "paid_partnership",
+                "org": "Beta Ltd",
+            },
+            "score_at_least": {"bias_risk": 0.19},
+            "score_at_most": {"bias_risk": 0.19},
+        },
+    },
+    "funded_footer.txt": {
+        # Footer disclosure kind funded earns the +0.12 bump; "funded
+        # by" is not a bias word, so bias_risk is exactly 0.12.
+        "source_type": "secondary",
+        "checks": {
+            "action_in": ["treat_as_lead"],
+            "warning_in": ["watch"],
+            "flag_contains": ["Sponsorship disclosure"],
+            "sponsorship_disclosure": {
+                "present": True,
+                "kind": "funded",
+                "org": "Delta Fund",
+            },
+            "score_at_least": {"bias_risk": 0.12},
+            "score_at_most": {"bias_risk": 0.12},
+        },
+    },
+    "funded_body_mention.txt": {
+        # "funded by" in the BODY is ordinary reporting, not a
+        # disclosure: no footer disclosure is recorded and no bump
+        # fires — bias_risk stays 0.0.
+        "source_type": "secondary",
+        "checks": {
+            "action_in": ["treat_as_lead"],
+            "warning_in": ["watch"],
+            "sponsorship_disclosure": {"present": False},
+            "score_at_most": {"bias_risk": 0.0},
+        },
+    },
 }
 
 GREEN  = "\033[32m" if sys.stdout.isatty() else ""
@@ -850,6 +917,33 @@ def check_one(result: dict, spec: dict) -> list[str]:
         if got != expected:
             fails.append(
                 f"custody_breakdown.{field}: got {got!r}, expected {expected!r}"
+            )
+
+    # v1.8.9 check: footer sponsorship / funding disclosure (run-20
+    # gap 11b) — recorded, never scored. "present" False expects the
+    # field absent or present False.
+    if "sponsorship_disclosure" in checks:
+        disc = result.get("sponsorship_disclosure", {}) or {}
+        want = checks["sponsorship_disclosure"]
+        if "present" in want and bool(disc.get("present")) != want["present"]:
+            fails.append(
+                f"sponsorship_disclosure.present: got {disc.get('present')!r}, "
+                f"expected {want['present']!r}"
+            )
+        if "kind" in want and disc.get("kind", "") != want["kind"]:
+            fails.append(
+                f"sponsorship_disclosure.kind: got {disc.get('kind', '')!r}, "
+                f"expected {want['kind']!r}"
+            )
+        if "org" in want and disc.get("org", "") != want["org"]:
+            fails.append(
+                f"sponsorship_disclosure.org: got {disc.get('org', '')!r}, "
+                f"expected {want['org']!r}"
+            )
+        if "org_contains" in want and want["org_contains"] not in disc.get("org", ""):
+            fails.append(
+                f"sponsorship_disclosure.org: got {disc.get('org', '')!r}, "
+                f"expected to contain {want['org_contains']!r}"
             )
 
     return fails
