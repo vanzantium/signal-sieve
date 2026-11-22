@@ -1,0 +1,18 @@
+COVERAGE — AI Weekly, "Google ADK 2.14.0 Graduates Core Modules, Adds Teams Runner"
+URL: https://aiweekly.co/alerts/google-adk-2140-graduates-core-modules-adds-teams-runner
+Published: 2026-11-08T03:29:08+00:00, updated 2026-11-08T03:30:01+00:00. Fetched 2026-11-08.
+
+TL;DR:
+- ADK 2.14.0 ships November 7 with execution environments, A2A, evaluation and core runtime modules graduating out of experimental, plus 16 toolset features.
+- A new TeamsRunner puts ADK agents inside Microsoft Teams, MultiRunConfig runs eval cases concurrently, and ToolArgsMatcher adds LLM-backed semantic argument checks.
+- Google claims a 30-node workflow's 200-turn run is 23% faster with 9% lower peak memory in this release.
+
+Google shipped Agent Development Kit 2.14.0 on November 7, graduating execution environments and A2A out of experimental and wiring ADK agents into Microsoft Teams. The release summarizes itself on GitHub as one that "graduates execution environments, A2A, evaluation, and core runtime modules from experimental, adds multi-run evaluation and semantic tool argument matching, adds Microsoft Teams and OpenAI Decisions integrations, and makes long multi-turn workflows faster."
+
+The headline additions. A new TeamsRunner connects ADK agents to Microsoft Teams, MultiRunConfig runs each eval case multiple times concurrently, and ToolArgsMatcher compares tool arguments using "exact, case-insensitive, numeric-tolerance, or LLM-backed semantic checks." MongoDbMemoryService adds vector-search retrieval with TTL expiration, and adk generate_agent_card builds A2A agent cards from the CLI.
+
+Google's performance claim is specific: "a 30-node workflow's 200-turn run is 23% faster with 9% lower peak memory." The release notes publish no baseline hardware, no second benchmark, and no comparison against a named prior ADK version.
+
+Three breaking changes ride along. Enum tool arguments now arrive as enum members rather than raw strings; VertexAiSessionService raises ValueError on extra keywords; and RunSkillScriptTool no longer accepts a free-form command parameter, restricting runs to validated .py, .sh, and .bash scripts from a skill directory. Twenty-six auth, environment, app, CLI and cache modules move to stable alongside 16 toolset features.
+
+Originally reported by github.com. Original headline: Google Ships Agent Development Kit 2.14.0 With Microsoft Teams Agent, Multi-Run Eval, Semantic Tool Matching.

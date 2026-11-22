@@ -162,6 +162,10 @@ _BENCHMARK_REVERSE_RE = re.compile(
 _GENERIC_BENCHMARK_PHRASES = (
     "CVE Rediscovery",
     "Terminal-Bench-Science",
+    # v1.8.9: the spaced form — the primary writes "Terminal-Bench
+    # Science (70.5%)", not the all-hyphen form, so the paren rule
+    # needs this spelling too.
+    "Terminal-Bench Science",
     "Chartography",
     "Humanity's Last Exam",
     # v1.8.8 r2 (run-17 gap 4): hyphenated / all-caps / multi-word
@@ -185,6 +189,36 @@ _GENERIC_BENCHMARK_PHRASES = (
     # "RoboDojo Sim: Astra 29.8%" keys onto it instead of a bare
     # "RoboDojo" group that can never merge.
     "RoboDojo Sim",
+    # v1.8.9 (run-20 gap 4): "SWE-sweep" — the harness-sensitive
+    # benchmark whose 39.0% (Antigravity) vs 12.8% (shared mini-SWE
+    # harness) pair never aligned because the name is invisible to
+    # the CamelCase detector (all-caps + hyphen).
+    "SWE-sweep",
+    # v1.8.9 (run-20 gap 10): "Agent Arena" — the Arena board score
+    # ("debuts #2 globally with a score of 1336 on Arena's new Agent
+    # Arena Index") is bench-less without it and pools with any other
+    # bench-less score in the doc.
+    "Agent Arena",
+    # v1.8.9 (run-20 gap 14): "Vals Index" — the Vals ranked scores
+    # ("Neon Extra High second at 70.87% on Vals Index v2.2") never
+    # key without it, so Neon's 70.87 never mints at all (no metric
+    # cue in its clause) while Fable/Sonnet/Astra mint bench-less —
+    # and the stated ±0.94pp uncertainty has no benchmark group to
+    # attach to for the separability check.
+    "Vals Index",
+    # v1.8.9 (run-20 gap 12): "Agents' Last Exam" — the Kingy
+    # comparison rows ("Agents' Last Exam v1.1: 75.8% vs 71.6% vs
+    # 73.0%.") never key without it, so the 75.8% minted as a bare
+    # "agents" figure and pooled with the 99.2% pass rate.
+    "Agents' Last Exam",
+    # v1.8.9 (run-20 gap 14): "Coding Agent Index" — Artificial
+    # Analysis runs TWO indexes (Intelligence Index and Coding Agent
+    # Index) and the org name alone cannot tell them apart. Without
+    # the index name, a sentence naming "Artificial Analysis's
+    # separate Coding Agent Index" reads as naming exactly one
+    # benchmark (the org), and the next sentence's scores inherit the
+    # Intelligence Index — a false conflict (Fable 58 vs 65).
+    "Coding Agent Index",
 )
 _GENERIC_BENCHMARK_PHRASE_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(p) for p in _GENERIC_BENCHMARK_PHRASES) + r")\b",
@@ -333,105 +367,75 @@ def _parse_table_rows(text: str) -> List[Dict]:
                     "variant":        variant,
                     "line":           line,
                 })
-    return entries
-
-
-# ── Benchmark chart series (v1.8.8 r4, r3 recommendation 1) ─────────────
-# A chart line names its models once, then lists one value per model
-# for each benchmark, in the same order:
-#   "for Qwen 3.6 27B, Qwen 3.8 27B and Opus 4.6 Max: SWE-bench Pro
-#    53.5, 61.7 and 53.4; ...; HLE 24.0, 30.8 and 40.0."
-# The mapped passes only see the first value of each series (the rest
-# have no benchmark name next to them), so the 30.8 and 40.0 never
-# mint and the 24.0 carries no subject — which is why the Nov 16 HLE
-# group sat in needs_source_clarification. Bind the series
-# positionally: value i belongs to model i. Fail closed — a series
-# mints only when its value count exactly matches the model count,
-# every model parses to a distinct slug, and the benchmark is a
-# mapped key. Unmapped benchmarks (Terminal-Bench, OSWorld, IFBench)
-# stay unminted, as before.
-_SERIES_HEADER_RE = re.compile(r"\bfor\s+([^:\n]{3,200}?)\s*:", re.I)
-_SERIES_VALUE_RE = re.compile(r"^\d[\d,]*\.?\d*%?$")
-_SERIES_VERSION_SKIP_RE = re.compile(r"^\s*\d+\.\d+(?=\s+\d)")
-
-
-def _parse_chart_series(text: str) -> List[Dict]:
-    """Parse 'for A, B and C: Bench v1, v2 and v3; ...' chart lines.
-
-    Each entry: {"benchmark_key", "benchmark_name", "model_slug",
-    "model_display", "value" (float), "raw", "version", "variant",
-    "line"}. A line yields nothing unless its header parses as 2–6
-    distinct model tokens and every series on it has exactly one
-    value per model."""
-    entries: List[Dict] = []
-    for line in text.split("\n"):
-        for hm in _SERIES_HEADER_RE.finditer(line):
-            header = hm.group(1)
-            # The header must be nothing but model tokens, commas,
-            # "and"/"&" and whitespace — any other word, and this is
-            # prose ("for the model that costs $2:"), not a chart.
-            tokens = [(m.group(1), m.start(), m.end())
-                      for m in _MODEL_TOKEN_RE.finditer(header)]
-            if len(tokens) < 2 or len(tokens) > 6:
+    # v1.8.9 (run-20 gap 6): "vs" comparison rows — a bare line
+    # "Benchmark: v1% vs v2% vs v3%." whose model order comes from a
+    # preceding "(Model vs Model vs Model)" header ("Selected
+    # November results published by DeepMind (Neon vs Opus 5.5 vs
+    # GPT-6.2 Sol):"). The values are the models' scores in header
+    # order; without a header the row is unparseable (no model per
+    # value) and stays a sentence-loop claim. "(unreported)" values
+    # are skipped. Percentage rows only: the generic row pass
+    # upgrades these as percentage/score claims, and a bare-number
+    # row (AA Index "61 vs 59 vs 57") already aligns through the
+    # sentence loop — rewriting its role would split it. Only a
+    # label that resolves to a benchmark (mapped key, phrase list,
+    # CamelCase, hyphenated) counts — a prose line with the same
+    # shape never does. The header must sit within 15 lines above
+    # the row, so a stale header cannot claim a later table.
+    _VS_ROW_RE = re.compile(
+        r"^(.+?):\s*(\d[\d,]*\.?\d*\s*%|\(unreported\))\s+vs\.?\s+"
+        r"(\d[\d,]*\.?\d*\s*%|\(unreported\))\s+vs\.?\s+"
+        r"(\d[\d,]*\.?\d*\s*%|\(unreported\))\.?\s*$", re.I)
+    lines = text.split("\n")
+    header_models: List[str] = []
+    header_idx = -100
+    for li, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        hm = re.search(r"\(([^)]+)\)", stripped)
+        if hm:
+            parts = [p.strip() for p in
+                     re.split(r"\s+vs\.?\s+", hm.group(1), flags=re.I)]
+            if len(parts) >= 2 and all(
+                    _MODEL_TOKEN_RE.fullmatch(p) for p in parts):
+                header_models = parts
+                header_idx = li
                 continue
-            rest = header
-            for tok, _s, _e in tokens:
-                rest = rest.replace(tok, "", 1)
-            if re.sub(r"[\s,]|and|&", "", rest, flags=re.I):
+        m = _VS_ROW_RE.match(stripped)
+        if not m or not header_models or li - header_idx > 15:
+            continue
+        label = m.group(1).strip()
+        values = [m.group(2), m.group(3), m.group(4)]
+        if len(values) != len(header_models):
+            continue
+        mapped = _normalize_entity_key(label)
+        key = mapped[0] if mapped else ""
+        name = _table_benchmark_name(label)
+        if not key and not name:
+            continue
+        if not key and not _generic_benchmark_phrase(label) \
+                and not _GENERIC_CAMEL_RE.search(name) \
+                and "-" not in name:
+            continue
+        version = _benchmark_version(key, label) if key else ""
+        variant = _benchmark_variant(key, label) if key else ""
+        for model_display, raw in zip(header_models, values):
+            if raw is None or "unreported" in raw.lower():
                 continue
-            models = [_model_slug(t) for t, _s, _e in tokens]
-            if len(set(models)) != len(models):
+            try:
+                value = float(raw.rstrip("%").replace(",", "").strip())
+            except ValueError:
                 continue
-            displays = [t for t, _s, _e in tokens]
-            # Series run from the colon to the end of the line.
-            tail = line[hm.end():].strip()
-            if not tail:
-                continue
-            for segment in tail.split(";"):
-                segment = segment.strip().rstrip(".")
-                if not segment:
-                    continue
-                mapped = _normalize_entity_key(segment)
-                if not mapped:
-                    continue
-                key, label, ematch = mapped
-                if key not in _BENCHMARK_KEYS:
-                    continue
-                after = segment[ematch.end():]
-                # A version token glued to the name ("Terminal Bench
-                # 2.1 63.4") is the benchmark's version, not the
-                # first value: it is followed by whitespace + another
-                # number, never by a comma or "and".
-                after = _SERIES_VERSION_SKIP_RE.sub("", after, count=1)
-                # The variant word ("Pro", "Diamond") sits between
-                # the name and the first value; the value list starts
-                # at the first number after it.
-                mnum = re.search(r"\d[\d,]*\.?\d*%?", after)
-                if not mnum:
-                    continue
-                between = after[:mnum.start()]
-                parts = re.split(r"\s*,\s*|\s+and\s+", after[mnum.start():].strip())
-                if len(parts) != len(models):
-                    continue
-                if not all(_SERIES_VALUE_RE.match(p) for p in parts):
-                    continue
-                values = [_parse_value(p) for p in parts]
-                if any(v is None for v in values):
-                    continue
-                variant = _benchmark_variant(key, ematch.group(0), between)
-                version = _benchmark_version(key, ematch.group(0) + between)
-                for i, (slug, display) in enumerate(zip(models, displays)):
-                    entries.append({
-                        "benchmark_key": key,
-                        "benchmark_name": label,
-                        "model_slug": slug,
-                        "model_display": display,
-                        "value": values[i],
-                        "raw": parts[i],
-                        "version": version,
-                        "variant": variant,
-                        "line": line.strip()[:120],
-                    })
+            entries.append({
+                "benchmark_key":  key,
+                "benchmark_name": name,
+                "model_slug":     _model_slug(model_display),
+                "model_display":  model_display,
+                "value":          value,
+                "raw":            raw.strip(),
+                "version":        version,
+                "variant":        variant,
+                "line":           stripped,
+            })
     return entries
 
 
@@ -623,18 +627,56 @@ def _pricing_pair_tiers(text: str) -> Dict[int, str]:
         if m.group(2) == "/":
             out[m.start(1)] = "input"
             out[m.start(3)] = "output"
+    # Worker B (v1.8.9 correction, Nov 10 unmatched): "against" pairs.
+    # "$A against $B <tier-word>" — the tier word immediately after
+    # the second amount names BOTH amounts' tier ("$6.721 against
+    # $12.82 per task" — both are per-task prices; the first amount
+    # carries no tier word of its own and used to mint as bare
+    # pricing, i.e. an unmatched claim). The tier word must follow
+    # the second amount directly (an optional "per million" may
+    # intervene); a tier word in a later clause never counts
+    # ("$0.20 against $0.25) and batch ..." — the $0.25 is cached,
+    # not batch, so the lookahead stops at the closing paren).
+    for m in re.finditer(
+            r"\$\s?(\d[\d,\.]*)\s+against\s+\$\s?(\d[\d,\.]*)", text, re.I):
+        if m.start(1) in out or m.start(2) in out:
+            continue
+        after = text[m.end():m.end() + 30]
+        tm = re.match(
+            r"\s*(?:per\s+(?:million|1M)\s+)?"
+            r"(input|output|cached|cache|batch|per[-\s]?task)\b",
+            after, re.I)
+        if not tm:
+            continue
+        tier = tm.group(1).lower().replace(" ", "-")
+        if tier == "cache":
+            tier = "cached"
+        out[m.start(1)] = tier
+        out[m.start(2)] = tier
     return out
 
 
 _FUTURE_MONTH_RE = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 # A price taking effect at a later date: "starting/from/effective
-# <Month> <day>" ("$4 starting December 1", "$4 / $20 from Dec. 1").
-# The day is optional: the extractor's "sentence" is ". "-delimited,
-# so an abbreviated month ("Nov.", "Dec.") truncates the sentence at
-# the abbreviation's period and the day never reaches the era check
-# ("then $4 / $20 from Dec" — the "1" sits in the next fragment).
+# <Month> <day>" ("$4 starting December 1", "$4 / $20 from Dec. 1"),
+# or "takes effect (on) <Month> <day>" ("the new rate takes effect
+# December 1" — run-20 gap 3). The day is optional: the extractor's
+# "sentence" is ". "-delimited, so an abbreviated month ("Nov.",
+# "Dec.") truncates the sentence at the abbreviation's period and the
+# day never reaches the era check ("then $4 / $20 from Dec" — the "1"
+# sits in the next fragment).
 _FUTURE_EFFECTIVE_RE = re.compile(
-    r"\b(?:starting|from|effective)\s+" + _FUTURE_MONTH_RE + r"\.?(?:\s+\d{1,2})?",
+    r"\b(?:starting|from|effective|takes?\s+effect(?:\s+on)?)\s+" + _FUTURE_MONTH_RE + r"\.?(?:\s+\d{1,2})?",
+    re.I,
+)
+# A price that runs through a stated end date ("rates run through
+# November 30", "the $2 rate holds through Nov. 30") is the price in
+# effect now, ending on that date — current, not future. The verb
+# must be a continuation verb: a change verb ("rise to") in the same
+# clause means the price AFTER the date, which the future rule owns.
+_THROUGH_CURRENT_RE = re.compile(
+    r"\b(?:runs?|lasts?|holds?|remains?|stays?|valid|good|applies|apply)\b[^.!?\n]{0,60}?\bthrough\s+"
+    + _FUTURE_MONTH_RE + r"\.?(?:\s+\d{1,2})?",
     re.I,
 )
 # A sentence that opens with a date and then changes a price
@@ -666,20 +708,6 @@ _CURRENT_MARKER_RE = re.compile(
 )
 
 
-def _since_previous_price(sentence: str, amount_start: int) -> str:
-    """The text between the previous $ amount in the sentence and this
-    one (from the sentence start for the first amount). v1.8.8 r3: an
-    "against" belongs to the price right after it, not to every later
-    price in the sentence — in "cache reads ($0.20 against $0.25) and
-    batch ($4 / $20 against $5 / $25)" the $4 is not on the second
-    side of the cache-read pair."""
-    own = sentence.rfind("$", 0, amount_start + 1)
-    if own == -1:
-        own = amount_start
-    prev = sentence.rfind("$", 0, own)
-    return sentence[prev + 1 if prev != -1 else 0:own]
-
-
 def _pricing_era(sentence: str, amount_start: int) -> str:
     """Price era for one $ amount: "future" when the amount is a price
     taking effect at a later date, "prior" when the amount is
@@ -705,9 +733,14 @@ def _pricing_era(sentence: str, amount_start: int) -> str:
     (a) after "then" in a sentence that also names a future-effective
     date ("then $4 and $20 starting December 1"); (b) immediately
     followed by "starting/from/effective <Month>" before the next $
-    ("$4.00 starting December 1, 2026"); (c) in a sentence that opens
-    with a date and changes the price ("December 1, 2026: the API
-    price becomes $4 ...")."""
+    ("$4.00 starting December 1, 2026"), or by "takes effect (on)
+    <Month>"; (c) in a sentence that opens with a date and changes
+    the price ("December 1, 2026: the API price becomes $4 ...");
+    (d) introduced by a change verb ("rise to", "becomes") after a
+    dated end in the same sentence ("rates run through November 30,
+    after which they rise to $4"). A price whose own clause says it
+    runs through a stated end date ("the $2 rate runs through
+    November 30") is current — in effect now, ending on that date."""
     before = sentence[:amount_start]
     # (a) Sequenced change: "then" before the amount, and the
     # sentence names the future-effective date the change lands on.
@@ -724,6 +757,17 @@ def _pricing_era(sentence: str, amount_start: int) -> str:
     # (c) Sentence opens with the effective date and changes the price.
     if _FUTURE_LEADING_DATE_RE.match(sentence) and _FUTURE_CHANGE_VERB_RE.search(before):
         return "future"
+    # (d) v1.8.9 (run-20 gap 3): a price introduced by a change verb
+    # after a dated end ("promotional rates run through November 30,
+    # after which they rise to $4 ...") is the price AFTER that date
+    # — future. The date must precede the amount and the change verb
+    # must precede it too; a past-tense change ("dropped to $2 after
+    # the November sale") never matches the verb regex, so it cannot
+    # be misread as a future price.
+    if _FUTURE_CHANGE_VERB_RE.search(before) and re.search(
+            r"\b(?:through|after|on)\s+" + _FUTURE_MONTH_RE + r"\.?(?:\s+\d{1,2})?",
+            before, re.I):
+        return "future"
     prior_m = _PRIOR_CUE_RE.search(before)
     if prior_m:
         # A current marker after the prior cue and before the amount
@@ -734,7 +778,7 @@ def _pricing_era(sentence: str, amount_start: int) -> str:
     # Second side of an "against"/"vs" pair, in a sentence naming a
     # prior model/version: "$0.20 against $0.25" in a "cheaper than
     # Fable 5.1" sentence is the 5.1 price, not the 5.2 price.
-    if re.search(r"\b(?:against|vs\.?)\b", _since_previous_price(sentence, amount_start)) \
+    if re.search(r"\b(?:against|vs\.?)\b", sentence[:amount_start]) \
             and _PRIOR_MODEL_RE.search(sentence):
         return "prior"
     # Explicit current marker: in the amount's own clause before it
@@ -747,6 +791,16 @@ def _pricing_era(sentence: str, amount_start: int) -> str:
     clause_a, clause_b = _generic_clause_span(sentence, amount_start, amount_start)
     if _CURRENT_MARKER_RE.search(sentence[clause_a:amount_start]) \
             or _CURRENT_MARKER_RE.search(sentence[amount_start:clause_b]):
+        return "current"
+    # v1.8.9 (run-20 gap 3): a price whose own clause says it runs
+    # through a stated end date ("the $2 rate runs through November
+    # 30") is the price in effect now, ending on that date — current.
+    # Clause-scoped: a "through" in an earlier clause belongs to the
+    # old rate, not to a later price introduced by a change verb
+    # ("... run through November 30, after which they rise to $4" —
+    # the $4's clause has no "through", and rule (d) already claimed
+    # it as future).
+    if _THROUGH_CURRENT_RE.search(sentence[clause_a:clause_b]):
         return "current"
     # No era stated: unknown, never "current". An unstated price must
     # not contradict a stated one, and must not silently align with
@@ -795,18 +849,109 @@ def _pricing_subject(sentence: str, amount_start: int) -> str:
     partitioning — standard tiers are not split by subject."""
     clause_a, clause_b = _generic_clause_span(sentence, amount_start, amount_start)
     before = sentence[clause_a:amount_start]
+    # Worker B (v1.8.9 correction): a "for <Model>" naming the price's
+    # owner just after the amount ("$10.04 for Opus 5.5 (Max)") is a
+    # stronger, more local signal than a model at the clause's start
+    # ("Fable 5.2 (High) scores 61.82 for $9.08 ... for $10.04 for
+    # Opus 5.5" — the $10.04 is Opus's, not Fable's), so check it
+    # first. The window ends at the next "$": a "for <Model>" after
+    # another price belongs to that price, not this one ("$9.08 per
+    # index task against 59.11 for $10.04 for Opus 5.5" — the Opus
+    # mention is past the $10.04, so $9.08 keeps its clause subject).
+    after = sentence[amount_start:amount_start + 40]
+    dollar = after.find("$")
+    window = after if dollar < 0 else after[:dollar]
+    m = re.search(r"\bfor\s+(" + _MODEL_TOKEN_RE.pattern + r")", window)
+    if m:
+        return _model_slug(m.group(1))
     best = ""
     for m in _MODEL_TOKEN_RE.finditer(before):
         best = m.group(1)
     if best:
         return _model_slug(best)
-    # No model before the amount: look just after it, where the price
-    # is introduced as "for <Model>" ("$10.04 for Opus 5.5 (Max)").
-    after = sentence[amount_start:clause_b]
-    m = re.search(r"\bfor\s+(" + _MODEL_TOKEN_RE.pattern + r")", after)
-    if m:
-        return _model_slug(m.group(1))
     return ""
+
+
+
+_BASELINE_MARKER_RE = re.compile(
+    r"\b(?:than|compared\s+with|compared\s+to|versus|vs\.?|against|much\s+as|same\s+as)\b",
+    re.I)
+
+
+def _model_token_is_baseline(before: str, tok_start: int,
+                             after: str = "") -> bool:
+    """True when a model token is the object of a comparison phrase
+    rather than the measured subject: the nearest comparison marker
+    (than / compared with|to / versus / vs / against / much as /
+    same as) before the token has nothing but other model tokens,
+    "and", and whitespace between it and this token ("faster than
+    Claude Fable 5.1 and Claude Mythos 5.1" — both are baselines;
+    "twice as much as Opus 5.5" — Opus is the baseline). A comma or
+    any other word in between ends the comparison list, so a model
+    named in a later clause ("faster than Opus, and Mythos costs
+    $8") is NOT a baseline. A number + "for" in between ("compared
+    to 94.49% for GPT-5.6") is not a bare model list either — that
+    shape is the exactly-one fallback's job, not this helper's.
+    Worker B: a possessive right after the token ("compared with
+    Argon's 50") makes the model the OWNER of the following figure,
+    not a baseline — Argon's 50 is Argon's score, even though the
+    comparison is against it. `after` is the text after the token
+    up to the number; a leading "'s" vetoes the baseline reading."""
+    if after.lstrip().startswith("'s"):
+        return False
+    markers = list(_BASELINE_MARKER_RE.finditer(before[:tok_start]))
+    if not markers:
+        return False
+    rest = before[markers[-1].end():tok_start]
+    while True:
+        rest = rest.strip()
+        if not rest:
+            return True
+        if rest.lower().startswith("and"):
+            rest = rest[3:]
+            continue
+        m = _MODEL_TOKEN_RE.match(rest)
+        if m:
+            rest = rest[m.end():]
+            continue
+        return False
+
+
+def _pricing_is_against_second_side(sentence: str, amount_start: int) -> bool:
+    """True when a $ amount sits on the second side of an "against" /
+    "vs" comparison ("$8 / $40 against $4 / $20", "$0.20 against
+    $0.25", "$10 / $50 for Claude Fable 5.1" after "against $10") —
+    i.e. an "against"/"vs" precedes it in the sentence AND a $ amount
+    precedes that "against". The second side belongs to the compared-
+    against model, never to the sentence's subject; the first side
+    belongs to the sentence's subject. Worker B (v1.8.9 correction):
+    the old code let the nearest-model rule claim second-side prices
+    for the first side's model (Medium's prior $10/$50 read as
+    Fable 5.2's because "Fable 5.2" precedes them)."""
+    before = sentence[:amount_start]
+    m = None
+    for cand in re.finditer(r"\b(?:against|vs\.?)\b", before, re.I):
+        m = cand
+    if m is None:
+        return False
+    if "$" not in before[:m.start()]:
+        return False
+    # The "against" must belong to THIS amount's pair: between the
+    # "against" and the amount there may be only the pair's own
+    # figures — a bare number or a "$A / $B" slash list ("$8 / $40
+    # against $4 / $20": both $4 and $20 are second side). Any
+    # other word in between means the "against" belongs to an
+    # earlier pair ("$9.08 per index task against 59.11 for $10.04
+    # ... (48.21 for $2.45 ..." — the $2.45 is not the second side
+    # of the $9.08 pair, the $10.04 is). amount_start points at
+    # the digits, so the amount's own "$" is the last char of
+    # `before` — strip it before checking the gap.
+    gap = before[m.end():]
+    if gap.endswith("$"):
+        gap = gap[:-1]
+    return (re.fullmatch(r"\s*\$?[\d.,]*\s*(?:/\s*\$?[\d.,]*\s*)*", gap)
+            is not None
+            and "\n" not in gap and ";" not in gap)
 
 
 def _pricing_against_subject(sentence: str, amount_start: int) -> str:
@@ -815,112 +960,91 @@ def _pricing_against_subject(sentence: str, amount_start: int) -> str:
     twice as much as Opus 5.5 ($8 / $40 against $4 / $20 per
     million)" — the $4/$20 are Opus 5.5's, not Fable 5.2's, and must
     not compare against Fable's $8/$40). The subject is the model in
-    the sentence's "than/as <Model>" comparison phrase. Returns ""
-    when the amount is not after an "against" or the sentence names
-    no comparison model — the claim is then subject-less and
-    partitions with the other subject-less prices of its tier."""
+    the sentence's "than/as <Model>" comparison phrase, or — Worker B
+    (v1.8.9 correction) — the model named just after the amount as
+    "for <Model>" ("$10 / $50 for Claude Fable 5.1", "$1.00 for
+    Astra"). Returns "" when the amount is not after an "against" or
+    the sentence names no comparison model — the claim is then
+    subject-less and partitions with the other subject-less prices of
+    its tier."""
     before = sentence[:amount_start]
-    if not re.search(r"\b(?:against|vs\.?)\b", _since_previous_price(sentence, amount_start)):
+    if not re.search(r"\b(?:against|vs\.?)\b", before):
         return ""
     m = re.search(
         r"\b(?:than|as)\s+(" + _MODEL_TOKEN_RE.pattern + r")", before)
-    return _model_slug(m.group(1)) if m else ""
-# v1.8.8 r3 (Arch audit 2026-11-17, conflict integrity): a standard-
-# tier price carries the model it is quoted for. Before r3 only
-# per-task prices and the second side of an "against" pair had a
-# subject, so every other input/output price in a packet pooled into
-# one subject-less identity — Qwen4-Max's $1.50, Qwen 3.8 Max's $2,
-# Opus 5.5's $4 and Gemini 4 Argon's $2 all "compared" with each
-# other (Nov 16: three false pricing conflicts).
-_PRICE_UNIT_TAIL = (r"(?:\s*(?:per|/)\s*(?:1M|million|M)\b"
-                    r"(?:\s+(?:input|output|cached)?\s*tokens?)?)?")
-_PRICE_FOR_MODEL_RE: Optional["re.Pattern[str]"] = None  # built on first use (needs _MODEL_TOKEN_RE)
-
-
-def _price_for_model_re() -> "re.Pattern[str]":
-    global _PRICE_FOR_MODEL_RE
-    if _PRICE_FOR_MODEL_RE is None:
-        _PRICE_FOR_MODEL_RE = re.compile(
-            r"[\d.,]*" + _PRICE_UNIT_TAIL +
-            r"(?:\s*(?:,|and|/|or)\s*\$\s?[\d.,]+" + _PRICE_UNIT_TAIL + r")*"
-            r"\s*,?\s*(?:respectively\s*,?\s*)?for\s+(" + _MODEL_TOKEN_RE.pattern + r")"
-        )
-    return _PRICE_FOR_MODEL_RE
-
-
-def _model_token_specific(token: str) -> bool:
-    """True when a model token names ONE model: it carries a version
-    ("Qwen4-Max", "Opus 5.5") or is an unambiguous display alias
-    ("Carbon", "Argon", "Astra"). A bare family word ("Qwen" in
-    "Qwen's official blog", "Claude", "Gemini") names a vendor or a
-    family, not a priced model."""
-    tok = re.sub(r"^claude\s+", "", token.strip(), flags=re.I)
-    return bool(re.search(r"\d", tok)) or tok.lower() in ("astra", "carbon", "argon")
-
-
-def _pricing_owner_subjects(sentence: str, amount_start: int) -> List[str]:
-    """The model(s) a standard-tier $ amount is quoted for, as slugs;
-    [] when the sentence does not say (the price is then subject-less
-    and can never be called a conflict — it may still align, or
-    attach by value to the one stated group that matches it).
-
-    In order: (a) "for <Model>" right after the amount, across a
-    "$A and $B" / "$A / $B" series ("against $2 and $6 for Qwen 3.8
-    Max" — both are Qwen 3.8 Max's); (b) the second side of an
-    "against" pair whose sentence names the comparison model ("costs
-    twice as much as Opus 5.5 ($8 / $40 against $4 / $20)"); (c) the
-    nearest model token before the amount that is not a comparison
-    baseline ("Qwen4-Max is priced at $1.50", "Anthropic lists Claude
-    Opus 5.5 at $20"). A bare family word is not an owner — it stops
-    the search. A coordinated pair owns the price jointly only when
-    the sentence says so ("Gemini 4 Argon and Carbon both cost $2"
-    → both models); a pair without "both/each/all" may be a
-    "respectively" series and stays unresolved."""
-    m = _price_for_model_re().match(sentence, amount_start)
     if m:
-        return [_model_slug(m.group(1))] if _model_token_specific(m.group(1)) else []
-    against = _pricing_against_subject(sentence, amount_start)
-    if against:
-        return [against]
+        return _model_slug(m.group(1))
+    after = sentence[amount_start:amount_start + 40]
+    m = re.search(r"\bfor\s+(" + _MODEL_TOKEN_RE.pattern + r")", after)
+    return _model_slug(m.group(1)) if m else ""
+
+
+
+def _pricing_standard_subject(sentence: str, amount_start: int,
+                              text_before: str = "") -> str:
+    """The model a standard-tier (input/output/cached/...) price
+    belongs to: the nearest model token before the amount in the
+    sentence ("GPT-6.2 Sol, which costs $2 per million input
+    tokens" is Sol's $2; "Claude Opus 5.5, which is priced at $4
+    ..." is Opus 5.5's $4). Sentence-scoped, not clause-scoped:
+    the model sits in the clause before the price clause in exactly
+    these list sentences. v1.8.9 (run-20 gap 3): standard tiers
+    were never split by subject, so three models' input prices
+    (Neon $3, Sol $2, Opus $4) pooled under one pricing-input
+    identity and read as a conflict. A price with no model token
+    before it stays subject-less (fail-closed).
+    Worker B (v1.8.9 correction): a model named as a comparison
+    BASELINE is never the subject — "faster than Claude Fable 5.1
+    and Claude Mythos 5.1, and are available at a lower price: $8"
+    is Fable/Mythos 5.2's $8, not Mythos 5.1's (the nearest token
+    before the amount). Baseline tokens are skipped; the nearest
+    non-baseline token wins. A bare family name ("Fable's API
+    price") resolves to the versioned model of the same family
+    named earlier in the sentence — or, when the sentence was
+    truncated at an abbreviation ("Nov. 9, cutting Fable's API
+    price"), earlier in the document (text_before) — so the bare
+    name and the versioned name meet instead of splitting. The old
+    "against follows the amount" guard is gone: it blanked
+    first-side prices too ("cached tokens for Fable 5.2 cost $0.20
+    per million against $1.00" — the $0.20 IS Fable 5.2's);
+    second-side prices are the against rule's job, and the pricing
+    pass now routes them there first."""
     before = sentence[:amount_start]
-    toks = list(_MODEL_TOKEN_RE.finditer(before))
-    skipped_baseline = False
-    cues = _baseline_cues(sentence, [(t.start(), t.end()) for t in toks])
-    for i in range(len(toks) - 1, -1, -1):
-        t = toks[i]
-        cue = cues[i]
-        if cue and not (i == len(toks) - 1 and _token_owns_figure(before[t.end():], cue)):
-            skipped_baseline = True
+    tokens = list(_MODEL_TOKEN_RE.finditer(before))
+    best_m = None
+    for m in reversed(tokens):
+        if _model_token_is_baseline(before, m.start(), before[m.end():]):
             continue
-        # Past a skipped baseline, an earlier model that already owns
-        # a price before this amount does not own this one too
-        # ("Fable 5.2 costs $8, ahead of Opus 5.5 at $4" is not
-        # Fable's $4) — unresolved.
-        if skipped_baseline and re.search(r"[$£€]", re.sub(r"[$£€]\s*$", "", before[t.end():])):
-            return []
-        if not _model_token_specific(t.group(1)):
-            return []
-        chain = [t]
-        joins: List[str] = []
-        j = i - 1
-        while j >= 0 and not cues[j]:
-            gap = before[toks[j].end():chain[0].start()]
-            if not re.fullmatch(r"\s*(?:,\s*and|,|and|&)\s*", gap):
-                break
-            joins.append(gap)
-            chain.insert(0, toks[j])
-            j -= 1
-        if len(chain) > 1 and not any(re.search(r"and|&", g) for g in joins):
-            chain = [t]  # "Compared with A, B costs": a comma is not a coordination
-        if len(chain) > 1:
-            if not re.match(r"\s*(?:both|each|all)\b", before[t.end():], re.I):
-                return []
-            if not all(_model_token_specific(c.group(1)) for c in chain):
-                return []
-        return list(dict.fromkeys(_model_slug(c.group(1)) for c in chain))
-    return []
-
-
+        best_m = m
+        break
+    if best_m:
+        best = best_m.group(1)
+        # Bare family name: resolve to the versioned model of the
+        # same family named earlier in the sentence, if any.
+        if not re.search(r"\d", best):
+            fam = best.strip().lower()
+            for m in tokens:
+                if m.start() >= best_m.start():
+                    break
+                tok = m.group(1)
+                if re.search(r"\d", tok) \
+                        and _model_slug(tok).startswith(fam + "-"):
+                    best = tok
+            if not re.search(r"\d", best) and text_before:
+                # The sentence may have been truncated at an
+                # abbreviation ("Nov. 9, ...") — look earlier in
+                # the document for the versioned model.
+                for m in _MODEL_TOKEN_RE.finditer(text_before):
+                    tok = m.group(1)
+                    if re.search(r"\d", tok) \
+                            and _model_slug(tok).startswith(fam + "-"):
+                        best = tok
+        return _model_slug(best)
+    m = re.search(r"\bfor\s+(" + _MODEL_TOKEN_RE.pattern + r")",
+                  sentence[amount_start:amount_start + 40])
+    if m:
+        return _model_slug(m.group(1))
+    return ""
 # v1.8.5 (Nov 6): a tier word immediately before a $ amount — "input
 # $15", "Input: $0.30" — is that amount's own label. Only whitespace
 # or a colon may sit between the word and the $, so "output and $0.03"
@@ -1239,7 +1363,7 @@ def _rescan_inline_score(text: str, m: "re.Match[str]", key: str, label: str, va
         # ("Fable 5.2 74.2%" is Fable 5.2's score) — record the
         # subject so two models' scores on one benchmark never lump.
         subject = ""
-        model_tok = _benchmark_subject(text, num_start)
+        model_tok = _model_token_before(text, num_start)
         if model_tok:
             subject = _model_slug(model_tok)
         _add(key, label, raw_val, text[m.start():num_end],
@@ -1283,27 +1407,14 @@ _MARKET_CONTEXT_RE = re.compile(
 # Program" never becomes a subject.
 _MODEL_FAMILY_WORDS = frozenset({
     "fable", "mythos", "opus", "sonnet", "gemini", "astra", "carbon",
-    "argon",
+    "argon", "neon", "hydrogen",
     "gpt", "claude", "grok", "llama", "mistral", "qwen", "deepseek",
     "inkling", "ernie",
 })
-# v1.8.8 r3 (Arch audit 2026-11-17, conflict integrity): a model's
-# identity includes its tier and size, not just family + version —
-# "Qwen 3.8 Max" and "Qwen 3.8 27B" are different models and must
-# not share the slug "qwen-3-8"; "GPT-6.1 Terra" is not "GPT-6.1".
-# Glued spellings ("Qwen4-Max", "Qwen3.8-Max", "GPT6.1-Sol",
-# "Opus5.5") are the same tokens as their spaced forms and slug the
-# same way. A tier word still never stands alone: it only attaches
-# after a version or a size, so "Pro" or "Max" in prose is not a
-# model.
-_MODEL_TIER_ALT = (r"Astra|Carbon|Argon|Cyber|Sol|Terra|Max|Plus|Pro|Turbo|"
-                   r"Flash|Mini|Nano|Lite|Ultra")
 _MODEL_TOKEN_RE = re.compile(
-    r"\b((?:Claude\s+)?(?:Fable|Mythos|Opus|Sonnet|Gemini|Grok|Llama|Mistral|Qwen|DeepSeek|Inkling|ERNIE|Astra|Carbon|Argon)"
-    r"(?:\s*\d+(?:\.\d+)?"
-    r"(?:[\s-]+\d+(?:\.\d+)?[BT](?:-A\d+(?:\.\d+)?B)?)?"
-    r"(?:[\s-]+(?:" + _MODEL_TIER_ALT + r"))?)?"
-    r"|GPT-?\d+(?:\.\d+)?(?:[\s-]+(?:" + _MODEL_TIER_ALT + r"))?)\b"
+    r"\b((?:Claude\s+)?(?:Fable|Mythos|Opus|Sonnet|Gemini|Grok|Llama|Mistral|Qwen|DeepSeek|Inkling|ERNIE|Astra|Carbon|Argon|Neon|Hydrogen)"
+    r"(?:\s+\d+(?:\.\d+)?(?:\s+(?:Astra|Carbon|Argon|Neon|Hydrogen|Cyber|Sol))?)?"
+    r"|GPT-?\d+(?:\.\d+)?(?:\s+(?:Astra|Carbon|Cyber|Sol))?)\b"
 )
 # A token that can OWN a version number: a model token, a CamelCase
 # benchmark name (FrontierCode, OSWorld, RoboDojo), or a hyphenated
@@ -1323,17 +1434,16 @@ def _model_slug(token: str) -> str:
     """Canonical slug for a model token ("Claude Opus 5.5" -> "opus-5-5").
     Bare display names resolve to their one unambiguous full model:
     "Astra" is GPT-6 Astra, "Carbon" is Gemini 4 Carbon, "Argon" is
-    Gemini 4 Argon — a bare "Astra 42.8%" and a "GPT-6 Astra 42.8%"
+    Gemini 4 Argon, "Neon" is Gemini 4 Neon, "Hydrogen" is Gemini 4
+    Hydrogen — a bare "Astra 42.8%" and a "GPT-6 Astra 42.8%"
     are the same model's score, not two subjects. Versioned names
     (Opus, Sonnet, Fable) are ambiguous across versions and are NOT
     aliased."""
     token = re.sub(r"^claude\s+", "", token.strip(), flags=re.I)
     slug = re.sub(r"[^a-z0-9]+", "-", token.lower()).strip("-")
-    # v1.8.8 r3: a glued version is the spaced version ("qwen4-max"
-    # is "qwen-4-max", "gpt6-1-sol" is "gpt-6-1-sol").
-    slug = re.sub(r"(?<=[a-z])(?=\d)", "-", slug)
     return {"astra": "gpt-6-astra", "carbon": "gemini-4-carbon",
-            "argon": "gemini-4-argon"}.get(slug, slug)
+            "argon": "gemini-4-argon", "neon": "gemini-4-neon",
+            "hydrogen": "gemini-4-hydrogen"}.get(slug, slug)
 
 
 def _model_token_before(text: str, num_start: int, window: int = 40) -> str:
@@ -1346,118 +1456,6 @@ def _model_token_before(text: str, num_start: int, window: int = 40) -> str:
         if before[m.end():].strip() == "":
             best = m.group(1)
     return best
-
-
-_SCORE_VERB_TAIL = (
-    r"(?:'s)?\s+(?:[\w-]+\s+){0,3}?"
-    r"(?:scor(?:ed|es|ing)|achiev(?:ed|es|ing)|hit(?:s|ting)?|reach(?:ed|es|ing)|"
-    r"post(?:ed|s|ing)?|gets?|got|earn(?:ed|s)?|record(?:ed|s)?|lands?|landed|tops?|topped)"
-    r"\s+(?:a\s+|an\s+)?(?:score\s+of\s+|of\s+)?$"
-)
-
-
-def _benchmark_subject(text: str, num_start: int) -> str:
-    """The model a benchmark score belongs to, as a token, or "".
-    A model token immediately before the number ("Fable 5.2 74.2%")
-    first; else (v1.8.8 r3) a model that is the grammatical subject
-    of a scoring verb right before the number in the same sentence
-    ("Opus 5.5 scored 87.0% on GPQA", "On GPQA, Opus 5.5 hits 87%").
-    Without the second form a prose benchmark score never carried a
-    subject, so under the r3 identity gate a genuine same-model
-    benchmark dispute could never be a conflict. A comparison
-    baseline ("than Opus 5.5 scored ...") is never the subject."""
-    tok = _model_token_before(text, num_start)
-    if tok:
-        return tok
-    sent_start = max(text.rfind("\n", 0, num_start), text.rfind(". ", 0, num_start)) + 1
-    lo = max(sent_start, num_start - 90)
-    before = text[lo:num_start]
-    best = ""
-    for m in _MODEL_TOKEN_RE.finditer(before):
-        if re.fullmatch(_SCORE_VERB_TAIL, before[m.end():], re.I) \
-                and not _is_comparison_target(text, lo + m.start()):
-            best = m.group(1)
-    return best
-
-
-# v1.8.8 r3 (Arch audit 2026-11-17, conflict integrity): a model
-# named as the BASELINE of a comparison is not the subject of the
-# figure next to it. "Qwen4-Max outperforms its predecessor,
-# Qwen3.8-Max, overall while using 35% fewer tokens" — the 35% is
-# Qwen4-Max's; "Outperforms Qwen3.8-Max with up to ~50% fewer
-# tokens" names no subject at all. Binding the baseline as the
-# subject turns two different claims into one identity and
-# manufactures a stated-subject conflict that no identity gate can
-# catch, so the binder must skip it.
-_COMPARISON_TARGET_RE = re.compile(
-    r"\b(?:than|against|vs\.?|versus|compared\s+(?:with|to)|relative\s+to|"
-    r"outperform(?:s|ed|ing)?|beat(?:s|ing)?|surpass(?:es|ed|ing)?|ahead\s+of|"
-    r"over|instead\s+of|unlike|predecessor|successor|as\s+(?:\w+\s+)?as|"
-    r"same\s+(?:[\w-]+\s+){0,3}as)"
-    r"(?:\s+(?:its|their|the)\s+(?:predecessor|successor|previous\s+model))?"
-    r"[\s,:(]*$",
-    re.I,
-)
-
-
-# A baseline that is immediately followed by its OWN figure does
-# own that figure. Possession or a label is unambiguous ("against
-# Opus 5.5's $4", "vs. Opus 5.5 (45.5%)", "Opus 5.5: $4"). A bare
-# "at"/adjacency is the baseline's own figure after "against"/"vs"/
-# "ahead of" ("ahead of Opus 5.5 at 45.5%"), but NOT after "than" or
-# "as ... as" — "Opus 5.5 is cheaper than Fable 5.2 at $4" is Opus's
-# $4 — so there the binder treats it as ambiguous. "with" never
-# owns: in "outperforms Qwen3.8-Max with 50% fewer tokens" the 50%
-# describes the outperformer.
-_OWNED_STRONG_GAP_RE = re.compile(
-    r"(?:'s\s*|\s*:\s*|\s*\(\s*|\s*=\s*)"
-    r"(?:(?:about|around|roughly|only|just)\s+|~\s*)?[$£€]?\s*", re.I)
-_OWNED_WEAK_GAP_RE = re.compile(
-    r"(?:\s+at\s+|\s+)(?:(?:about|around|roughly|only|just)\s+|~\s*)?[$£€]?\s*", re.I)
-
-
-def _comparison_cue(text: str, token_start: int) -> str:
-    """The comparison cue that makes the token at *token_start* a
-    baseline ("than", "against", "outperforms its predecessor, "),
-    lower-cased, or "" when the token is not a baseline."""
-    m = _COMPARISON_TARGET_RE.search(text[max(0, token_start - 40):token_start])
-    return m.group(0).strip(" ,:(").lower() if m else ""
-
-
-def _baseline_cues(text: str, spans: List[Tuple[int, int]]) -> List[str]:
-    """Per model-token span (absolute offsets, in order), the cue that
-    makes it a comparison baseline, or "". A token coordinated with a
-    baseline is a baseline too: in "faster than Claude Fable 5.1 and
-    Claude Mythos 5.1" both are baselines, not just the first."""
-    cues: List[str] = []
-    for i, (a, _b) in enumerate(spans):
-        cue = _comparison_cue(text, a)
-        if not cue and i > 0 and cues[i - 1] and \
-                re.fullmatch(r"\s*(?:,\s*and|,|and|or|&)\s*", text[spans[i - 1][1]:a]):
-            cue = cues[i - 1]
-        cues.append(cue)
-    return cues
-
-
-def _token_owns_figure(between: str, cue: str = "") -> bool:
-    """True when the text between a model token and a figure makes
-    the figure the token's own."""
-    if re.match(r"(?:than|as\b|same\b)", cue):
-        # After "than"/"as ... as" only possession is unambiguous: in
-        # "costs twice as much as Opus 5.5 ($8 / $40 against $4 / $20)"
-        # the parenthetical holds both sides of the comparison.
-        return bool(re.fullmatch(r"'s\s*[$£€]?\s*", between))
-    if _OWNED_STRONG_GAP_RE.fullmatch(between):
-        return True
-    return bool(_OWNED_WEAK_GAP_RE.fullmatch(between))
-
-
-def _is_comparison_target(text: str, token_start: int) -> bool:
-    """True when the model token starting at *token_start* is the
-    baseline of a comparison ("than Opus 5.5", "outperforms its
-    predecessor, Qwen3.8-Max", "twice as much as Opus 5.5"), not
-    the subject of the nearby figure."""
-    return bool(_COMPARISON_TARGET_RE.search(text[max(0, token_start - 40):token_start]))
 
 
 def _is_model_version_number(text: str, num_start: int, num_end: int) -> bool:
@@ -1524,6 +1522,51 @@ _FOLLOWING_BENCH_RE = re.compile(
 def _is_following_benchmark_score(text: str, num_end: int) -> bool:
     """True when a matched number is the score of a following benchmark."""
     return bool(_FOLLOWING_BENCH_RE.match(text, num_end))
+
+
+def _number_in_benchmark_parens(text: str, num_start: int) -> bool:
+    """True when a number sits in a benchmark's parenthesized score
+    ("RiemannBench (84.0%)") — the number belongs to the benchmark
+    named before the open paren, not to a benchmark named after it
+    in the same sentence. v1.8.9 (run-20 gap 6): the reverse pass
+    claimed the 84.0% for HLE because "HLE-Diamond" followed it,
+    while its own benchmark sat in the parens before it."""
+    before = text[max(0, num_start - 40):num_start]
+    m = re.search(r"([A-Za-z][\w\-']*(?:\s+[A-Za-z][\w\-']*){0,2})\s*\(\s*$", before)
+    if not m:
+        return False
+    name = m.group(1)
+    if _generic_benchmark_phrase(name):
+        return True
+    if re.search(r"\b(" + _BENCHMARK_NAMES_RE + r")\b", name, re.I):
+        return True
+    cm = _GENERIC_CAMEL_RE.search(name)
+    return bool(cm and cm.group(0).lower() not in _GENERIC_BENCH_ORG_STOPLIST)
+
+
+def _number_followed_by_benchmark(text: str, num_end: int) -> bool:
+    """True when a matched number is directly followed by a benchmark
+    name ("the 84.0% RiemannBench result") — the number is that
+    benchmark's score, not the preceding entity's. v1.8.9 (run-20
+    gap 6): the forward inline pattern claimed the 84.0% for HLE
+    (named earlier in the sentence) although RiemannBench follows
+    it. The reverse pass cannot mint it (RiemannBench is unmapped),
+    so the generic pass owns it; the preceding entity must not claim
+    it. Org names are excluded by the stoplist, so "71.3% DeepMind
+    reports" never trips it."""
+    after = text[num_end:num_end + 40]
+    m = re.match(r"\s+", after)
+    rest = after[m.end():] if m else after
+    # A model token is a measured system, not a benchmark — "MMLU
+    # (EM) 5-shot: ERNIE 93.3, DeepSeek-V4-Flash 89.4" must not read
+    # DeepSeek as the following benchmark (v1.8.9: the guard as first
+    # written swallowed the MMLU 93.3 this way).
+    if _MODEL_TOKEN_RE.match(rest):
+        return False
+    if _GENERIC_BENCHMARK_PHRASE_RE.match(rest):
+        return True
+    cm = _GENERIC_CAMEL_RE.match(rest)
+    return bool(cm and cm.group(0).lower() not in _GENERIC_BENCH_ORG_STOPLIST)
 
 
 # v1.8.5 (Nov 6): a bare number that is a measurement setting, not a
@@ -1788,28 +1831,6 @@ def extract_numeric_claims(
             if claims[idx].get("shot_count") is None and shot_count is not None:
                 claims[idx]["shot_count"] = shot_count
             return
-        # v1.8.8 r3: the same key, value, variant, era and effort
-        # mentioned twice in one document — once naming the model and
-        # once not ("Qwen4-Max is priced at $1.50 ..." and later "-
-        # Input: $1.50") — is one claim, not two. A subject-less
-        # mention folds into the one stated mention (or the stated
-        # mention upgrades an earlier subject-less one); with two or
-        # more stated subjects for that figure the subject-less
-        # mention is ambiguous and stays its own claim.
-        base = (key, numeric, variant, era, effort)
-        stated_idx = [i for d, i in seen.items()
-                      if d[:3] == base[:3] and d[4:] == base[3:] and d[3]]
-        if not subject and len(stated_idx) == 1:
-            return
-        if subject and not stated_idx:
-            bare = (key, numeric, variant, "", era, effort)
-            if bare in seen:
-                idx = seen.pop(bare)
-                claims[idx]["subject"] = subject
-                if claims[idx].get("shot_count") is None and shot_count is not None:
-                    claims[idx]["shot_count"] = shot_count
-                seen[dedup] = idx
-                return
         seen[dedup] = len(claims)
         claims.append({
             "entity_key":    key,
@@ -1826,6 +1847,7 @@ def extract_numeric_claims(
             "context":       context[:120],
         })
 
+    text = _without_metadata(text)
     # Pass 1 — colon-delimited data lines (higher precision)
     for m in _COLON_RE.finditer(text):
         label_fragment = m.group(1).strip()
@@ -1842,7 +1864,7 @@ def extract_numeric_claims(
         bare = _unit_of(raw_val) == ""
         count_after = bare and _count_after(text, m.end())
         subject = ""
-        model_tok = _benchmark_subject(text, m.start(2))
+        model_tok = _model_token_before(text, m.start(2))
         if model_tok:
             subject = _model_slug(model_tok)
         _add(key, label, raw_val, m.group(0),
@@ -1897,13 +1919,18 @@ def extract_numeric_claims(
             # reverse pass mints it under its own name (v1.8.5, Nov 6:
             # "82.2% on SWE-bench Verified" is not GPQA's score).
             continue
+        if key in _BENCHMARK_KEYS and _number_followed_by_benchmark(text, m.end()):
+            # v1.8.9 (run-20 gap 6): "the 84.0% RiemannBench result"
+            # — the number is the FOLLOWING benchmark's score; the
+            # preceding entity must not claim it.
+            continue
         # Same bare-number count rule as the colon pass (Sieve gap
         # 2026-11-03: inline counts had no unit and "compared" with %).
         bare = _unit_of(raw_val) == ""
         count_after = bare and _count_after(text, m.end())
         # v1.8.7: the score belongs to the model named just before it.
         subject = ""
-        model_tok = _benchmark_subject(text, m.start(2))
+        model_tok = _model_token_before(text, m.start(2))
         if model_tok:
             subject = _model_slug(model_tok)
         _add(key, label, raw_val, m.group(0),
@@ -1918,12 +1945,17 @@ def extract_numeric_claims(
         raw_val = m.group(1).strip()
         if _is_version_number(text, m.start(1)):
             continue
+        if _number_in_benchmark_parens(text, m.start(1)):
+            # v1.8.9 (run-20 gap 6): "RiemannBench (84.0%), and
+            # HLE-Diamond" — the 84.0% is RiemannBench's parenthesized
+            # score, not HLE's; the reverse pass must not claim it.
+            continue
         entity = _normalize_entity_key(m.group(2).strip())
         if entity is None:
             continue
         key, label, ematch = entity
         subject = ""
-        model_tok = _benchmark_subject(text, m.start(1))
+        model_tok = _model_token_before(text, m.start(1))
         if model_tok:
             subject = _model_slug(model_tok)
         _add(key, label, raw_val, m.group(0),
@@ -2108,17 +2140,23 @@ def extract_numeric_claims(
             # "Against"-pair inheritance: the second element of an
             # "X against Y" pair takes the first element's tier when
             # the pair names one price list ("cache reads ($0.20
-            # against $0.25)" — both are cache-read prices). It does
-            # NOT inherit when the amount is qualified as another
-            # model's price ("$0.20 per million against $1.00 for
-            # Astra" — the $1.00 is Astra's, not a cache price).
+            # against $0.25)" — both are cache-read prices; "cached
+            # tokens ... cost $0.20 per million against $1.00 for
+            # Astra" — the $1.00 is Astra's cached-token price, so
+            # it inherits the cached tier too, and the "for Astra"
+            # names its SUBJECT, not a different tier). Worker B
+            # (v1.8.9 correction): the old check required the text
+            # between the two amounts to be exactly "against", so a
+            # unit phrase ("per million against") broke the
+            # inheritance and the second price minted as bare
+            # pricing — an unmatched claim. Any short gap carrying
+            # "against"/"vs" and no other $ now inherits.
             if prev_amount.get("tier") and prev_amount.get("end") is not None:
                 between_prev = text[prev_amount["end"]:m.start()]
-                if re.fullmatch(r"\s*(?:against|vs\.?)\s*", between_prev or ""):
-                    after_amt = sentence[amount_off:amount_off + 30] \
-                        if amount_off < len(sentence) else ""
-                    if not re.search(r"\bfor\s+" + _MODEL_TOKEN_RE.pattern, after_amt):
-                        tier = prev_amount["tier"]
+                if len(between_prev) <= 40 and "$" not in between_prev \
+                        and "\n" not in between_prev \
+                        and re.search(r"\b(?:against|vs\.?)\b", between_prev):
+                    tier = prev_amount["tier"]
         if not tier:
             # Sentence-level per-task: a "$X" introduced by "for" in
             # a sentence that names a per-task price elsewhere ("61.82
@@ -2144,41 +2182,52 @@ def extract_numeric_claims(
         # A slash-pair complement inherits the first element's era.
         if prev_amount.get("tier") and re.fullmatch(r"\s*/\s*", text[prev_amount.get("end", m.start()):m.start()] or ""):
             era = prev_amount.get("era", era)
-        # v1.8.8 r3: so does the second price of an "and" pair that
-        # states no era of its own ("currently cost $2 and $10", "new
-        # list prices of $1.50 per million input tokens and $4.50 per
-        # million output tokens") — the marker is the pair's, and
-        # reading the output price as undated split one price list
-        # across two eras. A stated era on the second price is never
-        # overridden.
-        elif era == "unknown" and prev_amount.get("era") not in (None, "", "unknown") \
-                and prev_amount.get("end") is not None \
-                and re.fullmatch(r"(?:\s*(?:per|/)\s*(?:1M|million|M)\b"
-                                 r"(?:\s+(?:input|output|cached)?\s*tokens?)?)?\s*,?\s*and\s*",
-                                 text[prev_amount["end"]:m.start()] or "", flags=re.I):
-            era = prev_amount["era"]
-        subject = _pricing_subject(sentence, amount_off) if tier == "per-task" else ""
+        subject = ""
+        if _pricing_is_against_second_side(sentence, amount_off):
+            # Worker B (v1.8.9 correction): a second-side price
+            # belongs to the compared-against model — the against
+            # rule runs FIRST, before the nearest-model rule can
+            # claim it for the first side's model (Medium's prior
+            # $10/$50 "against $10 / $50 for Claude Fable 5.1" read
+            # as Fable 5.2's; the $4/$20 "against" Opus 5.5's
+            # would read as Fable 5.2's the same way).
+            subject = _pricing_against_subject(sentence, amount_off)
+        elif tier == "per-task":
+            subject = _pricing_subject(sentence, amount_off)
+        else:
+            # v1.8.9 (run-20 gap 3): standard tiers partition by
+            # subject too — the partition already is (era, subject),
+            # it was just always "" for standard tiers. Worker B:
+            # a bare "pricing" claim also takes its subject here
+            # ("GPT-6 Astra costs $10 and $50 on standard tasks" —
+            # Astra's prices, tier-less but owned, so they stand as
+            # Astra uniques instead of unmatched abstentions).
+            # text[:m.start()] is passed so a bare family name can
+            # resolve against the versioned model named earlier in
+            # the document when the sentence itself was truncated
+            # at an abbreviation ("Nov. 9, ...").
+            subject = _pricing_standard_subject(
+                sentence, amount_off, text[:m.start()])
         # Thinking level, per-task prices only: a standard-tier price
         # does not vary by thinking level, so it never carries one.
         effort = _pricing_effort(sentence, amount_off) if tier == "per-task" else ""
-        subjects = [subject] if subject else []
-        slash_partner = prev_amount.get("end") is not None and \
-            re.fullmatch(r"\s*/\s*", text[prev_amount["end"]:m.start()] or "")
-        if slash_partner and prev_amount.get("subjects") is not None and tier != "per-task":
-            # v1.8.8 r3: a "$A / $B" pair is one price list with one
-            # owner — the complement takes the first element's model.
-            subjects = list(prev_amount["subjects"])
-        elif not subjects:
-            if tier == "per-task":
-                # A per-task price on the second side of an "against"
-                # comparison naming a different model belongs to that
-                # model ("$8 / $40 against $4 / $20" for Opus 5.5).
-                against = _pricing_against_subject(sentence, amount_off)
-                subjects = [against] if against else []
-            else:
-                # v1.8.8 r3: every standard-tier price carries the
-                # model it is quoted for, when the sentence says.
-                subjects = _pricing_owner_subjects(sentence, amount_off)
+        if not subject:
+            # A standard-tier price on the second side of an "against"
+            # comparison naming a different model belongs to that
+            # model ("$8 / $40 against $4 / $20" for Opus 5.5) — it
+            # must not compare against the first model's prices.
+            subject = _pricing_against_subject(sentence, amount_off)
+        if subject == "mythos-5-2":
+            # Worker B (v1.8.9 correction): Fable 5.2 and Mythos 5.2
+            # are the same underlying model at the same $8/$40 price
+            # (the primary says so, and lists the same price for
+            # both) — a Mythos 5.2 price IS the Fable 5.2 price for
+            # comparison, so it canonicalizes to fable-5-2 and the
+            # primary's $8/$40 join the other docs' $8/$40 group
+            # instead of partitioning under mythos-5-1 (the baseline
+            # the old nearest-model rule read). Mythos 5.1 is a
+            # different generation and never canonicalizes.
+            subject = "fable-5-2"
         if tier == "input":
             key, label = "pricing-input", "Pricing (input)"
         elif tier == "output":
@@ -2197,13 +2246,9 @@ def extract_numeric_claims(
             key, label = "pricing-batch-output", "Pricing (batch output)"
         else:
             key, label = "pricing", "Pricing"
-        # A price quoted for two models jointly ("Argon and Carbon both
-        # cost $2") is one claim per model.
-        for subject in (subjects or [""]):
-            _add(key, label, m.group(1), window.strip()[:120], unit_override="$",
-                 subject=subject, era=era, effort=effort)
-        prev_amount = {"tier": tier, "era": era, "end": m.end(),
-                       "subjects": [x for x in subjects if x]}
+        _add(key, label, m.group(1), window.strip()[:120], unit_override="$",
+             subject=subject, era=era, effort=effort)
+        prev_amount = {"tier": tier, "era": era, "end": m.end()}
 
     # Pass 5 — benchmark table rows (v1.8.7, Arch gate point 1): a
     # list-item row names a benchmark and then a run of model scores.
@@ -2211,22 +2256,6 @@ def extract_numeric_claims(
     # unmapped benchmarks are handled by the generic fallback's
     # table-row pass in extract_generic_quantitative_claims.
     for row in _parse_table_rows(text):
-        if not row["benchmark_key"]:
-            continue
-        key = row["benchmark_key"]
-        label = _normalize_entity_key(row["benchmark_name"])
-        display = label[1] if label else row["benchmark_name"]
-        _add(key, display, row["raw"], row["line"][:120],
-             version=row["version"], variant=row["variant"],
-             subject=row["model_slug"])
-
-    # Pass 6 — benchmark chart series (v1.8.8 r4): "for A, B and C:
-    # Bench v1, v2 and v3; ..." binds each value to its model
-    # positionally. The first value of a series is already minted by
-    # the inline pass without a subject; _add folds that subject-less
-    # mention into this stated one (r3 rule), and the remaining values
-    # mint here for the first time.
-    for row in _parse_chart_series(text):
         if not row["benchmark_key"]:
             continue
         key = row["benchmark_key"]
@@ -2293,15 +2322,8 @@ _GENERIC_DIGIT_RE = re.compile(
     # joins million/billion/thousand as a magnitude suffix (v1.8.7:
     # "$2 trillion" is $2,000,000,000,000, not $2).
     r"([$£€]?)(\d(?:[\d,]*\d)?(?:\.\d+)?)"
-    # v1.8.8 r3: a spelled-out "percent"/"per cent" is a percentage,
-    # exactly like "%" — "a 62 percent reduction in task costs" minted
-    # as a task COUNT of 62 and conflicted with "721 specialized
-    # fields" (Arch audit 2026-11-17, conflict 5). "percentage" is
-    # not matched (\b), so "16 percentage points" is untouched.
-    r"(\s*(?:%|percent\b|per\s+cent\b|million|billion|trillion|thousand))?"
+    r"(\s*(?:%|million|billion|trillion|thousand))?"
 )
-_GENERIC_PERCENT_RANGE_RE = re.compile(
-    r"\s*(?:to|or|and|–|—)\s*\d+(?:\.\d+)?\s*(?:%|percent\b|per\s+cent\b)", re.I)
 _GENERIC_NUMBER_WORDS = {
     "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
     "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
@@ -2580,8 +2602,6 @@ def _generic_numbers_in(sentence: str) -> List[Dict]:
     numbers: List[Dict] = []
     for m in _GENERIC_DIGIT_RE.finditer(sentence):
         currency, digits, suffix = m.group(1), m.group(2), (m.group(3) or "").strip()
-        if re.fullmatch(r"per\s*cent", suffix, re.I):
-            suffix = "%"
         start, end = m.start(), m.end()
         if _generic_is_version(sentence, start, end):
             continue
@@ -2628,18 +2648,40 @@ def _generic_numbers_in(sentence: str) -> List[Dict]:
         # days" stay skipped.
         value = float(digits.replace(",", ""))
         dur_m = _GENERIC_DURATION_RE.match(sentence[end:])
-        if dur_m:
+        _inf_dur_m = None
+        if not dur_m:
+            # "41.8 inference minutes per task" — the duration unit
+            # is "inference minutes", not bare "minutes".
+            _inf_dur_m = re.match(
+                r"\s+inference\s+(minutes?|hours?|seconds?)\b",
+                sentence[end:], re.I)
+        if dur_m or _inf_dur_m:
+            dur_span = (dur_m.group(0) if dur_m
+                        else _inf_dur_m.group(0))
+            dur_unit = (dur_m.group(0).strip().lower() if dur_m
+                        else _inf_dur_m.group(1).lower())
             # The completion verb may sit well before the duration in
             # a long sentence ("formalized Fermat's Last Theorem in
             # the Lean proof assistant in 30 hours") — check the whole
             # sentence before the number, not a 40-char window.
             before = sentence[:start]
             if not _GENERIC_COMPLETION_VERB_RE.search(before):
-                continue
+                # v1.8.9 (run-20 gap 11): a task duration in a model
+                # table row ("Gemini 4 Neon Extra High: 61, $6.44 per
+                # task, 21.5 minutes") carries no completion verb —
+                # the "per task" + minutes + model-row context IS the
+                # duration claim. Without it the minutes never mint
+                # and no cross-unit speed check is possible. Only when
+                # the sentence names a model token and a per-task
+                # phrase, so "took 5 minutes" prose and "within 12
+                # hours" context stay out.
+                if not (re.search(r"\bper task\b", sentence, re.I)
+                        and _MODEL_TOKEN_RE.search(sentence)):
+                    continue
             numbers.append({
-                "start": start, "end": end + len(dur_m.group(0)),
-                "value": value, "raw": sentence[start:end + len(dur_m.group(0))].strip(),
-                "unit": dur_m.group(0).strip().lower(), "currency": currency,
+                "start": start, "end": end + len(dur_span),
+                "value": value, "raw": sentence[start:end + len(dur_span)].strip(),
+                "unit": dur_unit, "currency": currency,
                 "duration": True,
             })
             continue
@@ -2668,12 +2710,6 @@ def _generic_numbers_in(sentence: str) -> List[Dict]:
         if re.search(r"https?://\S*$", sentence[:start]):
             continue
         if suffix == "%":
-            unit = "percent"
-        elif not suffix and not currency and _GENERIC_PERCENT_RANGE_RE.match(sentence[end:]):
-            # v1.8.8 r3: the first endpoint of a percentage range
-            # ("24 to 35% fewer tokens") is a percentage too, not a
-            # count of 24 — the range shares the second endpoint's
-            # unit.
             unit = "percent"
         elif suffix:
             value *= {"million": 1e6, "billion": 1e9, "trillion": 1e12,
@@ -2774,17 +2810,6 @@ def _generic_subject_ok(display: str) -> bool:
     return base not in _GENERIC_SUBJECT_STOPLIST
 
 
-def _vendor_usage(token: str, after: str) -> bool:
-    """v1.8.8 r3: a bare family word used as the vendor ("The Qwen
-    team's announcement", "Qwen's official blog", "Gemini app") names
-    an organisation or product line, not a measured model. A
-    versioned token ("Qwen4-Max's") is never vendor usage."""
-    if re.search(r"\d", token):
-        return False
-    return bool(re.match(r"(?:'s)?\s+(?:official\s+)?(?:team|teams|cloud|blog|lab|labs|app|api)\b",
-                         after, re.I))
-
-
 def _generic_subject(sentence: str, num: Dict, numbers: List[Dict]) -> Tuple[str, str]:
     """The measured subject of one number: the nearest model token in
     the segment since the previous number (a model token — "Fable
@@ -2810,48 +2835,34 @@ def _generic_subject(sentence: str, num: Dict, numbers: List[Dict]) -> Tuple[str
     def _slug(display: str) -> str:
         return re.sub(r"[^a-z0-9]+", "-", display.lower()).strip("-")
 
-    # v1.8.8 r3: the second endpoint of a range or a bare pair ("24
-    # to 35% fewer tokens", "24% and 35%") belongs to the same subject
-    # as the first — the connector between them names nothing. Not
-    # for a change ("from $4.43 to $1.67": before and after are
-    # different systems) and not in a "respectively" series (each
-    # value has its own owner).
-    prev = None
-    for n in numbers:
-        if n["end"] == prev_end and n is not num:
-            prev = n
-    if prev is not None and re.fullmatch(r"\s*(?:to|and|or|–|—)\s*", seg_before, re.I) \
-            and prev.get("unit") == num.get("unit") \
-            and not re.search(r"\bfrom\s*[$£€]?\s*$", sentence[:prev["start"]], re.I) \
-            and not re.search(r"\brespectively\b", sentence, re.I):
-        return _generic_subject(sentence, prev, numbers)
-
     # Model tokens first: "Fable 5.2 49.1%" is Fable 5.2's score.
-    # v1.8.8 r3: a comparison baseline ("than X", "outperforms X")
-    # is never the subject.
-    all_toks = list(_MODEL_TOKEN_RE.finditer(sentence[:num["start"]]))
-    all_cues = _baseline_cues(sentence, [(t.start(), t.end()) for t in all_toks])
-    model_before = [t for t, cue in zip(all_toks, all_cues)
-                    if t.start() >= prev_end
-                    and (not cue or _token_owns_figure(sentence[t.end():num["start"]], cue))
-                    and not _vendor_usage(t.group(1), sentence[t.end():])]
-    if model_before:
-        display = model_before[-1].group(1)
+    # Worker B (v1.8.9 correction): a model named as a comparison
+    # BASELINE is never the subject — "about 60% fewer blocks with
+    # Fable 5.2 compared with Fable 5.1" is Fable 5.2's 60%, not
+    # Fable 5.1's (the nearest token before the number). Baseline
+    # tokens (immediately preceded by than / compared with|to /
+    # versus / vs / against / as) are skipped; the nearest
+    # non-baseline token wins. If every token in the segment is a
+    # baseline, fall through to the other subject sources below
+    # instead of returning the baseline.
+    model_before = list(_MODEL_TOKEN_RE.finditer(seg_before))
+    for m in reversed(model_before):
+        if _model_token_is_baseline(seg_before, m.start(),
+                                    seg_before[m.end():]):
+            continue
+        display = m.group(1)
         return _model_slug(display), display
     tokens_before = [
         m for m in _GENERIC_PRODUCT_RE.finditer(seg_before)
         if _generic_product_base(m.group(1)) not in _GENERIC_PRODUCT_BASE_STOPLIST
         and _generic_subject_ok(m.group(1))
-        and not _is_comparison_target(sentence, prev_end + m.start())
     ]
     if tokens_before:
         display = tokens_before[-1].group(1)
         return _slug(display), display
     # Bare capitalized model-family word ("Fable", "Opus", "Mythos").
     fam_before = [m for m in re.finditer(r"\b([A-Z][a-z]+)\b", seg_before)
-                  if m.group(1).lower() in _MODEL_FAMILY_WORDS
-                  and not _is_comparison_target(sentence, prev_end + m.start())
-                  and not _vendor_usage(m.group(1), seg_before[m.end():])]
+                  if m.group(1).lower() in _MODEL_FAMILY_WORDS]
     if fam_before:
         display = fam_before[-1].group(1)
         return _slug(display), display
@@ -2906,6 +2917,21 @@ def _generic_metric(sentences: List[str], sent_idx: int, num: Dict,
     """
     sentence = sentences[sent_idx]
     refrain = bool(re.search(r"\brefrain\w*\b", sentence))
+    # v1.8.9 (run-20 gap 14): a stated uncertainty is not a gap —
+    # "Its published uncertainty for Neon is plus or minus 0.94
+    # percentage points" is the published margin on a score, not a
+    # percentage-point gap between two figures. The "percentage
+    # points" cue below would claim it as a gap, so the uncertainty
+    # check fires first: the number right after "plus or minus" /
+    # "±" / "margin of error", or the number in an "uncertainty"
+    # sentence followed by "percentage point(s)".
+    _before30 = sentence[max(0, num["start"] - 30):num["start"]]
+    if _GENERIC_UNCERTAINTY_BEFORE_RE.search(_before30):
+        return "uncertainty"
+    if _GENERIC_UNCERTAINTY_SENT_RE.search(sentence) and \
+            re.search(r"percentage\s+points?\b",
+                      sentence[num["end"]:num["end"] + 25], re.I):
+        return "uncertainty"
     # v1.8.7 Region 0 (fraction): a numerator followed by "of <number>
     # <count-noun>" takes that noun's family ("41 of 57 facts" — the
     # 41 is a facts count; the "facts" cue sits after the 57, so the
@@ -2948,6 +2974,31 @@ def _generic_metric(sentences: List[str], sent_idx: int, num: Dict,
         if "artificial analysis" in sentence.lower() or \
                 re.search(r"\bindex\b", clause_text, re.I):
             return "score"
+    # v1.8.9 (run-20 gap 10): a board/ranking score — "Arena's
+    # November 18 board moved Neon High to third overall at 1,333,
+    # three points behind Opus 5.5 Max" — a bare integer in a
+    # sentence naming a board (arena/board/leaderboard) with a rank
+    # cue (overall/ranked/third/second/first/place) is a score on
+    # that board. The value floor (>= 100) keeps small counts out
+    # ("ranked third with 5 wins" is not a board score). This only
+    # MINTS the revised figure — it does not mark it as a revision:
+    # 1,333 aligns with 1,336 inside the large-count tolerance, so
+    # the revision itself still needs a variant/revision marker
+    # (a design decision, not an extraction fix).
+    if num.get("unit") == "count" and float(num["value"]) == int(float(num["value"])) \
+            and float(num["value"]) >= 100:
+        # A number that already carries its own count noun ("4,200
+        # agent sessions", "3,885 votes") is that count, not a board
+        # score — the board rule only fires for a bare figure ("at
+        # 1,333, three points behind"). "points" is deliberately not
+        # in the list: a board score stated in points ("a score of
+        # 1,333 points") is still a score.
+        _near = sentence[max(0, num["start"] - 25):num["end"] + 25]
+        if not re.search(r"\b(?:sessions?|votes?|tasks?|agents?|attempts?|questions?|tests?|runs?|examples?|items?|cases?|evals?)\b",
+                         _near, re.I) and \
+                re.search(r"\b(?:arena|board|leaderboard)\b", sentence, re.I) and \
+                re.search(r"\b(?:overall|ranked?|third|second|first|place[ds]?)\b", sentence, re.I):
+            return "score"
     # v1.8.7 decimal guard: a non-integer bare decimal (0.838, 61.82)
     # is a measurement, never a count of a count-noun family — a
     # version fragment or a score must not read as a task count.
@@ -2979,7 +3030,10 @@ def _generic_metric(sentences: List[str], sent_idx: int, num: Dict,
             # "relative improvemen", so the full phrase never matches.
             # A stem is enough — the guard only vetoes the override,
             # the ordinary regions still decide the family.
-            if not re.search(r"\b(?:faster|slower|recall|relative|percentage)\b", near, re.I):
+            # v1.8.9 (run-20 gap 8): a cost word vetoes it too — a
+            # "32% lower cost per task" in a benchmark-naming clause
+            # is a cost delta, not a score on that benchmark.
+            if not re.search(r"\b(?:faster|slower|recall|relative|percentage|cost|price|cheaper|complet\w*|refus\w*)\b", near, re.I):
                 return "score"
         # v1.8.8 r2: a benchmark lead-in ("- On Last Secure Code
         # Bench, function-level pass rate rose from 22.0% to 31.8%",
@@ -2998,8 +3052,77 @@ def _generic_metric(sentences: List[str], sent_idx: int, num: Dict,
         if prev and re.match(r"\s*[-•*]?\s*(?:On|For|In)\b", prev, re.I) and \
                 _generic_benchmark_phrase(prev):
             near = sentence[max(0, num["start"] - 20):num["end"] + 20]
-            if not re.search(r"\b(?:faster|slower|recall|relative|percentage)\b", near, re.I):
+            if not re.search(r"\b(?:faster|slower|recall|relative|percentage|cost|price|cheaper|complet\w*|refus\w*)\b", near, re.I):
                 return "score"
+        # v1.8.9 (run-20 gap 4): the harness pair — "On SWE-sweep,
+        # it already leads on the mini-SWE harness (12.8%) and more
+        # than triples to a state-of-the-art 39.0% in Google
+        # Antigravity": the 39.0% sits two clauses past the
+        # benchmark lead-in, so the clause-scoped check and the
+        # immediately-preceding-clause lead-in both miss it, and the
+        # number never mints at all. When the sentence names exactly
+        # one benchmark before the number and the number's own clause
+        # names none, the number is a score on that benchmark — the
+        # same exactly-one rule the benchmark-field fallback uses
+        # below. The derived-claim guard still vetoes it ("55%
+        # fewer blocks ... ProgramBench" keeps its own family; a
+        # cost delta in a benchmark sentence — "costs fell 15%" —
+        # keeps its cost family), and two named benchmarks stay
+        # ambiguous. One more guard (v1.8.8 r2 pinned design): the
+        # number's own clause must not contain a fresh "from X% to
+        # Y%" range — that clause states its own metric ("the rate
+        # of passing all three granularities rose from 8% to 14.7%"),
+        # and a lead-in that owned it would also own unrelated
+        # later metrics. The harness case has no from-to pair
+        # ("more than triples to a state-of-the-art 39.0%"), so it
+        # still fires there.
+        if len(_span_bench_slugs(sentence[:num["start"]])) == 1 and \
+                not re.search(r"\bfrom\s+[\d.,]+\s*%\s+to\s+[\d.,]+\s*%",
+                              clause_text, re.I):
+            near = sentence[max(0, num["start"] - 20):num["end"] + 20]
+            if not re.search(r"\b(?:faster|slower|recall|relative|percentage|cost|price|cheaper|complet\w*|refus\w*)\b",
+                            near, re.I):
+                return "score"
+    # v1.8.9 (run-20 gap 12): a number immediately followed by a
+    # plural count noun names a count OF that noun ("Neon's four
+    # levels" is a count of levels, not a token figure — the
+    # sentence's "token spend" cue used to claim it as tokens, so it
+    # pooled with "512K tokens of context" and "1,048,576 tokens"
+    # into one false alignment). Only when the noun is not itself a
+    # known metric family ("two tasks" is already tasks by the
+    # ordinary cues); gap/scale nouns ("points", "times", "percent")
+    # and hyphenated modifiers ("five-hour" — no space + noun after
+    # the word) never fire it. WORD numbers only: a digit followed by
+    # a plural verb ("31.4% matches", "52.6% differ") is not a count
+    # of anything — the rule as first written fired on those and
+    # minted family "matches", breaking the bare-fragment row test.
+    _after_noun = re.match(r"\s+([A-Za-z]+)", sentence[num["end"]:num["end"] + 20])
+    if _after_noun and not re.search(r"\d", str(num.get("raw", ""))):
+        _noun = _after_noun.group(1).lower()
+        # A plural ends in a single "s" — "pass"/"class"/"stress"
+        # end in "ss" and are not counts of anything.
+        if _noun.endswith("s") and not _noun.endswith("ss") \
+                and _noun not in ("points", "times", "percent"):
+            _known = {fam for _, fam in _GENERIC_METRIC_CUES} | _GENERIC_COUNT_NOUN_FAMILIES
+            if _noun not in _known and _noun.rstrip("s") not in _known:
+                return _noun
+    # v1.8.9 (run-20 gap 8): a relative cost-per-unit delta ("32%
+    # lower cost per task", "36%+ less per task", "25% cheaper per
+    # token") keys on metric=cost regardless of other cues in the
+    # sentence — the "per task"/"per token" cue used to claim it as
+    # tasks/tokens, so the same 32% minted three ways and never
+    # compared. A direction word right after the number (allowing a
+    # "+" suffix, "36%+ less") plus a cost word and a per-unit phrase
+    # in the clause.
+    if is_percent:
+        _rel_after = sentence[num["end"]:num["end"] + 12]
+        if re.match(r"\s*[+−-]?\s*(?:less|more|fewer|higher|lower|above|below|cheaper|costlier|greater|smaller|faster|slower|better|worse)\b",
+                    _rel_after, re.I):
+            _ca, _cb = _generic_clause_span(sentence, num["start"], num["end"])
+            _clause = sentence[_ca:_cb]
+            if re.search(r"\b(?:costs?|costing|cheaper|price)\b", _clause, re.I) and \
+                    re.search(r"\bper\s+(?:\w+\s+){0,2}(?:task|token|run|test|million)\b", _clause, re.I):
+                return "cost"
     cues = []
     for rx, family in _GENERIC_METRIC_CUES:
         if refrain and family == "exploits":
@@ -3282,26 +3405,107 @@ def _generic_qualifier(sentence: str, num_start: int) -> str:
 
 
 def _generic_benchmark(sentence: str, num_start: int = 0) -> str:
-    """The CamelCase token nearest the number, excluding org names —
+    """The benchmark name nearest the number, excluding org names —
     the benchmark the claim belongs to, when the sentence names one.
     Recorded on the claim and (v1.8.7) part of the identity: two
     scores on different benchmarks are different claims, even for the
     same model. A benchmark named in one doc and unnamed in another
     is the same claim — the compare loop's benchmark merge attaches
-    the unnamed side when the values match. The nearest token wins,
+    the unnamed side when the values match. The nearest name wins,
     not the first in the sentence: in a long sentence that mentions
     several benchmarks, the first one is arbitrary (\"about 55% fewer
     blocks ... its ProgramBench result\" — the 55% is not a
-    ProgramBench score)."""
+    ProgramBench score).
+    v1.8.9 (run-20 gaps 2b/4/6): hyphenated and all-caps benchmark
+    names (\"Terminal-Bench\", \"SWE-sweep\") never match the CamelCase
+    pattern, so the resolver fell through to whatever CamelCase token
+    sat elsewhere in the sentence — 65.2% on Terminal-Bench 4.1 was
+    labeled FrontierCode, SWE-sweep scores were bench-less, and
+    clarification labels pooled adjacent benchmarks. Phrase-list
+    names now compete on the same distance rule as CamelCase tokens.
+    Distance alone is not enough, though: in \"65.2% on
+    Terminal-Bench 4.1 and 46.2% at high on FrontierCode 2.0\" the
+    nearer name to 46.2% is Terminal-Bench (behind it), while the
+    number's own phrase says FrontierCode — so attachment beats
+    distance. A name the number's own prepositional phrase points
+    to (\"N% on Benchmark\") wins first; then a name the number sits
+    in parentheses after (\"Benchmark (N%)\"); then the nearest
+    benchmark named BEFORE the number, longest wins a tie
+    (\"Terminal-Bench-Science\" over \"Terminal-Bench\") — a benchmark
+    named after the number never owns it (v1.8.8 r2 pinned rule)."""
+    def _name_spans(s: str):
+        spans = []
+        for m in _GENERIC_CAMEL_RE.finditer(s):
+            if m.group(0).lower() in _GENERIC_BENCH_ORG_STOPLIST:
+                continue
+            spans.append((m.start(), m.end(), m.group(0)))
+        for m in _GENERIC_BENCHMARK_PHRASE_RE.finditer(s):
+            hit = m.group(0)
+            canonical = ""
+            for p in _GENERIC_BENCHMARK_PHRASES:
+                if p.lower() == hit.lower():
+                    canonical = p
+                    break
+            spans.append((m.start(), m.end(), canonical or hit))
+        # Position order: the attachment scan below breaks at 40 chars.
+        return sorted(spans)
+
+    # (1) Attachment: the number's own "on/in/at/for <Name>" phrase.
+    # The phrase must sit in the number's own clause — a ";" ends
+    # the clause, so "scores 77.2 against 76.2; on Terminal-Bench
+    # 2.0" never reads Terminal-Bench as the 76.2's benchmark
+    # (v1.8.8 r2 pinned rule).
+    after = sentence[num_start:num_start + 60].split(";")[0]
+    for start, end, name in _name_spans(after):
+        if start > 40:
+            break
+        before_name = after[max(0, start - 15):start]
+        if re.search(r"\b(?:on|in|at|for)\s+(?:the\s+)?$", before_name, re.I):
+            return name
+    # (1b) Immediately after: "the 84.0% RiemannBench result" — the
+    # benchmark name directly follows the number in the same clause.
+    # A comma, semicolon, or any other token between the number and
+    # the name means the name belongs elsewhere, and a model token
+    # ("84.0% Fable 5.2") is a measured system, not a benchmark —
+    # both fall through to the later tiers.
+    m_num = re.match(r"[+-]?\$?[\d,]+(?:\.\d+)?\s*(?:%|bps)?", sentence[num_start:])
+    if m_num:
+        rest = sentence[num_start + m_num.end():]
+        ws = re.match(r"\s+", rest)
+        rest2 = rest[ws.end():] if ws else rest
+        if rest2 and not _MODEL_TOKEN_RE.match(rest2):
+            for start, end, name in _name_spans(rest2):
+                if start == 0:
+                    return name
+    # (2) Parenthesis: "Benchmark (N%)" — the name right before "(".
+    before = sentence[max(0, num_start - 60):num_start]
+    paren_best = ""
+    paren_end = -1
+    for start, end, name in _name_spans(before):
+        if re.match(r"\s*\(\s*$", before[end:]):
+            if end > paren_end or (end == paren_end and len(name) > len(paren_best)):
+                paren_end = end
+                paren_best = name
+    if paren_best:
+        return paren_best
+    # (3) Nearest by distance, longest wins a tie — but ONLY among
+    # benchmarks named BEFORE the number (v1.8.8 r2 pinned rule: a
+    # benchmark named after a number never owns it — "scores 77.2
+    # against 76.2; on Terminal-Bench 2.0" must read the 76.2 as
+    # SWE-bench, not Terminal-Bench, even though Terminal-Bench is
+    # nearer). The after-the-number route is attachment (tier 1:
+    # "N% on Benchmark") and parenthesis (tier 2) only.
     best = ""
     best_dist = 10 ** 9
-    for m in _GENERIC_CAMEL_RE.finditer(sentence):
-        if m.group(0).lower() in _GENERIC_BENCH_ORG_STOPLIST:
+    best_len = 0
+    for start, end, name in _name_spans(sentence):
+        if end > num_start:
             continue
-        dist = min(abs(m.start() - num_start), abs(m.end() - num_start))
-        if dist < best_dist:
+        dist = num_start - end
+        if dist < best_dist or (dist == best_dist and len(name) > best_len):
             best_dist = dist
-            best = m.group(0)
+            best = name
+            best_len = len(name)
     return best if best_dist <= 80 else ""
 
 
@@ -3353,6 +3557,447 @@ def _generic_role(num: Dict) -> str:
     return "task_count"
 
 
+# v1.8.9 (run-20 gap 14): a stated uncertainty is not a gap — "plus
+# or minus 0.94 percentage points" is the published margin on a
+# score, not a percentage-point gap between two figures. The
+# uncertainty value is the number right after "plus or minus" / "±"
+# / "margin of error", or the number in an "uncertainty" sentence
+# followed by "percentage point(s)".
+_GENERIC_UNCERTAINTY_BEFORE_RE = re.compile(
+    r"(?:plus\s+or\s+minus|±|margin\s+of\s+error(?:\s+of)?)\s*$", re.I)
+_GENERIC_UNCERTAINTY_SENT_RE = re.compile(r"\buncertainty\b", re.I)
+
+
+def _generic_rank(sentence: str, num_start: int) -> Optional[int]:
+    """A stated rank for the number, from a rank cue just before it
+    in the same sentence ("debuts #2 globally with a score of 1336",
+    "second at 70.87%", "moved Neon High to third overall at
+    1,333"). The nearest cue wins; None when the sentence states no
+    rank for this figure. Only the cue, never a derivation — a rank
+    the sentence does not state stays unstated."""
+    window = sentence[max(0, num_start - 45):num_start]
+    best: Tuple[int, int] = (-1, 0)
+    for m in re.finditer(r"#(\d+)\b", window):
+        if m.start() > best[0]:
+            best = (m.start(), int(m.group(1)))
+    for m in re.finditer(
+            r"\brank(?:ed|s|ing)?\s+#?(\d+)\b", window, re.I):
+        if m.start() > best[0]:
+            best = (m.start(), int(m.group(1)))
+    for m in re.finditer(
+            r"\brank(?:ed|s)?\s+(first|second|third|fourth|fifth)\b",
+            window, re.I):
+        if m.start() > best[0]:
+            best = (m.start(), _GENERIC_RANK_WORDS[m.group(1).lower()])
+    for m in re.finditer(
+            r"\b(first|second|third|fourth|fifth)\b", window, re.I):
+        if m.start() > best[0]:
+            best = (m.start(), _GENERIC_RANK_WORDS[m.group(1).lower()])
+    return best[1] if best[0] >= 0 else None
+
+
+_GENERIC_RANK_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5}
+
+
+def _generic_is_results_continuation(sentence: str) -> bool:
+    """True when the sentence reads as a continuation of a results
+    listing: a scoring verb ("scored", "ranked", "placed", "topped",
+    "led", "put") with a model token in the sentence. The benchmark
+    carryover only fires for such sentences (or for uncertainty
+    claims) — a sentence that merely sits after a benchmark section
+    ("Their subtask-weighted rewards were 39.0%...") is about its
+    own measure, not the previous benchmark's, and must not inherit
+    it."""
+    if not _MODEL_TOKEN_RE.search(sentence):
+        return False
+    return bool(re.search(
+        r"\b(scored|achieved|reached|ranked|placed|topped|led|put|puts)\b",
+        sentence, re.I))
+
+
+def _generic_prior_benchmark(sentences: List[str], sent_idx: int,
+                             window: int = 5) -> str:
+    """The benchmark named in the sentences just before this one, or
+    "" when none is named. A results continuation ("Fable 5.2 scored
+    71.31%, Sonnet 5.5 scored 70.85%") inherits the benchmark of the
+    sentence that introduced the results ("... 70.87% on Vals Index
+    v2.2") — the scores are one ranking, split across sentences. The
+    nearest benchmark-naming sentence decides: scan backwards and
+    stop at the first sentence that names any benchmark — exactly
+    one names it, two or more is a genuine ambiguity and nothing is
+    inherited. The window is five sentences because the sentence
+    splitter fragments abbreviations ("U.S. GDP." becomes two
+    fragments), so the stated uncertainty two real sentences on can
+    sit four fragments back. Only the curated phrase list counts (a
+    CamelCase token is not enough here), and only when the current
+    sentence names no benchmark of its own — a doc that moves on to
+    another benchmark names it, and the scan stops there instead of
+    reaching past it."""
+    for j in range(sent_idx - 1, max(-1, sent_idx - 1 - window), -1):
+        named = set()
+        for p in _GENERIC_BENCHMARK_PHRASES:
+            if re.search(r"\b" + re.escape(p) + r"\b", sentences[j], re.I):
+                named.add(p)
+        if named:
+            return next(iter(named)) if len(named) == 1 else ""
+    return ""
+
+
+_GENERIC_EFFORT_RE = re.compile(r"^\s*(extra high|high|medium|low)\b", re.I)
+
+
+def _generic_effort(sentence: str) -> str:
+    """Thinking-level tier for a duration claim in a model table row
+    ("Gemini 4 Neon Extra High: 61, $6.44 per task, 21.5 minutes" —
+    the tier sits right after the model token). Returns the tier slug
+    ("extra-high", "high", "medium", "low") or "" when no tier word
+    follows a model token in the sentence."""
+    for m in _MODEL_TOKEN_RE.finditer(sentence):
+        after = sentence[m.end():m.end() + 20]
+        em = _GENERIC_EFFORT_RE.match(after)
+        if em:
+            return em.group(1).lower().replace(" ", "-")
+    return ""
+
+
+# v1.8.9 (run-20 gap 11): a multiplier / speed-ratio claim — "three
+# times as quickly as Carbon", "3x faster than Carbon", "twice as
+# fast". _generic_numbers_in deliberately drops multipliers ("five
+# times" is context, not a claim), so this pass scans sentences
+# directly and mints its own claim kind instead of going through
+# the number loop. A multiplier is a headline exaggeration metric
+# by construction: it carries info_weight "low" and signal_role
+# "bias" and never enters factual alignment — it only enters the
+# cross-unit speed-ratio check, where measured durations either
+# confirm it or catch it.
+_GENERIC_MULTIPLIER_WORDS = {
+    "one": 1.0, "two": 2.0, "three": 3.0, "four": 4.0, "five": 5.0,
+    "six": 6.0, "seven": 7.0, "eight": 8.0, "nine": 9.0, "ten": 10.0,
+    "twice": 2.0,
+}
+_GENERIC_MULTIPLIER_RE = re.compile(
+    r"\b(?:(about|approximately|roughly|nearly|around)\s+)?"
+    r"(one|two|three|four|five|six|seven|eight|nine|ten|twice|\d+(?:\.\d+)?)"
+    r"\s+times\s+(?:as\s+)?(fast|faster|quickly|quick|slow|slower)\b",
+    re.I)
+_GENERIC_MULTIPLIER_X_RE = re.compile(
+    r"\b(?:(about|approximately|roughly|nearly|around)\s+)?"
+    r"(\d+(?:\.\d+)?)\s*x\s+(fast|faster|quickly|quick|slow|slower)\b",
+    re.I)
+
+
+def _generic_multiplier_claims(sentences: List[str]) -> List[Dict]:
+    """Multiplier claims in the sentences: value, direction, measured
+    subject (nearest model token before the phrase, else the
+    sentence's exactly-one model), and comparator baseline (the model
+    after "than"/"as" following the speed word). A multiplier with no
+    stated baseline still mints — the speed-ratio check then reports
+    it as uncheckable rather than silently dropping a headline
+    exaggeration."""
+    claims: List[Dict] = []
+    seen = set()
+    for si, sentence in enumerate(sentences):
+        for rx in (_GENERIC_MULTIPLIER_RE, _GENERIC_MULTIPLIER_X_RE):
+            for m in rx.finditer(sentence):
+                qualifier = (m.group(1) or "").lower()
+                word = m.group(2).lower()
+                speed = m.group(3).lower()
+                if word in _GENERIC_MULTIPLIER_WORDS:
+                    value = _GENERIC_MULTIPLIER_WORDS[word]
+                else:
+                    try:
+                        value = float(word)
+                    except ValueError:
+                        continue
+                direction = ("faster" if speed in ("fast", "faster", "quickly", "quick")
+                             else "slower")
+                before = sentence[:m.start()]
+                model_before = list(_MODEL_TOKEN_RE.finditer(before))
+                subject_slug = ""
+                subject_display = ""
+                if model_before:
+                    subject_display = model_before[-1].group(1)
+                    subject_slug = _model_slug(subject_display)
+                if not subject_slug:
+                    sent_models = {_model_slug(mm.group(1)): mm.group(1)
+                                   for mm in _MODEL_TOKEN_RE.finditer(sentence)}
+                    if len(sent_models) == 1:
+                        subject_slug = next(iter(sent_models))
+                        subject_display = sent_models[subject_slug]
+                after = sentence[m.end():m.end() + 40]
+                baseline_slug = ""
+                baseline_display = ""
+                bm = re.search(
+                    r"^\s*(?:than|as)\s+(" + _MODEL_TOKEN_RE.pattern + r")",
+                    after)
+                if bm:
+                    baseline_display = bm.group(1)
+                    baseline_slug = _model_slug(baseline_display)
+                clause = re.split(r"[;,]|\bbut\b", before, flags=re.I)[-1]
+                if sentence.rstrip().endswith("?"):
+                    stance = "question"
+                elif re.search(r"\b(?:not|never|isn['’]t|wasn['’]t|cannot|can['’]t)\b", clause, re.I):
+                    stance = "negated_or_qualified"
+                elif re.search(r"\b(?:if|could|might|would|whether|hypothetically)\b", clause, re.I):
+                    stance = "conditional"
+                else:
+                    stance = "asserted"
+                dedup = (si, m.start(), value, subject_slug, baseline_slug, direction, stance)
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                raw = m.group(0).strip()
+                label = (f"{value:g}x {direction} than "
+                         f"{baseline_display or 'unstated baseline'}")
+                if subject_display:
+                    label = f"{label} — {subject_display}"
+                claims.append({
+                    "entity_key": f"generic|multiplier|speed|||{subject_slug or 'unstated'}",
+                    "entity_label": label,
+                    "numeric_value": float(value),
+                    "unit": "x",
+                    "raw_value": raw,
+                    "version": "",
+                    "shot_count": None,
+                    "variant": "",
+                    "claim_kind": "generic_quantitative",
+                    "subject": subject_slug,
+                    "subject_display": subject_display,
+                    "metric": "speed",
+                    "benchmark": "",
+                    "context": "",
+                    "context_numbers": "",
+                    "denominator": "",
+                    "rel_direction": "",
+                    "qualifier": qualifier,
+                    "time": "",
+                    "attribution": "",
+                    "span": sentence.strip()[:200],
+                    "mention_span": sentence,
+                    "multiplier": float(value),
+                    "assertion_status": stance,
+                    "sentence_index": si,
+                    "expression_offset_in_sentence": m.start(),
+                    "multiplier_direction": direction,
+                    "multiplier_baseline": baseline_slug,
+                    "multiplier_baseline_display": baseline_display,
+                    "info_weight": "low",
+                    "signal_role": "bias",
+                })
+    return claims
+
+
+# ── Headline position (v1.8.9, run-20 follow-on 1) ─────────────────────
+# Taylor's ruling: headlines are weighted LOW for information quality
+# — most news runs on exaggeration metrics through headlines — and are
+# better read as bias detection + target-audience signal. A headline
+# figure is therefore a claim with info_weight "low", signal_role
+# "bias", and a from_headline marker, routed out of factual alignment
+# into headline_weighting (compare), never counted as agreement,
+# conflict, or a unique.
+#
+# The gap-8 conflict, resolved: the v1.8.8 r2 gap-8 rule ("Source
+# lines are labels, never claims") stays INTACT — the Source line is
+# still dropped as a sentence source, so its own words (publisher
+# names, dates, "Published"/"Fetched" metadata) never mint claims.
+# What is "un-dropped" is only the quoted TITLE span inside the Source
+# line (or the title half of a "<Publisher> — <Title>" source_name),
+# and only as position metadata: figures are minted from the title
+# text alone, by two targeted passes (multiplier phrases; numbers with
+# a benchmark cue nearby). A headline figure can never be a factual
+# claim — it is marked from_headline and routed to bias — so gap-8's
+# intent (a Source line is not a factual claim) holds by
+# construction. What the conflict costs: headline figures OUTSIDE the
+# two patterns (e.g. a headlined price) are not captured; catching
+# them would mean running the generic extractor over title text,
+# which re-opens gap-8's exact failure mode (header numbers minting
+# as claims) and needs an Arch decision.
+_HEADLINE_BENCH_CUE_RE = re.compile(
+    r"\b(?:Intelligence\s+(?:Index|Score)|Index|Score|Benchmark|Exam)\b",
+    re.I)
+
+
+def _headline_title(text: str, source_name: str = "") -> str:
+    """The doc's headline (article title), or "" when the doc carries
+    none. First the quoted title in the first-line Source line
+    ('Source: SiliconANGLE — "Google's latest ..." by ...'), else the
+    title half of a "<Publisher> — <Title>" source_name. A bare
+    publisher name (or "doc_N") yields no title — never guessed."""
+    first_line = (text or "").split("\n", 1)[0]
+    if first_line.strip().lower().startswith("source:"):
+        m = re.search(r'"([^"]{4,200})"', first_line)
+        if m:
+            return m.group(1).strip()
+    if source_name:
+        # Separator must carry whitespace on both sides (" — ", " - "),
+        # so a hyphenated publisher name ("AI-News") never splits.
+        parts = re.split(r"\s+[—–]\s+|\s+-\s+", source_name, maxsplit=1)
+        if len(parts) == 2 and len(parts[1].strip()) >= 4:
+            return parts[1].strip()
+    return ""
+
+
+def _without_metadata(text: str) -> str:
+    return "\n".join("" if _GENERIC_FEED_HEADER_LINE_RE.match(line.strip()) else line
+                     for line in text.splitlines())
+
+
+def headline_diagnostic(text: str, source_name: str) -> List[Dict]:
+    title = _headline_title(text, source_name)
+    entries = [{"doc_idx": 0, "claim": c} for c in _headline_figures(title)] if title else []
+    return _headline_weighting(entries, lambda _: source_name)
+
+
+def _era_suggestions(text: str, source: str, doc_idx: int) -> List[Dict]:
+    """Accept only a complete price sentence and an adjacent explicit same-model rate reference."""
+    money = r"\$\d+(?:\.\d+)?"
+    month = r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+    date = month + r" (?:[12]\d|3[01]|[1-9])(?:, \d{4})?"
+    price = re.compile(r"(?P<model>" + _MODEL_TOKEN_RE.pattern + r") (?:costs|is priced at) "
+                       + money + r" per (?:task|million (?:input|output) tokens)\.", re.I)
+    candidates = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        sentences = [v.strip() for v in _GENERIC_SENT_SPLIT_RE.split(paragraph) if v.strip()]
+        for statement, context in zip(sentences, sentences[1:]):
+            match = price.fullmatch(statement)
+            if not match:
+                continue
+            name = match.group("model")
+            linked = re.fullmatch(r"That " + re.escape(name) + r" rate (?:will take|takes) effect on ("
+                                  + date + r")\.", context, re.I)
+            if linked:
+                candidates.append(dict(document_index=doc_idx, source=source, subject=name,
+                                       era="unknown", suggested_era="future", effective_date=linked[1],
+                                       price_span=statement, context_span=context, review_required=True,
+                                       basis="One price and one explicit same-model rate reference"))
+    return candidates
+
+
+def _span_gap(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
+    """Character gap between two spans (0 when adjacent/overlapping)."""
+    if b_end <= a_start:
+        return a_start - b_end
+    if a_end <= b_start:
+        return b_start - a_end
+    return 0
+
+
+def _headline_score_claims(title: str) -> List[Dict]:
+    """Benchmark-score figures in the headline: a number with a
+    benchmark cue nearby ("61 Intelligence Score", "62 on Artificial
+    Analysis"). The cue is a listed benchmark phrase or a bare
+    Intelligence Index/Score/Index/Benchmark/Exam word; the NEAREST
+    cue to the number wins, so "SWE-bench 76.2, Terminal-Bench 59.3"
+    keys each score to its own benchmark. Skipped: 4-digit years,
+    version tokens ("Gemini 4"), numbers glued to a preceding letter
+    ("Work360"), and magnitudes other than "%" ("$3", "2 million" are
+    not benchmark scores)."""
+    claims: List[Dict] = []
+    seen = set()
+    for m in _GENERIC_DIGIT_RE.finditer(title):
+        digits = m.group(2)
+        if re.fullmatch(r"\d{4}", digits) and 1900 <= int(digits) <= 2099:
+            continue
+        if _generic_is_version(title, m.start(), m.end()):
+            continue
+        if m.start() > 0 and title[m.start() - 1].isalpha():
+            continue
+        magnitude = (m.group(3) or "").strip()
+        if magnitude and magnitude != "%":
+            continue
+        try:
+            value = float(digits.replace(",", ""))
+        except ValueError:
+            continue
+        start, end = m.start(), m.end()
+        win_start = max(0, start - 40)
+        window = title[win_start:end + 40]
+        best = None  # (distance, cue_text, canonical_phrase_or_"")
+        for p in _GENERIC_BENCHMARK_PHRASES:
+            for pm in re.finditer(r"\b" + re.escape(p) + r"\b", window, re.I):
+                dist = _span_gap(start, end,
+                                 win_start + pm.start(), win_start + pm.end())
+                if best is None or dist < best[0]:
+                    best = (dist, pm.group(0), p)
+        for cm in _HEADLINE_BENCH_CUE_RE.finditer(window):
+            dist = _span_gap(start, end,
+                             win_start + cm.start(), win_start + cm.end())
+            if best is None or dist < best[0]:
+                best = (dist, cm.group(0), "")
+        if best is None:
+            continue
+        bench_display = best[2] or best[1]
+        bench_slug = re.sub(r"[^a-z0-9]+", "-", bench_display.lower()).strip("-")
+        before = title[:start]
+        model_before = list(_MODEL_TOKEN_RE.finditer(before))
+        subject_slug = ""
+        subject_display = ""
+        if model_before:
+            subject_display = model_before[-1].group(1)
+            subject_slug = _model_slug(subject_display)
+        if not subject_slug:
+            sent_models = {_model_slug(mm.group(1)): mm.group(1)
+                           for mm in _MODEL_TOKEN_RE.finditer(title)}
+            if len(sent_models) == 1:
+                subject_slug = next(iter(sent_models))
+                subject_display = sent_models[subject_slug]
+        dedup = (value, bench_slug, subject_slug)
+        if dedup in seen:
+            continue
+        seen.add(dedup)
+        label = bench_display
+        if not re.search(r"\b(score|index|benchmark|exam)$", bench_display, re.I):
+            label = f"{bench_display} score"
+        if subject_display:
+            label = f"{label} — {subject_display}"
+        claims.append({
+            "entity_key": f"generic|headline|score|bench={bench_slug}||{subject_slug or 'unstated'}",
+            "entity_label": label,
+            "numeric_value": float(value),
+            "unit": "percent" if magnitude == "%" else "",
+            "raw_value": m.group(0).strip(),
+            "version": "",
+            "shot_count": None,
+            "variant": "",
+            "claim_kind": "generic_quantitative",
+            "subject": subject_slug,
+            "subject_display": subject_display,
+            "metric": "score",
+            "benchmark": bench_slug,
+            "context": bench_display,
+            "context_numbers": f"bench={bench_slug}",
+            "denominator": "",
+            "rel_direction": "",
+            "qualifier": "",
+            "time": "",
+            "attribution": "",
+            "span": title.strip()[:200],
+            "headline": title,
+            "from_headline": True,
+            "info_weight": "low",
+            "signal_role": "bias",
+        })
+    return claims
+
+
+def _headline_figures(title: str) -> List[Dict]:
+    """Figures stated in the headline itself: multiplier phrases
+    (reusing _generic_multiplier_claims on the title alone) and
+    benchmark scores (_headline_score_claims). Every figure carries
+    from_headline + info_weight low + signal_role bias. The generic
+    number loop never sees the title (gap-8: the Source line is
+    dropped as a sentence source), so these two targeted passes are
+    the only way headline figures surface — and they surface as bias
+    signal, never as facts."""
+    figures: List[Dict] = []
+    if not title or not title.strip():
+        return figures
+    for c in _generic_multiplier_claims([title]):
+        figures.append({**c, "from_headline": True, "headline": title})
+    figures.extend(_headline_score_claims(title))
+    return figures
+
+
 def _generic_first_cue_family(sentence: str) -> str:
     """The family of the earliest metric cue in the sentence, or ""
     when the sentence names no metric. Used by the list rule: a
@@ -3398,7 +4043,7 @@ def extract_generic_quantitative_claims(
     first_line = text.split("\n", 1)[0]
     if _GENERIC_HEADER_ORG_RE.match(first_line):
         body = text.split("\n", 1)[1] if "\n" in text else ""
-    sentences = [s for s in _GENERIC_SENT_SPLIT_RE.split(body) if s.strip()]
+    sentences = [s for s in _GENERIC_SENT_SPLIT_RE.split(_without_metadata(body)) if s.strip()]
     # v1.8.8 r2: drop feed-header label lines (gap 8) before the
     # sentence loop — a "Source: ..." line is a label, never a claim.
     sentences = [s for s in sentences
@@ -3436,12 +4081,20 @@ def extract_generic_quantitative_claims(
                 break
         sent_line_bench.append(bench)
     claims: List[Dict] = []
+    _sent_pair_tiers: Dict[int, Dict[int, str]] = {}  # per-sentence pricing-pair tiers (v1.8.9 gap 2c)
     for si, sentence in enumerate(sentences):
         numbers = _generic_numbers_in(sentence)
         prev_subject: Tuple[str, str] = ("", "")
         prev_num: Optional[Dict] = None
         for num in numbers:
             if (si, num["value"]) in existing_pairs:
+                continue
+            if num["start"] > 0 and sentence[num["start"] - 1] == "#":
+                # v1.8.9 (run-20 gap 12): "#2" is a rank, not a
+                # count — "debuts #2 globally" and "ranks #2 on
+                # steerability" minted as task counts and pooled
+                # with real scores. A hash immediately before the
+                # digits marks a ranking, never a measurement.
                 continue
             if num.get("currency"):
                 clause = _generic_clause(sentence, num["start"], num["end"])
@@ -3484,6 +4137,85 @@ def extract_generic_quantitative_claims(
                 if not family:
                     continue
             subject_slug, subject_display = _generic_subject(sentence, num, numbers)
+            if not subject_slug:
+                # v1.8.9 (run-20 gap 2a follow-on): a sentence naming
+                # exactly one model states that model's figures —
+                # "Gemini 4 Carbon, introductory: $2.00 in, $10.00
+                # out, best index score 60." is Carbon's 60, but the
+                # clause-scoped subject check never sees the model
+                # (it sits before an earlier number in the sentence),
+                # so the 60 pooled bench-less with Neon's 55. Two
+                # named models stay ambiguous, as before.
+                _sent_models: Dict[str, str] = {}
+                # Worker B (v1.8.9 correction): a model token after
+                # the next number is skipped only when it is that
+                # later number's "for <Model>" owner ("refrained ...
+                # in 99.93% of cases, compared to 94.49% for GPT-5.6
+                # Cyber" — GPT-5.6 Cyber is the 94.49%'s model, and
+                # giving it to the 99.93% misattributes the figure;
+                # "reached 40.3% recall versus 32.0% for GPT-6
+                # Astra" — Astra is the 32.0%'s baseline, not the
+                # 40.3%'s subject). A model named after a cost +
+                # effort label ("45.5% at $1.26 per test for Neon
+                # Low") labels the whole pair and still counts — the
+                # blanket "after the next number" skip wrongly
+                # unstated Neon Low's 45.5%. The comparator
+                # exclusion below also covers the "compared to
+                # <num>% for <Model>" shape; this check is the
+                # belt-and-braces for it.
+                _next = min(
+                    [n for n in numbers if n["start"] > num["end"]],
+                    key=lambda n: n["start"], default=None)
+                for _mm in _MODEL_TOKEN_RE.finditer(sentence):
+                    # Worker B (v1.8.9 correction, Nov 7 48.5 — ported
+                    # from repo-work; the RC3 port dropped it): a model
+                    # token after the next number is that later
+                    # number's "for <Model>" owner ("the new model
+                    # achieved 48.5%, up from 32.1% for GPT-5.6
+                    # Cyber" — GPT-5.6 Cyber owns the 32.1%, not the
+                    # 48.5%), so it never counts toward the
+                    # exactly-one set for this number. The figure
+                    # mints unstated and the compare merge attaches it
+                    # to the one value-matching stated group — or
+                    # leaves it unstated when no group matches, never
+                    # guessed. Only the bare "% for " / "for " gap
+                    # fires: a cost + effort label in between ("45.5%
+                    # at $1.26 per test for Neon Low") still counts.
+                    if _next is not None and _mm.start() >= _next["start"]:
+                        between = sentence[_next["end"]:_mm.start()]
+                        if re.fullmatch(r"\s*(?:%|percent)?\s*for\s+",
+                                        between, re.I):
+                            continue
+                    # A model named only as a comparator ("32% lower
+                    # cost per task than Carbon", "faster than Opus",
+                    # "9.6 points above Argon") is the thing measured
+                    # AGAINST, not the measured subject — it never
+                    # counts toward the exactly-one set, or Neon's 32%
+                    # would read as Carbon's. Likewise a model named
+                    # only as a parenthetical price gloss ("(Argon:
+                    # $9.95)") labels that price's owner, not the
+                    # sentence's subject for other numbers — but a
+                    # "Model: <figures>" header ("Gemini 4 Hydrogen:
+                    # $1.50 in, $7.50 out, best index score 54.")
+                    # DOES own the figures that follow it, so the
+                    # colon exclusion only fires inside parentheses.
+                    # Worker B: the comparator may sit a number and a
+                    # "for" away ("compared to 94.49% for GPT-5.6
+                    # Cyber") — that model is still the baseline.
+                    _before = sentence[max(0, _mm.start() - 40):_mm.start()]
+                    if re.search(r"\b(?:than|vs\.?|against|versus|above|below|compared\s+(?:with|to))\s*$",
+                                 _before, re.I):
+                        continue
+                    if re.search(r"\b(?:than|vs\.?|against|versus|above|below|compared\s+(?:with|to))\b(?:[\d\s.,%]*\bfor\b)?\s*$",
+                                 _before, re.I):
+                        continue
+                    if re.match(r"\s*:", sentence[_mm.end():_mm.end() + 4]) and \
+                            sentence.rfind("(", 0, _mm.start()) > sentence.rfind(")", 0, _mm.start()):
+                        continue
+                    _sent_models[_model_slug(_mm.group(1))] = _mm.group(1)
+                if len(_sent_models) == 1:
+                    subject_slug = next(iter(_sent_models))
+                    subject_display = _sent_models[subject_slug]
             # v1.8.7 pair-subject inheritance: the second member of a
             # pair ("Opus 5.5 0.655 and 0.838", "Sonnet 4.6 0.330 and
             # 0.364") inherits the first member's subject — the model
@@ -3496,6 +4228,29 @@ def extract_generic_quantitative_claims(
                     subject_slug, subject_display = prev_subject
             ctx_key, ctx_display = _generic_context_numbers(sentence, num)
             denominator = _generic_denominator(sentence, num["end"], numbers)
+            if family == "cost" and not denominator and num.get("currency"):
+                # v1.8.9 (run-20 gap 2c): a $ amount's pricing tier
+                # is its denominator. "$2.00 in" is Carbon's intro
+                # INPUT price and "$2.12" is an AutomationBench cost
+                # per run; both minted as bare generic cost with
+                # denom "", so they falsely aligned. The tier comes
+                # from the positional pair rule on the sentence, then
+                # the in/out abbreviation right after the amount
+                # ("$2.00 in, $10.00 out" — the full-word pair rule
+                # never sees "in"/"out"). The abbreviation must be
+                # followed by a list separator, not prose ("$2.00 in
+                # the first week" is not an input price).
+                if si not in _sent_pair_tiers:
+                    _sent_pair_tiers[si] = _pricing_pair_tiers(sentence)
+                tier = _sent_pair_tiers[si].get(num["start"] + 1, "")
+                if not tier:
+                    after = sentence[num["end"]:num["end"] + 12]
+                    ab = re.match(r"\s*(in|out|cached|cache|batch)\b\s*(?:[,/]|and\b|$)",
+                                  after, re.I)
+                    if ab:
+                        tier = _DOT_LIST_TIER_WORDS[ab.group(1).lower()]
+                if tier:
+                    denominator = tier
             qualifier = _generic_qualifier(sentence, num["start"])
             benchmark = _generic_benchmark(sentence, num["start"])
             if family == "score":
@@ -3545,7 +4300,79 @@ def extract_generic_quantitative_claims(
                 # v1.8.8 line-label fallback: the row's benchmark is
                 # the claim's benchmark.
                 benchmark = line_bench
+            if not benchmark and family in ("score", "uncertainty"):
+                # v1.8.9 (run-20 gap 14): the benchmark may sit in the
+                # sentence that introduced the results, not this one —
+                # "Fable 5.2 scored 71.31%, Sonnet 5.5 scored 70.85%"
+                # is the continuation of the Vals ranking the previous
+                # sentence opened ("... 70.87% on Vals Index v2.2"),
+                # and the uncertainty sentence two lines on ("Its
+                # published uncertainty for Neon is plus or minus
+                # 0.94...") belongs to the same ranking. Two gates, so
+                # a nearby benchmark never owns an unrelated figure:
+                # the current sentence must name NO benchmark phrase
+                # of its own (a sentence naming two — "Artificial
+                # Analysis's separate Coding Agent Index" — is
+                # ambiguous in itself, and reaching back past it to
+                # an older benchmark is wrong), and it must be a
+                # results continuation (scoring verb + model token)
+                # or an uncertainty claim — a sentence that merely
+                # sits after a benchmark section ("Their subtask-
+                # weighted rewards were 39.0%...") is about its own
+                # measure and inherits nothing.
+                # v1.8.9: never carry a benchmark into a sentence that
+                # names its own benchmark in words the phrase list does
+                # not know ("this Gray Swan benchmark") — the carried
+                # benchmark would be factually wrong AND it breaks the
+                # subject-merge chain (the bench-less Gray Swan 0.0 is
+                # the one value-match that routes the 0.09% safety
+                # figure into the Terminal-Bench Science mismatch
+                # group; benching it left the 0.09 stranded in the
+                # bench-less pool, where the modal paired it with
+                # Kingy's 10.1% as a false conflict).
+                if not _generic_benchmark_phrase(sentence) and \
+                        not re.search(r"\bbenchmark\b", sentence, re.I) and \
+                        (family == "uncertainty"
+                         or _generic_is_results_continuation(sentence)):
+                    benchmark = _generic_prior_benchmark(sentences, si)
             attribution = _generic_attribution(sentence, doc_attribution)
+            # v1.8.9 (run-20 gap 11): a duration claim in a model
+            # table row carries its thinking-level tier (Neon Extra
+            # High 21.5 min vs Neon High 14.8 min are different
+            # durations, not one claim) — the tier rides in the ctx
+            # slot as effort=, the same way bench= does.
+            effort = _generic_effort(sentence) if family == "duration" else ""
+            # v1.8.9 (run-20 gap 14): a stated rank rides on the
+            # claim so the separability check can stack score +
+            # uncertainty + rank + source direction instead of
+            # collapsing to one verdict.
+            rank = _generic_rank(sentence, num["start"]) if family == "score" else None
+            # v1.8.9 (run-20 gap 10 residual): a board score whose
+            # sentence says the board MOVED ("Arena's November 18
+            # board moved Neon High to third overall at 1,333") is a
+            # revision of the earlier board value, not a second
+            # measurement that agrees with it. The marker rides on
+            # the claim; compare_documents surfaces the revision
+            # instead of aligning it.
+            revision = False
+            revision_cue = ""
+            revision_date = ""
+            if family == "score" and re.search(
+                    r"\b(?:arena|board|leaderboard)\b", sentence, re.I):
+                _rev_m = re.search(
+                    r"\b(board\s+moved|updated|revised|revisions?|now\s+at|"
+                    r"dropped\s+to|fell\s+to|rose\s+to|climbed\s+to|"
+                    r"slipped\s+to|moved\s+(?:\w+\s+)?to)\b",
+                    sentence, re.I)
+                if _rev_m:
+                    revision = True
+                    revision_cue = _rev_m.group(1).lower()
+                    _date_m = re.search(
+                        r"\b(January|February|March|April|May|June|July|August|"
+                        r"September|October|November|December)\s+(\d{1,2})\b",
+                        sentence)
+                    if _date_m:
+                        revision_date = f"{_date_m.group(1)} {_date_m.group(2)}"
             # v1.8.7: the benchmark is part of the identity — two
             # scores on different benchmarks are different claims,
             # even for the same model (the run-11 table rows all share
@@ -3564,26 +4391,64 @@ def extract_generic_quantitative_claims(
             # Both markers read the words immediately after the number
             # (within 12 chars), so a later sentence's wording never
             # re-qualifies this one.
+            # v1.8.9 (run-20 gap 12): the direction rides with the
+            # rel marker as a separate claim field, NOT in the key —
+            # the pinned test contract (v1.8.8) keys relative deltas
+            # as bare "rel" ("generic|percentage|speed|nodes=30;
+            # turns=200;rel||unstated"). "25% cheaper per token" and
+            # "50% more per token" are opposite directions of the
+            # same metric and pooled into one false conflict as bare
+            # "rel", so the compare partitions mixed-direction rel
+            # groups by rel_direction instead (see _part_key below).
+            # Synonyms normalize: less/lower/cheaper/fewer/smaller/
+            # slower/worse/below -> down; more/higher/costlier/
+            # greater/faster/better/above -> up. Same-direction
+            # deltas ("32% lower" vs "17% lower") still share a key
+            # and compare, which is what gap 8 needs.
             rel_marker = ""
+            rel_direction = ""
             if num.get("unit") == "percent":
                 after_num = sentence[num["end"]:num["end"] + 12]
-                if re.match(
-                        r"\s*(?:less|more|fewer|higher|lower|above|below|cheaper|costlier|greater|smaller|faster|slower|better|worse)\b",
-                        after_num, re.I):
+                rel_m = re.match(
+                    r"\s*[+−-]?\s*(less|more|fewer|higher|lower|above|below|cheaper|costlier|greater|smaller|faster|slower|better|worse)\b",
+                    after_num, re.I)
+                if rel_m:
                     rel_marker = "rel"
+                    rel_direction = ("down" if rel_m.group(1).lower() in
+                                     ("less", "fewer", "lower", "below", "cheaper",
+                                      "smaller", "slower", "worse")
+                                     else "up")
             plan_marker = ""
             if num.get("currency"):
                 after_num = sentence[num["end"]:num["end"] + 12]
                 if re.match(r"\s*plan\b", after_num, re.I):
                     plan_marker = "plan"
             ctx_parts = ([f"bench={bench_slug}"] if bench_slug else []) + \
+                ([f"effort={effort}"] if effort else []) + \
                 [p for p in (ctx_key, rel_marker, plan_marker) if p]
             ctx_key = ";".join(ctx_parts)
-            denom_key = (
-                re.sub(r"[^a-z0-9]+", "-", denominator.lower()).strip("-")
-                if family == "cost" and denominator.lower().startswith("per")
-                else ""
-            )
+            denom_key = ""
+            if family == "cost" and denominator:
+                dlow = denominator.lower()
+                if dlow.startswith("per"):
+                    # v1.8.9 (run-20 gap 8): "per task than", "per
+                    # completed task" and "per task" are the same
+                    # denominator — the unit is the last known
+                    # per-unit word in the phrase ("task", "token",
+                    # "run", "test", "million"); adjectives
+                    # ("completed") and trailing comparators ("than")
+                    # drop out, or the same 32% mints under three
+                    # different keys and never compares. No known
+                    # unit ("per LPE exploit") keeps the full slug.
+                    _words = re.findall(r"[a-z]+", dlow)
+                    _unit = next((w for w in reversed(_words)
+                                  if w in ("task", "token", "run", "test", "million")), "")
+                    denom_key = (f"per-{_unit}" if _unit else
+                                 re.sub(r"[^a-z0-9]+", "-", dlow).strip("-"))
+                elif dlow in ("input", "output", "cached", "batch",
+                              "batch-input", "batch-output",
+                              "fast-input", "fast-output"):
+                    denom_key = re.sub(r"[^a-z0-9]+", "-", dlow).strip("-")
             role = _generic_role(num)
             label = _GENERIC_FAMILY_LABELS.get(family, family)
             if benchmark:
@@ -3613,13 +4478,33 @@ def extract_generic_quantitative_claims(
                 "context": context,
                 "context_numbers": ctx_key,
                 "denominator": denominator,
+                "rel_direction": rel_direction,
                 "qualifier": qualifier,
                 "time": year_m.group(0) if year_m else "",
                 "attribution": attribution,
                 "span": sentence.strip()[:200],
+                "effort": effort,
+                "rank": rank,
+                "revision": revision,
+                "revision_cue": revision_cue,
+                "revision_date": revision_date,
             })
             prev_subject = (subject_slug, subject_display)
             prev_num = num
+    # v1.8.9 (run-20 gap 11): multiplier / speed-ratio claims — minted
+    # by their own pass (the number loop drops multipliers by design),
+    # so a headline "three times faster" is a claim the speed-ratio
+    # check can catch instead of invisible prose.
+    claims.extend(_generic_multiplier_claims(sentences))
+    # v1.8.9 (run-20 follow-on 1): headline figures — the doc's own
+    # headline states figures the publisher chose to lead with. The
+    # Source line stays dropped as a sentence source (gap-8); only the
+    # quoted title span is read, and only by the two targeted passes
+    # in _headline_figures, so a headline figure surfaces as bias
+    # signal, never as a fact.
+    _headline = _headline_title(text, source_name)
+    if _headline:
+        claims.extend(_headline_figures(_headline))
     # v1.8.7 table-row generic claims: a list-item benchmark row whose
     # benchmark is NOT in the mapped entity map (FrontierCode, CVE
     # Rediscovery, OSWorld, Terminal-Bench-Science) still states model
@@ -3722,8 +4607,429 @@ def _generic_unique_entry(key: str, label: str, doc_name: str, claim: Dict,
         "attribution":  claim.get("attribution", ""),
         "span":         claim.get("span", ""),
     }
+    if claim.get("effort"):
+        entry["effort"] = claim["effort"]
+    if claim.get("rank") is not None:
+        entry["rank"] = claim["rank"]
+    if claim.get("revision"):
+        entry["revision"] = True
+        entry["revision_cue"] = claim.get("revision_cue", "")
+        entry["revision_date"] = claim.get("revision_date", "")
     if note:
         entry["note"] = note
+    return entry
+
+
+def _headline_weighting(headline_entries: List[Dict], doc_name_fn) -> List[Dict]:
+    """Headline-position figures (v1.8.9, run-20 follow-on 1): per doc,
+    the headline (title) and the figures it states, each marked
+    from_headline + low info weight + bias role. A headlined figure is
+    bias/audience signal — which number the publisher chose to lead
+    with — not a factual claim: it never aligns, conflicts, or counts
+    as a unique, and the body claim for the same figure is untouched
+    (a doc is not punished for headlining its own lead fact)."""
+    by_doc: Dict[int, List[Dict]] = {}
+    for e in headline_entries:
+        by_doc.setdefault(e["doc_idx"], []).append(e["claim"])
+    out: List[Dict] = []
+    for doc_idx in sorted(by_doc):
+        claims = by_doc[doc_idx]
+        figures = []
+        for c in claims:
+            fig: Dict = {
+                "entity_key": c["entity_key"],
+                "entity_label": c.get("entity_label", ""),
+                "kind": ("multiplier" if c.get("multiplier") is not None
+                         else "score"),
+                "value": float(c["numeric_value"]),
+                "unit": c.get("unit", ""),
+                "subject": c.get("subject", ""),
+                "subject_display": c.get("subject_display", ""),
+                "benchmark": c.get("benchmark", ""),
+                "from_headline": True,
+                "info_weight": "low",
+                "signal_role": "bias",
+                "span": c.get("span", ""),
+            }
+            if c.get("multiplier") is not None:
+                fig["multiplier_direction"] = c.get("multiplier_direction", "")
+                fig["assertion_status"] = c.get("assertion_status", "asserted")
+                fig["baseline"] = c.get("multiplier_baseline", "")
+                fig["baseline_display"] = c.get("multiplier_baseline_display", "")
+            figures.append(fig)
+        out.append({
+            "source": doc_name_fn(doc_idx),
+            "headline": claims[0].get("headline", ""),
+            "figures": figures,
+            "note": ("Headline figures are bias/audience signal — which number the "
+                     "publisher chose to lead with — weighted low for information "
+                     "quality. They are never counted as factual agreement, and the "
+                     "body claim for the same figure is unaffected."),
+        })
+    return out
+
+
+def _speed_ratio_checks(multiplier_entries: List[Dict],
+                        doc_claims: List[List[Dict]],
+                        doc_name_fn) -> List[Dict]:
+    """Group mentions by assertion and retain their sources. Compare declared
+    effort tiers first. The provisional tolerance describes numerical distance
+    from a claim; it cannot verify the claim or the underlying measurements.
+    """
+    ordered = sorted(multiplier_entries,
+                     key=lambda e: bool(e["claim"].get("from_headline")))
+    groups = {}
+    for entry in ordered:
+        claim = entry["claim"]
+        key = (claim.get("subject", ""), claim.get("multiplier_baseline", ""),
+               float(claim["numeric_value"]), claim.get("multiplier_direction", ""), claim.get("assertion_status"))
+        groups.setdefault(key, []).append(entry)
+    durations: Dict[Tuple[str, str], List[Dict]] = {}
+    for doc_idx, claims in enumerate(doc_claims):
+        for c in claims:
+            if c.get("metric") != "duration" or not c.get("subject"):
+                continue
+            unit = (c.get("unit") or "").lower()
+            if unit in ("minutes", "minute"):
+                minutes = float(c["numeric_value"])
+            elif unit in ("hours", "hour"):
+                minutes = float(c["numeric_value"]) * 60.0
+            elif unit in ("seconds", "second"):
+                minutes = float(c["numeric_value"]) / 60.0
+            else:
+                continue
+            durations.setdefault((c["subject"], c.get("effort", "")), []).append({
+                "minutes": minutes, "document_index": doc_idx,
+                "source": doc_name_fn(doc_idx),
+                "span": c.get("span", ""),
+            })
+
+    def _fmt_ratio(r: float) -> str:
+        return f"{r:.1f}x" if r < 10 else f"{r:.0f}x"
+
+    checks: List[Dict] = []
+    for mentions in groups.values():
+        e = mentions[0]
+        claim = e["claim"]
+        subject = claim.get("subject", "")
+        baseline = claim.get("multiplier_baseline", "")
+        claimed = float(claim["numeric_value"])
+        direction = claim.get("multiplier_direction", "faster")
+        entry: Dict = {
+            "entity_key": claim["entity_key"],
+            "entity_label": claim.get("entity_label", ""),
+            "multiplier": claimed,
+            "multiplier_direction": direction,
+            "subject": subject,
+            "subject_display": claim.get("subject_display", ""),
+            "baseline": baseline,
+            "baseline_display": claim.get("multiplier_baseline_display", ""),
+            "qualifier": claim.get("qualifier", ""),
+            "source": doc_name_fn(e["doc_idx"]),
+            "span": claim.get("span", ""),
+            "from_headline": bool(claim.get("from_headline")),
+            "info_weight": claim.get("info_weight", "low"),
+            "signal_role": claim.get("signal_role", "bias"),
+            "mentions": [{"document_index": m["doc_idx"], "source": doc_name_fn(m["doc_idx"]),
+                          "sentence_index": m["claim"].get("sentence_index"),
+                          "expression_offset_in_sentence": m["claim"].get("expression_offset_in_sentence"),
+                          "location": "headline" if m["claim"].get("from_headline") else "body",
+                          "span": m["claim"].get("mention_span", m["claim"].get("span", "")), "expression": m["claim"].get("raw_value")}
+                         for m in mentions],
+            "tolerance_percent": 25,
+            "pairings": [],
+            "verdict": "uncheckable",
+            "note": "",
+        }
+        subj_durs = {eff: ds for (s, eff), ds in durations.items() if s == subject}
+        base_durs = {eff: ds for (s, eff), ds in durations.items() if s == baseline}
+        entry["assertion_status"] = claim.get("assertion_status", "asserted")
+        if entry["assertion_status"] != "asserted" or (subject and subject == baseline):
+            entry["note"] = "No affirmative comparison between two distinct models to assess."
+            checks.append(entry)
+            continue
+        if not subject or not baseline:
+            entry["note"] = (
+                "Multiplier states no measured baseline to check against — "
+                "a headline figure with nothing behind it. Uncheckable, "
+                "not confirmed."
+            )
+            checks.append(entry)
+            continue
+        if not subj_durs or not base_durs:
+            missing = []
+            if not subj_durs:
+                missing.append(claim.get("subject_display") or subject)
+            if not base_durs:
+                missing.append(claim.get("multiplier_baseline_display") or baseline)
+            entry["note"] = (
+                f"No measured task durations found for {', '.join(missing)} — "
+                "the multiplier stands unchecked, not confirmed."
+            )
+            checks.append(entry)
+            continue
+        for s_eff, s_list in sorted(subj_durs.items()):
+            for b_eff, b_list in sorted(base_durs.items()):
+                samples = {"subject_samples": s_list, "baseline_samples": b_list}
+                scope = ("effort_unspecified" if not s_eff or not b_eff else
+                         "same_effort" if s_eff == b_eff else "cross_effort")
+                pair = dict(subject_tier=s_eff or "unstated", baseline_tier=b_eff or "unstated",
+                            comparison_scope=scope, claimed_ratio=claimed, **samples)
+                # Without a workload identifier it is unsafe to choose among distinct durations.
+                sv = {d["minutes"] for d in s_list}
+                bv = {d["minutes"] for d in b_list}
+                if len(sv) != 1 or len(bv) != 1 or min(sv | bv) <= 0 or claimed <= 0:
+                    pair["verdict"] = "insufficient_or_ambiguous_measurements"
+                else:
+                    sm, bm = next(iter(sv)), next(iter(bv))
+                    ratio = bm / sm if direction == "faster" else sm / bm
+                    deviation = 100 * abs(ratio - claimed) / claimed
+                    pair.update(subject_minutes=sm, baseline_minutes=bm, measured_ratio=round(ratio, 6),
+                                deviation_percent=round(deviation, 4),
+                                within_tolerance={str(t): deviation <= t + 1e-10 for t in (10, 15, 25, 30)})
+                    pair["verdict"] = ("within_tolerance" if pair["within_tolerance"]["25"]
+                                       else "outside_tolerance")
+                entry["pairings"].append(pair)
+        entry["pairings"].sort(key=lambda p: p["comparison_scope"] != "same_effort")
+        comparable = [p for p in entry["pairings"] if p["comparison_scope"] == "same_effort"]
+        verdicts = {p["verdict"] for p in comparable}
+        entry["verdict"] = ("no_same_effort_pair" if not comparable else
+                            next(iter(verdicts)) if len(verdicts) == 1 else "mixed")
+        entry["note"] = ("The 25% tolerance is a provisional arithmetic heuristic. The summary uses "
+                         "only matched effort tiers. Workload equivalence and source independence "
+                         "require review. Cross-effort measurements are context only.")
+        checks.append(entry)
+    return checks
+
+
+def _separability_report(doc_claims: List[List[Dict]],
+                         doc_name_fn) -> List[Dict]:
+    """Statistical separability (v1.8.9, run-20 gap 14): a stated
+    uncertainty against ranked scores on the same benchmark. When a
+    source states a margin (Vals ±0.94pp) and two ranked scores sit
+    inside each other's margin (Neon 70.87 #2 vs Fable 71.31 #1, gap
+    0.44; vs Sonnet 70.85 #3, gap 0.02), the rank is not separable —
+    the order is inside the noise. Only STATED margins are ever used;
+    no margin is invented. The layers are stacked, not collapsed:
+    each score carries its value, stated rank (or null when the
+    source states none), and source; each pair carries its gap and
+    its own verdict; the entry verdict is per-pair, so a group can
+    be mixed. The Sieve offers the options — the human chooses which
+    source direction to trust."""
+    scores_by_bench: Dict[str, List[Dict]] = {}
+    unc_by_bench: Dict[str, List[Dict]] = {}
+    for doc_idx, claims in enumerate(doc_claims):
+        for c in claims:
+            # v1.8.9 (follow-on 1): a headline figure is bias signal,
+            # not a body score — it never joins a separability group.
+            if c.get("from_headline"):
+                continue
+            bench = c.get("benchmark", "")
+            if not bench:
+                continue
+            slug = re.sub(r"[^a-z0-9]+", "-", bench.lower()).strip("-")
+            if c.get("metric") == "score" and c.get("unit") == "percent":
+                scores_by_bench.setdefault(slug, []).append({
+                    "subject": c.get("subject", ""),
+                    "subject_display": c.get("subject_display", ""),
+                    "value": float(c["numeric_value"]),
+                    "rank": c.get("rank"),
+                    "source": doc_name_fn(doc_idx),
+                    "span": c.get("span", ""),
+                    "benchmark": bench,
+                })
+            elif c.get("metric") == "uncertainty":
+                unc_by_bench.setdefault(slug, []).append({
+                    "value": float(c["numeric_value"]),
+                    "subject": c.get("subject", ""),
+                    "subject_display": c.get("subject_display", ""),
+                    "source": doc_name_fn(doc_idx),
+                    "span": c.get("span", ""),
+                    "benchmark": bench,
+                })
+    report: List[Dict] = []
+    for slug, scores in scores_by_bench.items():
+        subjects = {s["subject"] for s in scores if s["subject"]}
+        if len(subjects) < 2:
+            continue
+        uncs = unc_by_bench.get(slug, [])
+        if not uncs:
+            continue
+        margins = sorted({u["value"] for u in uncs})
+        margin = margins[-1]
+        bench_display = scores[0]["benchmark"]
+        pairs = []
+        ordered = sorted(scores, key=lambda s: -s["value"])
+        # The same figure reported by several sources (Neon 70.9 in
+        # three docs) would otherwise repeat the same pair once per
+        # reporting source — dedupe by (subject, value) on each side,
+        # first occurrence wins; the scores list above still stacks
+        # every source's report.
+        seen_pairs = set()
+        for i, hi in enumerate(ordered):
+            for lo in ordered[i + 1:]:
+                # Same model at different precision (Neon 70.87 vs
+                # Neon 70.9, four sources) is one figure reported
+                # four ways, not two ranks — a pair is only a rank
+                # comparison between DIFFERENT subjects.
+                if hi["subject"] and hi["subject"] == lo["subject"]:
+                    continue
+                pair_key = (hi["subject"], hi["value"],
+                            lo["subject"], lo["value"])
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+                gap = round(hi["value"] - lo["value"], 5)
+                separable = gap >= margin
+                pairs.append({
+                    "higher": {"subject": hi["subject"],
+                               "subject_display": hi["subject_display"],
+                               "value": hi["value"], "rank": hi["rank"],
+                               "source": hi["source"]},
+                    "lower": {"subject": lo["subject"],
+                              "subject_display": lo["subject_display"],
+                              "value": lo["value"], "rank": lo["rank"],
+                              "source": lo["source"]},
+                    "gap": gap,
+                    "separable": separable,
+                    "note": (
+                        f"Gap {gap}pp vs stated margin ±{margin}pp — "
+                        f"{'separable' if separable else 'NOT separable: the order is inside the margin'}."
+                    ),
+                })
+        verdicts = {p["separable"] for p in pairs}
+        verdict = ("separable" if verdicts == {True}
+                   else "not_separable" if verdicts == {False} else "mixed")
+        not_sep = [p for p in pairs if not p["separable"]]
+        note = (
+            f"{bench_display}: stated uncertainty ±{margin}pp"
+            + (f" (multiple stated margins {margins} — widest used)"
+               if len(margins) > 1 else "")
+            + f". {len(not_sep)} of {len(pairs)} ranked pair(s) sit inside "
+            "the margin — those ranks are not separable. The layers are "
+            "stacked below (score + stated rank + uncertainty + source); "
+            "choose which source direction to trust. The Sieve does not "
+            "collapse them to one verdict."
+        )
+        report.append({
+            "benchmark": slug,
+            "benchmark_display": bench_display,
+            "uncertainty": margin,
+            "uncertainty_sources": [
+                {"source": u["source"], "value": u["value"],
+                 "span": u["span"]} for u in uncs],
+            "scores": ordered,
+            "pairs": pairs,
+            "verdict": verdict,
+            "note": note,
+        })
+    return report
+
+
+# ── Temporal before→after pairs (v1.8.9 correction, Fix 1) ────────────────
+# Two values that are the endpoints of ONE before→after trajectory
+# described in a source sentence are not two measurements of the same
+# state, so they must never conflict with each other — Nov 9: Sonnet
+# 4.6 "from 0.330 at baseline to 0.641 with memory plus refined
+# instruction" and "barely moved (0.330 to 0.364) until prompted ...
+# which took it to 0.641" are the same pair (baseline 0.330, prompted
+# 0.641), not a 0.311 discrepancy. The detector is deliberately
+# narrow: a compared entry's span must contain BOTH compared values
+# as numbers AND a transition cue. A span that merely mentions one
+# endpoint, or a plain disagreement ("scored 0.641" vs "scored
+# 0.400"), never fires. A "ranged from X to Y" span is a range, not a
+# trajectory, and is excluded.
+_TEMPORAL_CUE_RES = (
+    re.compile(r"\bbaseline\b", re.I),
+    re.compile(r"\btook (?:it|them|him|her) to\b", re.I),
+    re.compile(r"\buntil\b", re.I),
+    re.compile(r"\b(?:rose|increased|went|moved|jumped|climbed|grew|improved|"
+               r"doubled|nearly doubled)\b[^.!?\n]{0,120}?\bfrom\b[^.!?\n]{0,120}?\bto\b",
+               re.I),
+    re.compile(r"\bfrom\b[^.!?\n]{0,120}?\bat baseline\b[^.!?\n]{0,60}?\bto\b", re.I),
+    re.compile(r"\bbefore\b[^.!?\n]{0,80}?\bafter\b", re.I),
+)
+_TEMPORAL_RANGE_EXCLUSION_RE = re.compile(
+    r"\brang(?:e|ed|ing)\b[^.!?\n]{0,40}?\bfrom\b", re.I)
+_TEMPORAL_NUMBER_RE = re.compile(r"(?<!\d)\d[\d,]*\.?\d*")
+
+
+def _temporal_comparison(key: str, entries: List[Dict], val_objs: List[Dict],
+                         variant: str, doc_name_fn) -> Optional[Dict]:
+    """Return a temporal-comparison entry when the compared values are
+    the two endpoints of one before→after trajectory, else None.
+
+    *entries* are the compared claims (one value per doc after modal
+    selection for generic groups); *val_objs* are their value objects
+    with sources. Requires exactly two distinct compared values, and
+    at least one compared entry's span to contain both values plus a
+    transition cue. Before/after order follows first occurrence in
+    the earliest satisfying span.
+    """
+    values = sorted({e["claim"]["numeric_value"] for e in entries})
+    if len(values) != 2:
+        return None
+    low, high = values
+    evidence: List[Dict] = []
+    for e, vo in zip(entries, val_objs):
+        span = e["claim"].get("span", "") or vo.get("span", "") \
+            or e["claim"].get("context", "")
+        if not span:
+            continue
+        nums = set()
+        for m in _TEMPORAL_NUMBER_RE.finditer(span):
+            try:
+                nums.add(float(m.group(0).replace(",", "")))
+            except ValueError:
+                continue
+        if low not in nums or high not in nums:
+            continue
+        if _TEMPORAL_RANGE_EXCLUSION_RE.search(span):
+            continue
+        if not any(cue.search(span) for cue in _TEMPORAL_CUE_RES):
+            continue
+        evidence.append({"source": vo["source"], "span": span})
+    if not evidence:
+        return None
+    first_span = evidence[0]["span"]
+    positions = {}
+    for v in (low, high):
+        best = None
+        for m in _TEMPORAL_NUMBER_RE.finditer(first_span):
+            try:
+                if float(m.group(0).replace(",", "")) == v:
+                    best = m.start()
+                    break
+            except ValueError:
+                continue
+        positions[v] = best if best is not None else 1 << 30
+    before_val = low if positions[low] <= positions[high] else high
+    after_val = high if before_val == low else low
+    by_value = {}
+    for vo in val_objs:
+        by_value.setdefault(vo["value"], vo)
+    entry: Dict = {
+        "entity_key": key,
+        "entity_label": entries[0]["claim"]["entity_label"],
+        "before": {"value": before_val,
+                   "source": by_value[before_val]["source"],
+                   "raw": by_value[before_val]["raw"]},
+        "after": {"value": after_val,
+                  "source": by_value[after_val]["source"],
+                  "raw": by_value[after_val]["raw"]},
+        "values": val_objs,
+        "variant": variant,
+        "evidence_spans": evidence,
+        "note": (
+            f"Before→after pair: {before_val} at baseline → {after_val} "
+            "after the stated change — the two values are the endpoints "
+            "of one trajectory described in the source span(s), not two "
+            "measurements of the same state. Not a conflict and not an "
+            "alignment of equal values."
+        ),
+    }
+    if entries and entries[0]["claim"].get("claim_kind") == "generic_quantitative":
+        entry["claim_kind"] = "generic_quantitative"
     return entry
 
 
@@ -3747,11 +5053,12 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
           "evaluation_setting_mismatches": [...],  # same benchmark, different shot counts
           "variant_mismatches": [...],  # same benchmark, different variants (v1.8.5)
           "benchmark_mismatches": [...],  # same generic identity, different named benchmarks (v1.8.6)
-          "not_comparable":     [...],   # one pricing/benchmark key, several qualified identities (v1.8.8; benchmarks r3)
-          "needs_source_clarification": [...],  # values differ, identity incomplete — never a conflict (v1.8.8 r3)
+          "not_comparable":     [...],   # one pricing key, several qualified identities (v1.8.8)
+          "temporal_comparisons": [...], # before→after pairs, not conflicts (v1.8.9 correction)
+          "needs_source_clarification": [...],  # values differ, identity incomplete — never a conflict (v1.8.8 r3, restored v1.8.9)
+          "has_unresolved_comparisons": bool,  # needs_source_clarification or not_comparable non-empty (v1.8.8 r4, restored v1.8.9)
           "timeline_reconciliation": [...],  # shared-year date/precision notes
           "agreement_status":  str,     # aligned | conflicts_present | not_established
-          "has_unresolved_comparisons": bool,  # needs_source_clarification or not_comparable non-empty (v1.8.8 r4) — "aligned" covers only compared claims
           "comparable_claims": int,     # claims that actually went through comparison
           "presence_absence_mismatches": [...],  # PRESENT vs EXPLICITLY_ABSENT
           "presence_status":   {entity_key: {doc_name: status}},
@@ -3769,6 +5076,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     """
     if len(analyzed_docs) < 2:
         return {
+            "statistical_documents": [],
             "doc_count":         len(analyzed_docs),
             "error":             "compare requires at least 2 documents",
             "shared_claims":     [],
@@ -3781,7 +5089,12 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "variant_mismatches": [],
             "benchmark_mismatches": [],
             "not_comparable":      [],
+            "temporal_comparisons": [],
             "needs_source_clarification": [],
+            "speed_ratio_checks":  [], "era_suggestions": [],
+            "separability":        [],
+            "revision_notes":      [],
+            "headline_weighting":  [],
             "shared_dates":      [],
             "shared_years":      [],
             "unique_dates":      [],
@@ -3826,22 +5139,9 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     # no metric cue is not a claim), so coverage is a floor, not a
     # precision measure — and a low floor is a recall defect, never
     # permission to fabricate a conflict.
-    # v1.8.8 r3 (Arch audit 2026-11-17: Reuters 0/10 is a measure-
-    # design issue): "seen" no longer counts numbers that are not
-    # numeric propositions at all — digits inside a date or timestamp
-    # ("2026-11-16T04:29:29+00:00", "Nov 15", "2026/11/15"), a URL, a
-    # clock time, or an identifier glued to a letter ("Qwen4", "3D",
-    # "H100"; a magnitude letter like "71B" still counts). A document
-    # with no candidate propositions has coverage 1.0 and is never
-    # flagged as a recall defect for a low mint ratio.
     extraction_coverage: List[Dict] = []
     for doc_idx, doc in enumerate(analyzed_docs):
         text = doc.get("text", "")
-        masked: List[Tuple[int, int]] = [
-            (dm.start(), dm.end()) for dm in _DATE_FULL_RE.finditer(text)]
-        masked += [(um.start(), um.end()) for um in re.finditer(r"https?://\S+", text)]
-        masked += [(tm.start(), tm.end()) for tm in re.finditer(
-            r"\b\d{1,2}:\d{2}(?::\d{2})?(?:[+-]\d{2}:?\d{2})?\b", text)]
         seen = 0
         for m in _GENERIC_DIGIT_RE.finditer(text):
             digits = m.group(2)
@@ -3849,25 +5149,13 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                 continue
             if _generic_is_version(text, m.start(), m.end()):
                 continue
-            if any(a <= m.start() < b for a, b in masked):
-                continue
-            if m.start() > 0 and text[m.start() - 1].isalpha():
-                continue
-            nxt = text[m.end():m.end() + 1]
-            if nxt.isalpha() and not (nxt in "BMKT" and not text[m.end() + 1:m.end() + 2].isalpha()):
-                continue
-            if _GENERIC_MONTH_RE.search(text[max(0, m.start() - 15):m.start()]) or \
-                    _GENERIC_MONTH_AFTER_RE.match(text[m.end():m.end() + 12]):
-                continue
             seen += 1
         minted = len(doc_claims[doc_idx])
         extraction_coverage.append({
             "source":         _doc_name(doc_idx),
             "numbers_seen":   seen,
             "claims_minted":  minted,
-            # Capped at 1.0: number-word and table-row claims can mint
-            # without a digit candidate of their own.
-            "coverage":       min(1.0, round(minted / seen, 3)) if seen else 1.0,
+            "coverage":       round(minted / seen, 3) if seen else 1.0,
         })
     doc_dates: List[List[Dict]] = [
         extract_date_claims(doc.get("text", ""))
@@ -3898,6 +5186,16 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     def _generic_close(a: float, b: float) -> bool:
         if abs(a) < 20 and abs(b) < 20:
             return abs(a - b) <= 0.15
+        if abs(a) <= 100 and abs(b) <= 100:
+            # v1.8.9 (run-20 gap 2a): index scores live in 0-100
+            # and adjacent ranks differ by ~1 point, so the old 2%
+            # relative tolerance over-merged — a bare "Neon" AA
+            # score of 61 attached to BOTH Carbon's 60 and Astra's
+            # 62. Absolute 0.5 still covers rounding attachments
+            # (58.6 <-> 59) while blocking adjacent-index confusion.
+            # Large counts keep the relative rule (4,200 <-> 4,234
+            # sessions are the same figure at different precision).
+            return abs(a - b) <= 0.5
         ref = max(abs(a), abs(b)) or 1.0
         return abs(a - b) <= ref * 0.02
 
@@ -3922,12 +5220,8 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             if len(matches) == 1:
                 target = matches[0]
                 target_label = entity_map[target][0]["claim"]["entity_label"]
-                # v1.8.8 r3: the attached entry carries the group's
-                # subject, so its identity reads the same as the key.
-                target_subject = target.split("|")[5]
                 e["claim"] = {**e["claim"], "entity_key": target,
                               "entity_label": target_label,
-                              "subject": "" if target_subject == "unstated" else target_subject,
                               "subject_attached": True}
                 entity_map[target].append(e)
                 attached.append(e)
@@ -4073,18 +5367,42 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         for e in list(unstated):
             val = e["claim"].get("numeric_value")
             eff = e["claim"].get("effort", "")
+            era = e["claim"].get("era", "")
             # v1.8.8: a stated group matches only when its values are
             # close AND its thinking level is compatible with this
             # entry's — both stated and different means different
             # qualified identities, never an attachment. (Either side
             # unstated is compatible: level-less is provisional, not a
             # different level.)
+            # Worker B (v1.8.9 correction): the era must match too —
+            # an unstated-era price never stands in for a stated one,
+            # and a prior-era price must never attach to a current-
+            # era group (or vice versa) on value alone. A prior $10
+            # attaches to the prior fable-5-1 group; an unknown-era
+            # $8 attaches to the unknown-era fable-5-2 group. (For
+            # benchmark keys the era is "" on every side, so the
+            # check is a no-op there.)
             matches = [s for s, es in stated_subjects.items()
                        if any(_generic_close(x["claim"].get("numeric_value", 0), val)
                               and (not eff or not x["claim"].get("effort", "")
                                    or x["claim"].get("effort", "") == eff)
+                              and x["claim"].get("era", "") == era
                               for x in es)]
             if len(matches) == 1:
+                # Worker B (v1.8.9 correction): the same doc restating
+                # the same price twice ("The standard price is $8 ...
+                # down from $10" after "cutting Fable's API price to
+                # $8") is one claim, not two — when the target group
+                # already holds this doc's identical value, the
+                # unstated restatement is dropped instead of attached
+                # as a duplicate entry (live lists one $8 per doc).
+                if any(x["doc_idx"] == e["doc_idx"]
+                       and _generic_close(x["claim"].get("numeric_value", 0), val)
+                       and (not eff or not x["claim"].get("effort", "")
+                            or x["claim"].get("effort", "") == eff)
+                       for x in stated_subjects[matches[0]]):
+                    entity_map[key] = [x for x in entity_map[key] if x is not e]
+                    continue
                 e["claim"] = {**e["claim"], "subject": matches[0],
                               "subject_attached": True}
 
@@ -4108,12 +5426,16 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     # several qualified identities (era / model / thinking level) —
     # visible NOT_COMPARABLE records, never a silent non-match.
     not_comparable: List[Dict] = []
-    # Conflict integrity (v1.8.8 r3, Arch audit 2026-11-17): values that
-    # differ beyond tolerance under an INCOMPLETE claim identity —
-    # subject, era, or measurement condition unstated on some side —
-    # are neither a conflict nor an alignment. They are listed here,
-    # with every value's identity and source span, for a reader to
-    # resolve against the sources.
+    # Temporal before→after pairs (v1.8.9 correction, Fix 1): the
+    # endpoints of one trajectory, recognised in the group loop below
+    # — neither a conflict nor an alignment of equal values.
+    temporal_comparisons: List[Dict] = []
+    # Conflict integrity (v1.8.8 r3, restored v1.8.9 correction,
+    # Fix 3): values that differ beyond tolerance under an INCOMPLETE
+    # claim identity — subject, or measurement condition unstated on
+    # some side — are neither a conflict nor an alignment. They are
+    # listed here, with every value's identity and source span, for a
+    # reader to resolve against the sources.
     needs_source_clarification: List[Dict] = []
     # Single-originator generic figures (v1.8.6, P2): orgs whose
     # figures are repeated across sources, for the triage summary.
@@ -4221,6 +5543,15 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                 return (v, c.get("subject", ""), "")
             if key.startswith("pricing"):
                 return (c.get("era", ""), c.get("subject", ""), c.get("effort", ""))
+            if key.startswith("generic|"):
+                # v1.8.9 (run-20 gap 12): a relative-delta group whose
+                # sides point opposite directions ("25% cheaper" vs
+                # "50% more") is two identities, not a dispute — the
+                # direction lives on the claim, not in the key (the
+                # pinned "rel" key is unchanged), so the partition
+                # splits mixed-direction groups here. Same-direction
+                # groups stay one partition and compare as before.
+                return (c.get("variant", ""), c.get("rel_direction", ""), "")
             return (c.get("variant", ""), "", "")
         partitions: Dict[Tuple[str, str, str], List[Dict]] = {}
         for e in entries:
@@ -4247,39 +5578,6 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             })
         group_variant = next(iter(stated_variants), "") if not split_variant else ""
         if len(partitions) > 1:
-            # v1.8.8 r3 (Arch audit 2026-11-17): a benchmark key whose
-            # documents report it for different models — or for a
-            # model on one side and an unstated subject on the other —
-            # is preserved as visibly non-comparable, like a pricing
-            # split, instead of silently becoming two unique claims.
-            # Only when the split spans two or more documents: one
-            # document's own multi-model table is not a cross-source
-            # identity question. (Stated-variant splits are already in
-            # variant_mismatches.)
-            if key in _BENCHMARK_KEYS and not split_variant \
-                    and len({e["doc_idx"] for e in entries}) > 1:
-                not_comparable.append({
-                    "entity_key":   key,
-                    "entity_label": entries[0]["claim"]["entity_label"],
-                    "identities": [
-                        {"era": "", "subject": pk[1], "effort": "",
-                         "variant": pk[0],
-                         "values": [{"source": _doc_name(e["doc_idx"]),
-                                     "value": e["claim"]["numeric_value"],
-                                     "unit": e["claim"]["unit"],
-                                     "raw": e["claim"]["raw_value"],
-                                     "context": e["claim"].get("context", "")}
-                                    for e in part]}
-                        for pk, part in partitions.items()
-                    ],
-                    "note": (
-                        "Same benchmark reported for different measured models "
-                        "(an unstated model never stands in for a stated one). "
-                        "Scores of different models are not directly comparable. "
-                        "Do not read as a conflict or an alignment. Each value "
-                        "carries its source span (context)."
-                    ),
-                })
             if key.startswith("pricing"):
                 # v1.8.8, Fix 1: the identity split is a visible
                 # NOT_COMPARABLE record, not a silent non-match — the
@@ -4324,18 +5622,33 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     # the key was split into several variant partitions.
     _presence_mismatch_done: set = set()
 
-    # ── Conflict-integrity gate (v1.8.8 r3, Arch audit 2026-11-17) ────
-    # Core invariant: a conflict is labelled only when the claim
-    # identity on EVERY side includes the same subject (model/product),
-    # metric, condition/benchmark, tier, reference era and unit. Key,
-    # tier and unit are already equal inside a group (the key and the
-    # unit gate guarantee them); this checks the rest for the families
-    # whose key does not name the measured subject — benchmark scores,
-    # prices and generic figures. Market and macro keys name their
-    # subject in the key itself ("10yr-treasury-yield") and are not
-    # gated here. Returns the identity fields that are missing or
-    # unequal; empty means the identity is complete.
+    # ── Cross-unit / separability / revision outputs (v1.8.9) ─────────
+    # Collected during the group loop and reported after it: multiplier
+    # claims (never compared as facts), revision groups (never counted
+    # as agreement), and the separability report (built from the raw
+    # claims, not the groups).
+    multiplier_entries: List[Dict] = []
+    revision_notes: List[Dict] = []
+    headline_entries: List[Dict] = []
+
     def _identity_gaps(key: str, group: List[Dict], generic: bool) -> List[str]:
+        # v1.8.8 r3, restored v1.8.9 correction (Fix 3), with TWO
+        # documented deviations. (1) The r3 "era" gap is NOT applied.
+        # Era is partition-scoped in this tree — a group never mixes
+        # eras, so the era gap could only fire when era is unstated
+        # on EVERY side, and this work copy pins that case to compare
+        # ("still compares two undated prices", v1.8.8 repair):
+        # two undated prices that disagree conflict; mixed-era groups
+        # never reach this gate because they split into
+        # not_comparable records instead. (2) The r3 "subject" gap is
+        # not applied to mapped claims when subject is unstated on
+        # EVERY side (see the subject branch below): this tree's
+        # mapped extraction leaves subject empty even when the
+        # sentence names the model, so all-empty is an extraction gap
+        # there, not an incomplete identity. Everything else is r3
+        # verbatim: subject (mixed/differs, and all-unstated generic),
+        # variant, version, shot count, generic benchmark/time, and
+        # one source reporting several values.
         is_bench = key in _BENCHMARK_KEYS
         is_price = key.startswith("pricing")
         if not (is_bench or is_price or generic):
@@ -4347,16 +5660,22 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             return any(stated) and not all(stated)
 
         subjects = [e["claim"].get("subject", "") for e in group]
-        if not all(subjects):
+        if any(subjects) and not all(subjects):
             gaps.append("subject")
         elif len(set(subjects)) > 1:
             gaps.append("subject (differs)")
+        elif generic and not any(subjects):
+            # Generic extraction reliably names the subject when the
+            # sentence states one, so an all-unstated generic identity
+            # is genuinely incomplete. Mapped claims are different:
+            # this tree's mapped extraction often leaves subject empty
+            # even when the sentence names the model ("On GPQA, Opus
+            # 5.5 scored 87.0%"), so all-empty there is an extraction
+            # gap, not evidence of an incomplete identity — and a
+            # genuine same-model benchmark dispute must still
+            # conflict. (v1.8.8 r3's verbatim rule would suppress it.)
+            gaps.append("subject")
         if is_price:
-            eras = [e["claim"].get("era", "") for e in group]
-            if any(x in ("", "unknown") for x in eras):
-                gaps.append("era")
-            elif len(set(eras)) > 1:
-                gaps.append("era (differs)")
             if key == "pricing-per-task" and not all(e["claim"].get("effort") for e in group):
                 gaps.append("condition (thinking level)")
         if is_bench:
@@ -4405,9 +5724,98 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         return out
 
     for key, entries, variant in grouped:
+        # v1.8.9 (run-20 gap 11): a multiplier claim is a headline
+        # exaggeration metric, not a fact — it never aligns, conflicts,
+        # or counts as a unique. It is routed to the speed-ratio check
+        # (measured durations vs claimed multiplier) below.
+        if key.startswith("generic|multiplier|"):
+            multiplier_entries.extend(entries)
+            # A headline multiplier is ALSO a headline figure — it
+            # belongs in headline_weighting as the bias signal that
+            # the publisher led with it (the speed-ratio check below
+            # dedupes it against the body multiplier).
+            for e in entries:
+                if e["claim"].get("from_headline"):
+                    headline_entries.append(e)
+            continue
+        # v1.8.9 (run-20 follow-on 1): headline score claims are bias
+        # signal, never facts — routed out of the group loop into
+        # headline_weighting, like multipliers.
+        if key.startswith("generic|headline|"):
+            headline_entries.extend(entries)
+            continue
         # ── Generic-claim group shaping (v1.8.6, P2) ─────────────────────
         is_generic = bool(entries) and entries[0]["claim"].get("claim_kind") == "generic_quantitative"
         if is_generic:
+            # (a) Revision guard (v1.8.9, run-20 gap 10 residual): a
+            # group holding a revision-marked claim whose values
+            # differ is a REVISION, not an agreement — "revised:
+            # 1336 → 1333", not "aligned [1336, 1336, 1333]". This is
+            # exactly the catch that matters: a revision that reads
+            # as agreement is how a pattern of failure gets re-minted
+            # as a pattern of success or consistency. The group is
+            # surfaced as a revision (shared entry annotated, values
+            # stacked with their sources) and never enters alignment.
+            if any(e["claim"].get("revision") for e in entries):
+                _rev_vals = {e["claim"]["numeric_value"] for e in entries}
+                if len(_rev_vals) > 1:
+                    _rev_vobjs = []
+                    for e in entries:
+                        _vo = {"source": _doc_name(e["doc_idx"]),
+                               "value": e["claim"]["numeric_value"],
+                               "unit": e["claim"]["unit"],
+                               "raw": e["claim"]["raw_value"],
+                               "version": e["claim"].get("version", ""),
+                               "shot_count": e["claim"].get("shot_count"),
+                               "variant": e["claim"].get("variant", ""),
+                               "span": e["claim"].get("span", ""),
+                               "metric": e["claim"].get("metric", ""),
+                               "benchmark": e["claim"].get("benchmark", ""),
+                               "context": e["claim"].get("context", ""),
+                               "qualifier": e["claim"].get("qualifier", ""),
+                               "time": e["claim"].get("time", ""),
+                               "attribution": e["claim"].get("attribution", ""),
+                               "revision": bool(e["claim"].get("revision")),
+                               "revision_cue": e["claim"].get("revision_cue", ""),
+                               "revision_date": e["claim"].get("revision_date", "")}
+                        if e["claim"].get("rank") is not None:
+                            _vo["rank"] = e["claim"]["rank"]
+                        _rev_vobjs.append(_vo)
+                    _prev = [v for v, e in zip(_rev_vobjs, entries)
+                             if not e["claim"].get("revision")]
+                    _new = [v for v, e in zip(_rev_vobjs, entries)
+                            if e["claim"].get("revision")]
+                    _prev_vals = sorted({v["value"] for v in _prev})
+                    _new_vals = sorted({v["value"] for v in _new})
+                    _rev_label = entries[0]["claim"]["entity_label"]
+                    _rev_note = (
+                        f"Revised: {', '.join(str(v) for v in _prev_vals)} → "
+                        f"{', '.join(str(v) for v in _new_vals)}"
+                        + (f" ({_new[0].get('revision_date')})"
+                           if _new and _new[0].get("revision_date") else "")
+                        + " — the board moved; do not read as agreement. "
+                        "A revision that reads as agreement is how a "
+                        "pattern of failure gets re-minted as success."
+                    )
+                    revision_notes.append({
+                        "entity_key": key,
+                        "entity_label": _rev_label,
+                        "previous": _prev,
+                        "revised": _new,
+                        "note": _rev_note,
+                    })
+                    shared_claims.append({
+                        "entity_key": key,
+                        "entity_label": _rev_label,
+                        "found_in_docs": list(dict.fromkeys(
+                            _doc_name(e["doc_idx"]) for e in entries)),
+                        "values": _rev_vobjs,
+                        "variant": variant,
+                        "claim_kind": "generic_quantitative",
+                        "revision": True,
+                        "revision_note": _rev_note,
+                    })
+                    continue
             # (b) Benchmark guard: two different NAMED benchmarks in
             # one group is a benchmark mismatch, not a comparison.
             # Compared case-insensitively: "FrontierCode" and
@@ -4501,9 +5909,6 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                     })
                     attr_orgs = sorted(
                         {e["claim"].get("attribution", "") for e in ves} - {""})
-                    v_subjects = {e["claim"].get("subject", "") for e in ves}
-                    if key.count("|") == 5:
-                        v_subjects = {"" if key.split("|")[5] == "unstated" else key.split("|")[5]}
                     align_entry: Dict = {
                         "entity_key": key,
                         "entity_label": entries[0]["claim"]["entity_label"],
@@ -4512,8 +5917,6 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                         "variant": variant,
                         "claim_kind": "generic_quantitative",
                         "attribution": attr_orgs,
-                        "identity": {"subject": next(iter(v_subjects))
-                                     if len(v_subjects) == 1 else ""},
                     }
                     if len(attr_orgs) == 1:
                         align_entry["attribution_note"] = (
@@ -4646,6 +6049,14 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                     "time": e["claim"].get("time", ""),
                     "attribution": e["claim"].get("attribution", ""),
                 })
+                if e["claim"].get("effort"):
+                    vo["effort"] = e["claim"]["effort"]
+                if e["claim"].get("rank") is not None:
+                    vo["rank"] = e["claim"]["rank"]
+                if e["claim"].get("revision"):
+                    vo["revision"] = True
+                    vo["revision_cue"] = e["claim"].get("revision_cue", "")
+                    vo["revision_date"] = e["claim"].get("revision_date", "")
             val_objs.append(vo)
 
         if len(entries) == 1:
@@ -4838,9 +6249,20 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                         "within the widened tolerance for an approximate figure."
                     )
 
-        # Conflict-integrity gate (v1.8.8 r3): a discrepancy under an
-        # incomplete identity is never a conflict — and never an
-        # alignment either. It is listed for source clarification.
+        # Temporal before→after guard (v1.8.9 correction, Fix 1):
+        # endpoints of one trajectory are a temporal comparison, not
+        # a conflict — checked before the identity gate, because it
+        # is the more specific diagnosis.
+        if is_conflict:
+            temporal = _temporal_comparison(key, entries, val_objs, variant, _doc_name)
+            if temporal is not None:
+                temporal_comparisons.append(temporal)
+                continue
+
+        # Conflict-integrity gate (v1.8.8 r3, restored v1.8.9
+        # correction, Fix 3): a discrepancy under an incomplete
+        # identity is never a conflict — and never an alignment
+        # either. It is listed for source clarification.
         if is_conflict:
             gaps = _identity_gaps(key, entries, is_generic)
             if gaps:
@@ -4894,6 +6316,12 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                 entry["attribution_note"] = attribution_note
             if qualifier_note:
                 entry["qualifier_note"] = qualifier_note
+        if key in _BENCHMARK_KEYS:
+            entry["shot_count"] = next(iter(named_shots), None) if named_shots else None
+            entry["evaluation_conditions"] = evaluation_note
+        if variant_conditions:
+            entry["variant_conditions"] = variant_conditions
+            provisional_variant_comparisons.append(key)
         # v1.8.8 r3: the comparison identity, so a reader can see what
         # the values were compared AS ("" = unstated on some side).
         if key in _BENCHMARK_KEYS or key.startswith("pricing") or is_generic:
@@ -4908,12 +6336,6 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                 if efforts != {""}:
                     ident["effort"] = next(iter(efforts)) if len(efforts) == 1 else ""
             entry["identity"] = ident
-        if key in _BENCHMARK_KEYS:
-            entry["shot_count"] = next(iter(named_shots), None) if named_shots else None
-            entry["evaluation_conditions"] = evaluation_note
-        if variant_conditions:
-            entry["variant_conditions"] = variant_conditions
-            provisional_variant_comparisons.append(key)
 
         if is_conflict:
             # v1.8.7: the "different trading sessions" note belongs to
@@ -4934,6 +6356,102 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             conflicts.append(entry)
         else:
             alignment.append(entry)
+
+    # ── Temporal double-count note (v1.8.9 correction, Fix 1) ──────────
+    # The baseline endpoint of a temporal pair may ALSO be aligned
+    # under another metric (Nov 9: 0.330 aligns as `score` from the
+    # Figure-3 alt text while the pair mints it under `memory`). Name
+    # that overlap on the temporal entry so the figure is not silently
+    # double-counted under two metrics. The figure still appears in
+    # both groups' shared claims — removing it from either group is an
+    # extraction-level dedup, not a compare-verdict call — but the
+    # verdict no longer treats it as a conflict, and the overlap is
+    # visible here.
+    for _t in temporal_comparisons:
+        _subj = _t["entity_key"].split("|")[-1] if "|" in _t["entity_key"] else ""
+        _t["also_aligned_as"] = sorted({
+            _a["entity_key"] for _a in alignment
+            if _subj and _a["entity_key"] != _t["entity_key"]
+            and _a["entity_key"].split("|")[-1] == _subj
+            and any(_v["value"] == _t["before"]["value"]
+                    for _v in _a.get("values", []))
+        }) if _subj else []
+
+    # ── Bare-cost cross-subject unit check (Worker B, v1.8.9 correction)
+    # The per-key unit guard above only fires inside one key's group,
+    # and generic cost keys carry the subject — so a bare cost parsed
+    # as a count ("about $75 billion" mints unit "count") and a bare
+    # cost parsed as dollars ("$14.83", unit "$") sit under different
+    # subject keys and the $/count mismatch live v1.8.8 reported is
+    # lost, even though both claims are the same bare-cost identity
+    # (generic|cost|cost, no benchmark, no per-unit denominator).
+    # This pass restores that classification WITHOUT de-attributing
+    # either side: it pools the bare-cost claims across subject
+    # variants of the one identity and, when 2+ docs report it in
+    # different units, records one unit_mismatches entry under the
+    # unstated key (the live v1.8.8 key). The claims themselves stay
+    # where the group loop put them (uniques, never aligned, never a
+    # conflict) — only the mismatch classification is restored.
+    # Scoped to bare generic costs on purpose: a per-task or
+    # bench-attached cost is a different identity and must never be
+    # pooled here.
+    _bare_cost: List[Dict] = []
+    for _di, _claims in enumerate(doc_claims):
+        for _c in _claims:
+            if _c.get("claim_kind") != "generic_quantitative":
+                continue
+            _parts = _c.get("entity_key", "").split("|")
+            if len(_parts) == 6 and _parts[1] == "cost" and _parts[2] == "cost" \
+                    and _parts[3] == "" and _parts[4] == "":
+                _bare_cost.append({"doc_idx": _di, "claim": _c})
+    # One representative per doc (the first bare-cost claim in doc
+    # order) — the mismatch is "same entity, different units across
+    # sources", so one value per source is the entry, not every bare
+    # cost in the packet. This mirrors live v1.8.8, whose entry
+    # carried exactly the two compared values ($75 billion vs $14.83).
+    _bc_by_doc: Dict[int, Dict] = {}
+    for _e in _bare_cost:
+        _bc_by_doc.setdefault(_e["doc_idx"], _e)
+    _bc_reps = list(_bc_by_doc.values())
+    _bare_units = {_e["claim"].get("unit", "") for _e in _bc_reps} - {""}
+    if len(_bare_units) > 1 and len(_bc_reps) >= 2:
+        _bc_vals = []
+        for _e in _bc_reps:
+            _c = _e["claim"]
+            _vo = {"source": _doc_name(_e["doc_idx"]), "value": _c["numeric_value"],
+                   "unit": _c["unit"], "raw": _c["raw_value"],
+                   "version": _c.get("version", ""),
+                   "shot_count": _c.get("shot_count"),
+                   "variant": _c.get("variant", ""),
+                   "span": _c.get("span", ""),
+                   "metric": _c.get("metric", ""),
+                   "benchmark": _c.get("benchmark", ""),
+                   "context": _c.get("context", ""),
+                   "qualifier": _c.get("qualifier", ""),
+                   "time": _c.get("time", ""),
+                   "attribution": _c.get("attribution", "")}
+            _bc_vals.append(_vo)
+        unit_mismatches.append({
+            "entity_key":   "generic|cost|cost|||unstated",
+            "entity_label": "cost",
+            "units":        sorted(_bare_units),
+            "values":       _bc_vals,
+            "variant":      "",
+            "note": (
+                "Same entity reported in different units across sources "
+                "(e.g. a count vs a percentage) — values are not directly "
+                "comparable. Do not read as a conflict or an alignment."
+            ),
+        })
+
+    # ── Cross-unit speed-ratio checks + separability (v1.8.9) ─────────
+    # Built from the raw claims, not the groups: multipliers were
+    # routed out of the group loop above, and separability groups
+    # ranked scores by benchmark with their stated margins.
+    speed_ratio_checks = _speed_ratio_checks(
+        multiplier_entries, doc_claims, _doc_name)
+    separability = _separability_report(doc_claims, _doc_name)
+    headline_weighting = _headline_weighting(headline_entries, _doc_name)
 
     # ── Date claims (Sieve gap 2026-11-02) ───────────────────────────────
     # Dates are claims too, and rollout stories live on them. Exact dates
@@ -5061,14 +6579,12 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             f"No overlapping numeric claims found across "
             f"{len(analyzed_docs)} documents."
         )
-    # v1.8.8 r4 (Arch audit 2026-11-17, risk 1 — status semantics):
-    # agreement_status "aligned" must never read as a clean bill of
-    # health while comparisons sit unresolved. The flag is additive
-    # (the enum is unchanged) and is stated here, immediately next to
-    # the headline, so a skimming reader cannot mistake "aligned" for
-    # "nothing left open". The undated-price abstention is a safe
-    # abstention, not an agreement — it lands in
-    # needs_source_clarification and sets this flag.
+    # v1.8.8 r4 (restored v1.8.9 correction, Fix 3): agreement_status
+    # "aligned" must never read as a clean bill of health while
+    # comparisons sit unresolved. The flag is additive (the enum is
+    # unchanged) and is stated here, immediately next to the headline,
+    # so a skimming reader cannot mistake "aligned" for "nothing left
+    # open".
     n_notcmp = len(not_comparable)
     has_unresolved_comparisons = bool(n_clarify or n_notcmp)
     if has_unresolved_comparisons:
@@ -5089,6 +6605,12 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         triage_summary += (
             f" {len(not_comparable)} claim key(s) held several identities (model / era / "
             "thinking level) — compared only within each identity. See not_comparable."
+        )
+    if temporal_comparisons:
+        triage_summary += (
+            f" {len(temporal_comparisons)} temporal comparison(s): a before→after pair "
+            "(baseline → later state) was recognised as one trajectory, not a conflict "
+            "and not an alignment of equal values. See temporal_comparisons."
         )
     if n_mismatches > 0:
         triage_summary += (
@@ -5154,11 +6676,41 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "resolvable tier — fail-closed, never compared. See unmatched_claims "
             "for the spans and reasons."
         )
-    # v1.8.8 r3: a ratio over fewer than five candidate numbers is not
-    # a measure — a short wire story with one station number in its
-    # byline is not a recall defect.
-    low_coverage = [c for c in extraction_coverage
-                    if c["coverage"] < 0.5 and c["numbers_seen"] >= 5]
+    if speed_ratio_checks:
+        _src_bad = sum(1 for c in speed_ratio_checks
+                       if c["verdict"] in ("outside_tolerance", "mixed"))
+        triage_summary += (
+            f" {len(speed_ratio_checks)} speed-ratio check(s): a claimed "
+            "multiplier was checked against measured task durations — "
+            f"{_src_bad} outside tolerance or mixed (headline figure vs measured "
+            "time). See speed_ratio_checks; a multiplier is never counted "
+            "as factual agreement."
+        )
+    if separability:
+        _src_notsep = sum(1 for s in separability
+                          if s["verdict"] in ("not_separable", "mixed"))
+        triage_summary += (
+            f" {len(separability)} separability report(s): ranked scores "
+            "checked against a stated uncertainty — "
+            f"{_src_notsep} with ranks inside the margin (not separable). "
+            "See separability; the layers are stacked for the reader to "
+            "choose a source direction."
+        )
+    if revision_notes:
+        triage_summary += (
+            f" {len(revision_notes)} revision(s): a board value was revised "
+            "(see revision_notes) — a revision is not agreement, and is "
+            "not counted as one."
+        )
+    if headline_weighting:
+        _n_figs = sum(len(h["figures"]) for h in headline_weighting)
+        triage_summary += (
+            f" {len(headline_weighting)} document(s) headline {_n_figs} figure(s) "
+            "(see headline_weighting): a headlined figure is bias/audience "
+            "signal — weighted low for information quality, never counted as "
+            "factual agreement."
+        )
+    low_coverage = [c for c in extraction_coverage if c["coverage"] < 0.5]
     if low_coverage:
         triage_summary += (
             f" Extraction coverage below half in {len(low_coverage)} document(s) "
@@ -5182,7 +6734,21 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "disagreement, not agreement."
         )
 
+    from statistical_evidence import statistics, passage_evidence
+    statistical_documents = []
+    for idx, doc in enumerate(analyzed_docs):
+        body = doc.get("text", "")
+        rows = statistics(body)
+        receipt = passage_evidence(body, doc.get("source_url", ""), doc.get("source_type", "auto"), rows, _doc_name(idx))
+        if receipt is None and not rows and doc.get("source_type") in ("primary", "official") and doc.get("source_url"):
+            from signal_sieve import analyze
+            receipt = analyze(body, source_type=doc["source_type"], source_name=_doc_name(idx),
+                              source_url=doc["source_url"]).get("passage_evidence")
+        if rows or receipt:
+            statistical_documents.append(dict(document_index=idx, source=_doc_name(idx),
+                                              statistical_claims=rows, passage_evidence=receipt))
     return {
+        "statistical_documents": statistical_documents,
         "doc_count":         len(analyzed_docs),
         "shared_claims":     shared_claims,
         "unique_claims":     unique_claims,
@@ -5194,7 +6760,14 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         "variant_mismatches": variant_mismatches,
         "benchmark_mismatches": benchmark_mismatches,
         "not_comparable":      not_comparable,
+        "temporal_comparisons": temporal_comparisons,
         "needs_source_clarification": needs_source_clarification,
+        "era_suggestions": [hint for idx, doc in enumerate(analyzed_docs)
+                            for hint in _era_suggestions(doc.get("text", ""), _doc_name(idx), idx)],
+        "speed_ratio_checks": speed_ratio_checks,
+        "separability":      separability,
+        "revision_notes":    revision_notes,
+        "headline_weighting": headline_weighting,
         "shared_dates":      shared_dates,
         "shared_years":      shared_years,
         "unique_dates":      unique_dates,
