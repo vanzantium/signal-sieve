@@ -116,7 +116,8 @@ def passage_evidence(text, source_url, declared, stats, source_name="", unresolv
         for submitted, reference in zip(re.finditer(NUMBER, body), re.finditer(NUMBER, selected["passage"])):
             if submitted.group() != reference.group():
                 differences.append(dict(submitted=submitted.group(), publisher=reference.group()))
-    return dict(differing_numbers=differences, later_revisions=revisions, status=status, document_type=resolution, supplied_url=supplied,
+    return dict(quotation_use=("attribute_exact_words_to_dated_release" if status == "matched_release_excerpt" else "review"),
+                differing_numbers=differences, later_revisions=revisions, status=status, document_type=resolution, supplied_url=supplied,
                 scope="passage only", matched_releases=matches,
                 comparison_release=public_release(selected) if status == "numeric_discrepancy" else None,
                 document_publisher=source_name or None)
