@@ -1,0 +1,48 @@
+Source: Qwen Team — "Qwen4-Max: Your New Teammate Has Arrived" (Qwen Blog, dated 2026/11/15)
+Published: 2026/11/15. Author: Qwen Team. Length: 16 minutes / 3,114 words.
+URL: https://qwen.ai/blog?id=qwen4-max
+
+Note: the full 3,114-word text was read in the browser and summarised here with all key claims preserved. The post does NOT state a maximum output-token figure, and it does NOT give per-million-token API prices. It says only that API prices were lowered compared with Qwen3.8-Max, "with particularly large reductions in cached-input pricing."
+
+Model and architecture
+- Built on the new Qwen4 architecture, with a 2.4-trillion-parameter backbone, 71B activated parameters per token, and an additional 328B N-gram Embedding parameters.
+- Architecture features: GDN + Qwen Sparse Attention (QSA) — three Gated DeltaNet layers compressing history into fixed-size states for every QSA layer; Gated Residual (GR) — four parallel residual branches with dynamic read/write gates; and N-gram Embedding — context-based lookups at the second layer.
+- Native vision capabilities and a one-million-token (1M) context window.
+- Pre-training at the 2.4T scale was smooth, with loss decreasing steadily and no loss spikes. On in-house evaluations (Knowledge, Code, QA, STEM), Qwen4-Max-Base had the lowest bits per byte (BPB) of five checkpoints, improving on Qwen3.8-Max-Base in every domain by approximately 5–13% lower BPB while activating 25% fewer parameters.
+
+Work360
+- Work360 is Qwen's framework for modelling complex work, with a taxonomy of 26 Tier-1 domains, 182 Tier-2 subdomains, and 721 Tier-3 specialized fields.
+- Work360 benchmark score: Qwen4-Max 52.69, up from 47.74 for Qwen3.8-Max.
+- Token efficiency: on Work360, token usage drops by approximately 24% and 35% at Xhigh and High effort, respectively; on Terminal-Bench 4.0, the reductions are approximately 48% and 49%, respectively.
+- Cost per task (Work360 evaluation): average cost drops from $4.43 to $1.67 — a 62% reduction.
+
+Benchmark scores for Qwen4-Max (from the post's comprehensive comparison chart; comparators shown were Qwen3.8-Max-0902, Opus5.5, GPT6.1-Sol, GPT6-Astra, and Kimi K3.1)
+- DeepSWE v1.1 (agentic coding): 75.7
+- CodeArena, Elo (web development): 1750
+- Terminal-Bench 4.0 (agentic terminal coding): 48.5
+- ProgramBench (black-box software replication): 31.5
+- AA-Briefcase v1.1, Elo (agentic knowledge work): 1686
+- Agents' Last Exam v1.1 (long-horizon valuable tasks): 46.7
+- JobBench (professional job tasks): 68.5
+- APEX-Agents v1.1 (professional services tasks): 72.1
+- HLAB-Vals-1.1 (legal agent work): 21.3
+- AutomationBench-AA (agentic SaaS workflow): 72.5
+- AgentArena, Net Improvement (real-world agent tasks): 7.5
+- BioMysteryBench (bioinformatics research): 85.0
+- HealthBench Professional (clinical reasoning): 60.0
+- Humanity's Last Exam (multidisciplinary reasoning): 51.7
+- Chartography (visual chart understanding): 54.2
+- Video-Index (video understanding): 68.1
+The post says Qwen4-Max is a significant step up from Qwen3.8-Max, with stronger performance across nearly every capability evaluated. Footnotes cite sources including the Mercor leaderboard (APEX-Agents), Artificial Analysis (AA-Briefcase, AutomationBench-AA), Arena (CodeArena, AgentArena), Vals Index (HLAB-Vals-1.1), and Agents' Last Exam.
+
+Other work described
+- 3D modelling/generation with Blender (assets used in games and 3D printing); game development in Unity, Unreal Engine, and Godot; automotive manufacturing work at SANF and Pacific Union (production-line planning to part design/machining); agentic video production with WonderClip; finance/law/healthcare work including 90 MCP tools for investment research, a pre-IPO legal due-diligence case (86 pages, over 60,000 Chinese characters, 12 review areas, 14 legal issues), and critical-care support; 24/7 long-running agents with "Live Delivery" (open-sourced Qwen-Live-Delivery-Plugin); cloud resource scheduling; and scientific discovery, including a 48-hour autonomous run that designed and synthesized a novel, experimentally validated coolant molecule, and autonomous drug-design work on NLRP3 for cognitive decline/Alzheimer's.
+
+Safety claims
+- Model governance at Alibaba, guided by six principles for AI development (human-centeredness, reliability, security, privacy protection, fairness, and transparency), is embedded across the full model lifecycle. Pre-deployment assessments were conducted under Alibaba's Model Safety Governance Framework and Generative AI Safety Framework; Qwen4-Max passed the assessment and has been filed. The post says Qwen4-Max delivers substantial improvements in safety compared with Qwen3.8-Max.
+- On Last Secure Code Bench, function-level pass rate rose from 22.0% to 31.8%, and the rate of passing all three granularities (function, class, and repo) rose from 8% to 14.7%.
+- Ethics statement: Qwen is intended for lawful, constructive purposes and must not be used to cause harm.
+
+Availability
+- Qwen4-Max is now available on QwenCloud, via either the Token Plan or the API. It can also be used on QwenWork, Qoder, and QwenStudio.
+- The post says the team will continue bringing the smaller Qwen4 models to the open-source community; it does not say Qwen4-Max itself is open source.
