@@ -169,7 +169,26 @@ def analyze(text: str, language: Optional[str] = None,
         # downgraded for no lexical reason. The bar is a heuristic
         # calibrated on those two clusters (0–1 vs 8), not a
         # principled constant — flag it if it ever bites.
-        if scores["evidence_anchored"] >= 2:
+        # v1.8.9 (run-23 gap 1): it bit. The anchored-marker bar
+        # undercounts a formal release: its checkable content is
+        # figures and dates, and the evidence lexicon barely fires
+        # on release prose, so the 304-word Anthropic IPO
+        # announcement (23 numbers, 5 dates) scored 1 anchored
+        # marker — the same cluster as the thin fixtures — and the
+        # hint was dropped for the 5th run in a row. A second route
+        # counts figures + dates: one anchored marker plus at least
+        # 8 numbers/dates means the text carries checkable content
+        # of its own. Calibration (lexical path, 2026-11-22): thin
+        # fixtures 1 anchored + 4 figures/dates stay at lead; the
+        # run-23 release 1 + 28 earns the hint; the run-20 primary
+        # (8 anchored) and the Acme release (2 anchored) already
+        # pass the first route. Still a heuristic, not a principled
+        # constant — re-tune if it ever bites the other way.
+        _structural = extract_structural(text)
+        _figures = _structural.n_numbers + _structural.n_dates
+        if scores["evidence_anchored"] >= 2 or (
+            scores["evidence_anchored"] >= 1 and _figures >= 8
+        ):
             scores = _score(text, pack, strong_custody=True)
     action = _verdict(scores, route["mode"])
 
