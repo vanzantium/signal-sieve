@@ -197,6 +197,7 @@
 
           {% if result.passage_evidence %}
           <section><h3>Passage origin</h3><p>{{ result.passage_evidence.summary }}</p>
+          {% if result.passage_evidence.quotation_use == "attribute_exact_words_to_dated_release" %}<p>You can attribute these exact words to the dated release.</p>{% endif %}
           {% for r in result.passage_evidence.matched_releases %}<p><a href="{{ r.url }}">{{ r.publisher }} · {{ r.release_date }}</a></p>{% if r.revision_of %}<p>Revises {{ r.revision_scope }} in {{ r.revision_of }}.</p>{% endif %}{% endfor %}
           {% for r in result.passage_evidence.later_revisions %}<p>Later revision · <a href="{{ r.url }}">{{ r.release_date }}</a> · {{ r.revision_scope }}</p>{% endfor %}
           {% if result.passage_evidence.comparison_release %}{% for diff in result.passage_evidence.differing_numbers %}<p>Submitted <strong>{{ diff.submitted }}</strong> · Publisher <strong>{{ diff.publisher }}</strong></p>{% endfor %}<p>Publisher wording</p><blockquote>{{ result.passage_evidence.comparison_release.passage }}</blockquote><a href="{{ result.passage_evidence.comparison_release.url }}">Open dated release</a>{% endif %}</section>

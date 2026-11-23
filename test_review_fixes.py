@@ -1,9 +1,13 @@
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from app import app, MAX_TEXT_CHARS
 from signal_sieve import _byline_name, _extract_claimed_org
+from signal_sieve_i18n.structural_core import extract_structural
 import statistical_evidence as evidence
+
+FIXTURES = Path(__file__).resolve().parent / "tests"
 
 class Handoff(unittest.TestCase):
     def setUp(self):
@@ -65,6 +69,146 @@ class Handoff(unittest.TestCase):
         body = "By December\n\nTotal nonfarm payroll employment increased by 142,000 in August."
         self.assertIsNone(_byline_name(body))
         self.assertEqual(_extract_claimed_org(body), "")
+
+
+class GuardrailBarRegression(unittest.TestCase):
+    """RC8 — Arch's RC7 conditional-accept correction (2026-11-22).
+
+    Permanent regression tests for the run-23 guardrail fix (Fix A:
+    evidence-bar second route in signal_sieve_i18n/engine.py;
+    Fix B: genre override via own-domain in signal_sieve.py).
+    The distinction Arch wants preserved is pinned throughout:
+    publisher custody, document genre, and claim verification are
+    three separate things — a fix to one must not silently move the
+    others.
+    """
+
+    def setUp(self):
+        self.client = app.test_client()
+
+    def analyze(self, text, kind, name, url):
+        resp = self.client.post("/api/analyze", json={
+            "text": text, "source_type": kind,
+            "source_name": name, "source_url": url})
+        self.assertEqual(resp.status_code, 200)
+        return resp.get_json()
+
+    def test_run23_press_release_anchors(self):
+        # (1) The actual press-release case: the exact run-23 primary
+        # (Anthropic IPO pricing announcement, feed text as posted to
+        # the live service, "Fetched" lines stripped). 1 anchored
+        # marker + 28 figures/dates — the second route earns the
+        # custody hint the old >= 2 bar dropped, so the primary
+        # anchors instead of being capped for the 6th run in a row.
+        # Originator voice stays False: the fix does not fake
+        # first-person voice; custody comes from the own-domain
+        # exemption + claimed publisher org.
+        text = (FIXTURES / "run23_anthropic_ipo_announcement.txt").read_text()
+        st = extract_structural(text)
+        self.assertEqual(st.n_numbers + st.n_dates, 28)
+        r = self.analyze(
+            text, "primary",
+            "Anthropic — Anthropic prices initial public offering (Nov 18, 2026)",
+            "https://www.anthropic.com/news/anthropic-prices-initial-public-offering")
+        self.assertEqual(r["recommended_action"], "use_as_anchor")
+        self.assertEqual(r["source_genre"], "official_release")
+        self.assertEqual(r["source_type"], "primary")
+        self.assertEqual(r["language_assessment"]["recommended_action"], "verify_primary")
+        scores = r["language_assessment"]["scores"]
+        self.assertEqual(scores["evidence_anchored"], 1.0)
+        self.assertEqual(scores["has_strong_custody"], 1.0)
+        self.assertEqual(r["flags"], [])
+        self.assertFalse(r["custody_breakdown"]["speaks_as_originator"])
+        self.assertEqual(r["custody_breakdown"]["claimed_publisher_org"], "anthropic")
+
+    SHORT_RELEASE = (
+        "Source: Acme Corp — \"Acme prices initial public offering\", acme.com. Published 2026-11-20.\n\n"
+        "Today Acme Corp priced its initial public offering of common stock at $20.00 per share. "
+        "Trading begins Monday on the Nasdaq under the symbol \"ACME.\""
+    )
+
+    def test_short_legitimate_release_stays_capped(self):
+        # (2) A short legitimate release — 1 anchored marker + 6
+        # figures/dates — stays capped. The second route needs >= 8
+        # figures/dates, so the custody hint is still dropped and the
+        # language guardrail caps the primary at treat_as_lead. This
+        # is the heuristic's documented boundary, not a bug: do NOT
+        # lower the bar to make this pass. Genre still becomes
+        # official_release (Fix B): genre and verdict are independent
+        # — custody/genre is not claim verification.
+        st = extract_structural(self.SHORT_RELEASE)
+        self.assertEqual(st.n_numbers + st.n_dates, 6)
+        r = self.analyze(
+            self.SHORT_RELEASE, "primary",
+            "Acme Corp — Acme prices initial public offering",
+            "https://www.acme.com/news/acme-prices-initial-public-offering")
+        self.assertEqual(r["recommended_action"], "treat_as_lead")
+        self.assertEqual(r["source_genre"], "official_release")
+        self.assertEqual(r["source_type"], "primary")
+        self.assertEqual(r["language_assessment"]["recommended_action"], "treat_as_lead")
+        scores = r["language_assessment"]["scores"]
+        self.assertEqual(scores["evidence_anchored"], 1.0)
+        self.assertEqual(scores["has_strong_custody"], 0.0)
+        self.assertTrue(any("guardrail" in f.lower() for f in r["flags"]))
+
+    NUMBER_STUFFED_SECONDARY = (
+        "Source: Reuters — \"Markets rally on strong jobs data\", reuters.com. Published 2026-11-20.\n\n"
+        "Stocks rose on Friday after a report showed the economy added 250,000 jobs in November, "
+        "beating the 200,000 forecast. The unemployment rate held at 4.2 percent, while wages rose "
+        "0.4 percent in November and 4.1 percent over the year. The S&P 500 gained 45 points to "
+        "6,120, the Dow added 320 points to 44,500, and the Nasdaq rose 180 points to 19,800. "
+        "Bond yields fell to 4.15 percent from 4.28 percent. The data, published November 20, 2026, "
+        "also showed retail sales up 0.6 percent in October after a 0.4 percent rise in September. "
+        "Analysts expected a 0.3 percent gain. The Federal Reserve meets December 16, 2026. "
+        "Oil rose $2.10 to $78.40 a barrel, gold added $15 to $2,650 an ounce, and the dollar "
+        "index fell 0.5 percent to 106.2."
+    )
+
+    def test_number_stuffed_secondary_does_not_anchor(self):
+        # (3) A number-heavy but weakly supported document — 5 anchored
+        # markers + 34 figures/dates, own-domain hint firing, language
+        # layer verifying — must still NOT anchor. Stuffing a document
+        # with numbers can earn the language hint, but the final
+        # verdict for a secondary stays treat_as_lead: the guardrail
+        # cannot raise, and the custody/genre gates apply downstream.
+        # The language layer verifying while the verdict holds is the
+        # point, not a contradiction.
+        st = extract_structural(self.NUMBER_STUFFED_SECONDARY)
+        self.assertGreaterEqual(st.n_numbers + st.n_dates, 8)
+        r = self.analyze(
+            self.NUMBER_STUFFED_SECONDARY, "secondary",
+            "Reuters — Markets rally on strong jobs data",
+            "https://www.reuters.com/markets/us/markets-rally-strong-jobs-data-2026-11-20/")
+        self.assertEqual(r["recommended_action"], "treat_as_lead")
+        self.assertNotEqual(r["recommended_action"], "use_as_anchor")
+        self.assertEqual(r["source_genre"], "financial_market_snapshot")
+        self.assertEqual(r["language_assessment"]["recommended_action"], "verify_primary")
+        scores = r["language_assessment"]["scores"]
+        self.assertGreaterEqual(scores["evidence_anchored"], 1.0)
+        self.assertEqual(scores["has_strong_custody"], 1.0)
+
+    def test_vendor_summary_not_official_release_when_declared_secondary(self):
+        # (4) The run-16 Qwen feed — a third-person vendor summary
+        # hosted on the vendor's own domain (qwen.ai), header declares
+        # "Qwen Team". Declared secondary (not high-trust), so Fix B's
+        # declared-type gate must hold: the genre must NOT become
+        # official_release, even though the own-domain exemption fires.
+        # (Known overstatement, deliberately NOT pinned here: the same
+        # doc declared primary IS labelled official_release by Fix B —
+        # see KNOWN-LIMITATIONS.md. That is a label question, not a
+        # verdict question: its type was already held at primary by
+        # the same exemption.)
+        text = (FIXTURES / "run16_qwen_vendor_summary.txt").read_text()
+        r = self.analyze(
+            text, "secondary",
+            "Qwen Team — Qwen4-Max: Your New Teammate Has Arrived (Qwen Blog, dated 2026/11/15)",
+            "https://qwen.ai/blog?id=qwen4-max")
+        self.assertNotEqual(r["source_genre"], "official_release")
+        self.assertEqual(r["source_genre"], "news_article")
+        self.assertEqual(r["source_type"], "secondary")
+        self.assertEqual(r["recommended_action"], "treat_as_lead")
+        self.assertEqual(r["custody_breakdown"]["claimed_publisher_org"], "qwen team")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

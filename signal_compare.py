@@ -1760,6 +1760,32 @@ def reconcile_timelines(analyzed_docs: List[Dict]) -> List[Dict]:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+# A stock exchange can be the venue of a listing without being a measured index.
+_VENUE_MENTION = re.compile(
+    r"\bNasdaq(?:\s+Global\s+(?:Select\s+)?Market|\s+debut|\s+under\s+(?:the\s+)?(?:ticker|symbol))\b", re.I)
+_SINCE_INDEX = re.compile(
+    r"\b(since\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:,?\s+\d{4})?)\s*,\s*(?:the\s+)?$", re.I)
+_SINCE_AFTER = re.compile(
+    r"^\s+(since\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{1,2}(?:,?\s+\d{4})?)\b", re.I)
+
+
+def _windowed_index(key, label, text, index_start, value_end):
+    if key in ("sp500", "nasdaq", "dow"):
+        window = (_SINCE_INDEX.search(text[max(0, index_start-72):index_start])
+                  or _SINCE_AFTER.match(text[value_end:value_end+64]))
+        if window:
+            period = window.group(1).lower().replace(".", "")
+            return f"{key}|{period}", f"{label} ({period})"
+    return key, label
+
+
+_DEBUT_CLOSE = re.compile(
+    r"\b(?:closed its first (?:day|session) at|(?:finished|ended) its first (?:day|session)[^.!?\n]{0,80}?, closing at)\s*"
+    r"\$(\d+(?:\.\d{1,2})?)\s+(?:a|per) share\b", re.I)
+_LISTING_NAME = re.compile(
+    r"(?:^|[.!?]\s+)([A-Z][\w-]*(?: [A-Z][\w-]*){0,3})(?: (?:finished|ended) its first (?:day|session)|, [^.!?]{1,90}? made its (?:Nasdaq|NYSE) debut)")
+
+
 def extract_numeric_claims(
     text: str,
     dropped_out: Optional[List[Dict]] = None,
@@ -1802,6 +1828,10 @@ def extract_numeric_claims(
              subject: str = "", era: str = "", effort: str = "") -> None:
         numeric = _parse_value(raw_val)
         if numeric is None:
+            return
+        if key == "nasdaq" and _VENUE_MENTION.search(context):
+            dropped.append(dict(entity_key=key, entity_label=label, raw_value=raw_val.strip(),
+                                reason="exchange named as a listing venue"))
             return
         # Market-context gate (v1.8.1, gap 3): a market entity with no
         # positive market context anywhere in the document is not a
@@ -1856,6 +1886,7 @@ def extract_numeric_claims(
         if entity is None:
             continue
         key, label, ematch = entity
+        key, label = _windowed_index(key, label, text, m.start(1) + m.group(1).find(ematch.group()), m.end(2))
         # A bare number followed by a count word ("GPQA: 94 problems") is
         # a count, not an unspecified unit — without this, a count and a
         # percentage on the same entity read as one comparable series.
@@ -1900,6 +1931,7 @@ def extract_numeric_claims(
         if entity is None:
             continue
         key, label, ematch = entity
+        key, label = _windowed_index(key, label, text, m.start(), m.end(2))
         # Variant identity: first qualifier after the base name, in the
         # entity match text + the span up to the value. ("SWE-bench Pro
         # v2" matches only "SWE-bench" in the alternation, so the "Pro"
@@ -1993,8 +2025,34 @@ def extract_numeric_claims(
     # carries its measured subject. A $ amount with no resolvable tier
     # mints as bare "pricing" and is never compared (fail-closed).
     pair_tiers = _pricing_pair_tiers(text)
+    close_amounts = set()
+    for paragraph in re.finditer(r"[^\n]+", text):
+        body = paragraph.group()
+        closes = list(_DEBUT_CLOSE.finditer(body))
+        issuers = list(_LISTING_NAME.finditer(body))
+        tickers = set(re.findall(r'\b(?:ticker|symbol|on (?:Nasdaq|NYSE) as)\s+["“]?([A-Z]{1,6})\b', body))
+        if len(closes) != 1 or len(issuers) != 1 or len(tickers) != 1:
+            continue
+        if re.search(r"\b(?:if|forecast|expected|projected|denied|incorrectly|hypothetical|would|could)\b", body, re.I):
+            continue
+        close = closes[0]
+        owner = issuers[0]
+        if close.start() < owner.start(1):
+            continue
+        if close.group().lower().startswith("closed"):
+            # Only bind the directly following stock/ticker clause to the issuer.
+            bridge = re.sub(r"(?<=\d)\.(?=\d)", "_", body[owner.end():close.start()])
+            if not re.fullmatch(r'[^.!?]{0,90}\.\s+The stock(?:,? (?:trading under the |with )ticker ["“]?[A-Z]{1,6}(?:,?["”])?,?)? ', bridge):
+                continue
+        issuer = owner.group(1)
+        ticker = next(iter(tickers))
+        close_amounts.add(paragraph.start() + close.start(1))
+        _add(f"share-close|{issuer.casefold()}|{ticker}|ipo-day-one", f"{issuer} ({ticker}) first-session close",
+             close.group(1), close.group(), unit_override="$/share")
     prev_amount: Dict = {}  # the previous $ amount's tier/era, for slash pairs
     for m in _DOLLAR_RE.finditer(text):
+        if m.start(1) in close_amounts:
+            continue
         window_start = max(0, m.start() - 60)
         window = text[window_start:m.end() + 60]
         if not _PRICING_WORDS_RE.search(window):
@@ -6222,6 +6280,11 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         else:
             reference   = abs(vals_sorted[0]) if vals_sorted[0] != 0 else 1.0
             is_conflict = spread > reference * 0.02
+
+        if key.startswith("share-close|"):
+            is_conflict = spread != 0
+            for value, entry in zip(val_objs, entries):
+                value["source_span"] = entry["claim"]["context"]
 
         # Qualifier rules (v1.8.6, P2): an "up to"/"at most" ceiling
         # makes lower values compatible, not a conflict; an approximate
