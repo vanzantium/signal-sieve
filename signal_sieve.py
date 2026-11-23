@@ -1798,9 +1798,37 @@ def analyze(
     # so the override also stops the genre-mismatch downgrade for a
     # declared primary — the same outcome the first-party exemption
     # already produces downstream, stated at the genre instead.
+    # v1.8.9 (run-23 gap 2): the same override for a formal
+    # third-person release. The announcement check needs first-person
+    # voice, which a corporate press release does not use ("Today
+    # Anthropic, PBC priced ..."), so the run-23 primary landed as
+    # news_article. The own-domain exemption already establishes the
+    # same facts the announcement check would — the feed-declared
+    # publisher matches the source URL's own domain, with the same
+    # third-party / secondary-reporting vetoes — so it earns the
+    # same genre. A news article quoting the release keeps its
+    # genre: its publisher does not match the release's subject org
+    # on its own domain. Note this also re-labels a third-person
+    # vendor summary hosted on the vendor's own domain (the run-17
+    # Qwen case) as official_release — a slight overstatement kept
+    # because the type was already held at primary for that doc by
+    # the same exemption.
+    summary_copy = bool(re.search(
+        r"(?im)^\s*(?:note:\s*)?(?:the (?:full|original) [^\n]{0,90}?\b(?:summari[sz]ed|paraphrased) here\b|"
+        r"(?:this is |what follows is )?(?:an? |our )?(?:summary|paraphrase) of (?:the |an? )?(?:original |vendor.?s )?(?:post|release|announcement)\b)",
+        raw[:1800]))
     if source_genre in _GENRE_OVERRIDE_ANNOUNCEMENT:
         _ann_fires, _ann_reason = _first_party_announcement(raw)
-        if _ann_fires:
+        # Own-domain route (run-23 gap 2, narrowed 2026-11-22): only
+        # for a caller-DECLARED high-trust type, mirroring the
+        # exemption's own scope in resolve_source_type_v2. Without
+        # the declared-type gate, any secondary news article on its
+        # own domain (the run-23 Dealroom feed: declared secondary,
+        # dealroom.co) would be re-labelled official_release — a
+        # mislabel. The target case declares primary.
+        _declared_high_trust = (source_type or "unknown").lower() in _HIGH_TRUST_TYPES
+        _own_fires, _own_reason = _own_domain_exemption(raw, source_url)
+        if not summary_copy and (_ann_fires or (_declared_high_trust and _own_fires)):
             source_genre = "official_release"
     x_post_assessment: Dict = {}
     if source_genre == "x_news_post":
@@ -2198,6 +2226,13 @@ def analyze(
                 "declared-language lexical or paragraph-level risk."
             )
 
+    if summary_copy and recommended_action in ("verify_primary", "use_as_anchor"):
+        recommended_action = "treat_as_lead"
+        verdict = "Submitted text describes itself as a summary. Inspect the original for the claim."
+        flags.append(verdict)
+    if (source_genre == "official_release" and effective_st == "primary"
+            and language_guardrail_action == "treat_as_lead" and word_count < 100 and not receipt):
+        flags.append("Short primary release: check the exact passage against the dated publisher copy.")
     if receipt:
         flags.append(LABELS[receipt["status"]])
         if recommended_action in ("verify_primary", "use_as_anchor"):
