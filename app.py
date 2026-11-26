@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 # ── API constants ─────────────────────────────────────────────────────────────
 API_VERSION       = "v1"
-ANALYSIS_VERSION  = "v1.8.9-first-party-rc9"
+ANALYSIS_VERSION  = "v1.8.9-first-party-rc10d"
 MAX_TEXT_CHARS        = 12_000   # public / unauthenticated mode
 MAX_TEXT_CHARS_KEYED  = 50_000   # authenticated (API-key) mode
 MAX_SOURCE_URL_CHARS  = 2_000
@@ -1068,6 +1068,49 @@ def build_compare_capsule(cmp_result: dict, request_id: str = "") -> str:
         for m in cmp_result["version_mismatches"][:5]:
             lines.append(
                 f"  · {m['entity_label']}: versions {', '.join(m.get('versions', []))}"
+            )
+
+    if cmp_result.get("denominator_mismatches"):
+        lines.append("DENOMINATOR MISMATCHES (not comparable, not conflicts):")
+        for m in cmp_result["denominator_mismatches"][:5]:
+            lines.append(
+                f"  · {m['entity_label']}: denominators {', '.join(m.get('denominators', []))}"
+            )
+
+    # v1.8.10a (RC10a item 6): the three new comparison fields must
+    # surface in the capsule, not only in the API JSON — a reader of
+    # the capsule alone must see the single-source flags, the dropped
+    # shared entries, and the label contradictions, with their values.
+    if cmp_result.get("single_source_headlines"):
+        lines.append("SINGLE-SOURCE HEADLINES (one document only — not corroborated):")
+        for h in cmp_result["single_source_headlines"][:5]:
+            _bits = f"{h['entity_label']}: {h['value']}"
+            if h.get("denominator"):
+                _bits += f" / {h['denominator']}"
+            if h.get("endpoint"):
+                _bits += f" [{h['endpoint']}]"
+            if h.get("qualifier"):
+                _bits += f" ({h['qualifier']})"
+            lines.append(f"  · {_bits} — {h.get('found_in', '?')}")
+
+    if cmp_result.get("shared_claims_excluded"):
+        lines.append("SHARED CLAIMS EXCLUDED (disowned by clarification — not alignments):")
+        for s in cmp_result["shared_claims_excluded"][:5]:
+            val_str = "  vs  ".join(
+                f"{v['source']}: {v['raw']}" for v in s.get("values", [])[:3]
+            )
+            lines.append(f"  · {s['entity_label']}: {val_str}")
+
+    if cmp_result.get("label_contradictions"):
+        lines.append("LABEL CONTRADICTIONS (candidate inconsistencies — check sessions and spans):")
+        for lc in cmp_result["label_contradictions"][:5]:
+            _sv = lc.get("superlative_value", {})
+            _ev = lc.get("exceeding_value", {})
+            _sess = f"{_sv.get('session', '') or '?'}/{_ev.get('session', '') or '?'}"
+            lines.append(
+                f"  · {lc['entity_label']}: {_sv.get('source', '?')} calls "
+                f"{_sv.get('value', '?')} the high, {_ev.get('source', '?')} reports "
+                f"{_ev.get('value', '?')} [{lc.get('status', 'candidate')}; sessions {_sess}]"
             )
 
     if cmp_result.get("evaluation_setting_mismatches"):

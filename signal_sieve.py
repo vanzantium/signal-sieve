@@ -452,11 +452,31 @@ def _infer_source_type_from_signals(text: str, source_url: str = "") -> str:
     # which misfire on release tables ("results reported alongside...").
     if _hosted_release_artifact(text, source_url)[0]:
         return "primary"
-    if any(x in t for x in ["abstract", "methodology", "sample size", "doi", "preprint", "sec 10-q", "edgar", "filing"]):
+    if re.search(r"\b(?:abstract|methodology|sample size|doi|preprint|sec 10-q|edgar|filing)\b", t):
         return "primary"
-    if any(x in t for x in ["i saw", "i recorded", "i measured", "my experience"]):
+    # v1.8.10 (RC10, run-24 gap 8): first-person research conduct
+    # outranks the opinion check below. An essay-form piece in which
+    # the authors report THEIR OWN measurements ("we measure progress
+    # on this key substrate", "our internal perplexity measurements")
+    # IS primary research, even when it also says "I think" once —
+    # the single "I think" used to infer "opinion" and cap a declared
+    # primary at 0.40. _first_person_research carries the third-party
+    # attribution veto, so a doc reporting on OTHERS' work never
+    # fires this; a pure op-ed with no research conduct falls through
+    # to the opinion check as before. Returns "primary" (not
+    # "first_hand"): the declared type for these docs is "primary",
+    # and the inferred-primary gate already treats first-person
+    # research as positive first-party evidence.
+    if _first_person_research(text)[0]:
+        return "primary"
+    # v1.8.10 (RC10, run-24 gap 8): word-boundary cues, not substrings
+    # — "OpenAI saw transformative capabilities" used to trip "i saw"
+    # inside "OpenAI saw", and "doing" tripped "doi". A first-hand
+    # inference needs the author saying "I saw", not a company name
+    # that happens to contain the letters.
+    if re.search(r"\bi (?:saw|recorded|measured)\b|\bmy experience\b", t):
         return "first_hand"
-    if any(x in t for x in ["opinion", "essay", "i think", "my take"]):
+    if re.search(r"\b(?:opinion|essay)\b|\bi think\b|\bmy take\b", t):
         return "opinion"
     if any(x in t for x in ["reported", "according to", "sources said"]):
         return "secondary"
@@ -528,12 +548,98 @@ _THIRD_PARTY_ATTRIBUTION_CUES = (
 # research evidence. A DOI proves the cited work exists; it does not
 # prove THIS document authored it. The pinned trial abstract
 # (primary_abstract_auto) passes through this route, not its DOI.
+# v1.8.10 (RC10, run-24 gap 1): essay-form first-person research
+# voice. A research essay speaks in the present and the continuous
+# ("the primary way we measure progress", "we have been tracking
+# the perplexity", "we report the numbers", "our internal
+# perplexity measurements", "our current main evaluation dataset")
+# — none of which the past-tense verb list caught. Auxiliaries
+# ("have been", "are", "have") are allowed between "we" and the
+# verb; the -ing/present forms track/measure/monitor/report/publish
+# join the list. "Track" counts only in the continuous/auxiliary
+# form ("we have been tracking") — bare "we track" is also how a
+# news outlet talks about a market, so it stays out. The possessive
+# nouns gain the concrete research artifacts "measurements" and
+# "dataset" ("our data" stays out: too generic). Singular "I"
+# forms stay out too — "I believe" / "I think" are opinion cues,
+# not authorship evidence.
 _RESEARCH_CONDUCT_RE = re.compile(
-    r"\bwe\s+(?:conducted|enrolled|randomi[sz]ed|measured|analy[sz]ed|tested|evaluated|recruited|treated)\b"
+    r"\bwe\s+(?:have\s+been\s+|are\s+|have\s+|were\s+)?"
+    r"(?:conducted|enrolled|randomi[sz]ed|measured|analy[sz]ed|tested|evaluated|recruited|treated"
+    r"|measure|track(?:ing|ed)?|monitor(?:ing|ed)?|report(?:ing|ed)?|publish(?:ing|ed)?)\b"
     r"|"
-    r"\bour\s+(?:study|trial|research|experiment|cohort)\b",
+    r"\bour\s+(?:study|trial|research|experiment|cohort|measurements?|datasets?)\b",
     re.I,
 )
+
+
+# Recognized outlet/journal names (v1.8.10b-first-party-rc10c, item 2):
+# publications that are lowercase-styled in prose, so "reported in
+# <name>" is secondary reporting even though the token is lowercase.
+# A token here still vetoes; anything else lowercase and
+# non-determiner after "reported in" keeps the harness exemption.
+# Deliberately small — only names that actually appear lowercase in
+# benchmark/reporting prose. "cell" is NOT here: "reported in cell"
+# is as often cell biology as the journal, and the veto is the safe
+# direction only when the outlet reading is the plausible one.
+_REPORTED_OUTLET_NAMES = frozenset({
+    "reuters", "nature", "science", "ap", "afp", "bloomberg", "axios",
+    "politico", "wired", "verge", "forbes", "fortune", "guardian",
+    "economist", "bbc", "wsj", "nytimes", "ft", "thehill", "huffpost",
+    "vice", "vox", "slate", "atlantic", "newyorker", "lancet", "jama",
+})
+
+
+def _reported_cue_present(text: str) -> bool:
+    """True when 'reported' appears as a genuine secondary-reporting
+    cue — the document reporting on somebody else's news.
+
+    v1.8.10b (RC10b, run-26 gap 1): the bare word-boundary check
+    vetoed first-person methodology text. "We report upstream or
+    self-reported scores" is the publisher describing its own
+    methods, not reporting on a third party, and "Other models are
+    reported in mini-swe-agent" names the harness the scores were
+    reported in, not a publication. Three methodology frames are
+    exempt, and only those three:
+
+    - "self-reported" — the score was reported by its own subject
+      (provenance language, never the document reporting on a
+      third party);
+    - "we report(ed)" — first-person reporting of the authors' own
+      work (authorship voice, the same voice the research-conduct
+      regex already treats as evidence);
+    - "reported in <lowercase tool>" — a harness/tool reference
+      ("reported in mini-swe-agent"). The token after "in" must be
+      lowercase and not a determiner: "reported in The Times" /
+      "reported in the paper" still veto, as does any other
+      "reported" (a subject reporting verb, e.g. "the company
+      reported record sales", or a passive citation).
+      v1.8.10b-first-party-rc10c (item 2): the lowercase rule
+      over-exempts — some publications are lowercase-styled, so
+      "reported in reuters" / "reported in nature" wrongly exempted
+      and the Cognition primary kept its anchor on a secondary
+      report. A recognized outlet name after "in" still vetoes, even
+      lowercase (see _REPORTED_OUTLET_NAMES). And the old docstring
+      example "reported in the Devin CLI" was wrong: the code vetoes
+      determined forms ("reported in the ..."), and the docstring
+      now says so instead of claiming the exemption.
+    """
+    low = text.lower()
+    for m in re.finditer(r"\breported\b", low):
+        start = m.start()
+        if start >= 5 and low[start - 5:start] == "self-":
+            continue
+        before = low[max(0, start - 20):start]
+        if re.search(r"\bwe\s+(?:have\s+)?$", before):
+            continue
+        after = text[m.end():m.end() + 40]
+        am = re.match(r"\s+in\s+([A-Za-z][\w\-]*)", after)
+        if am and am.group(1)[0].islower() \
+                and am.group(1).lower() not in ("the", "a", "an") \
+                and am.group(1).lower() not in _REPORTED_OUTLET_NAMES:
+            continue
+        return True
+    return False
 
 
 def _cue_in_text(cue: str, low: str) -> bool:
@@ -545,6 +651,16 @@ def _cue_in_text(cue: str, low: str) -> bool:
     containing a cue (e.g. an outlet name) cannot trip it.
     """
     return re.search(r"\b" + re.escape(cue) + r"\b", low) is not None
+
+
+def _secondary_cue_present(cue: str, text: str, low: str) -> bool:
+    """True when a secondary-reporting cue fires. The "reported" cue
+    goes through the methodology-frame exemptions in
+    _reported_cue_present; the other cues keep the plain
+    word-boundary check."""
+    if cue == "reported":
+        return _reported_cue_present(text)
+    return _cue_in_text(cue, low)
 
 
 def _first_person_research(text: str) -> Tuple[bool, str]:
@@ -560,7 +676,7 @@ def _first_person_research(text: str) -> Tuple[bool, str]:
         if _cue_in_text(cue, low):
             return False, f"third-party attribution cue present ({cue!r})"
     for cue in _SECONDARY_REPORTING_CUES:
-        if _cue_in_text(cue, low):
+        if _secondary_cue_present(cue, text, low):
             return False, f"secondary-reporting cue present ({cue!r})"
     if _RESEARCH_CONDUCT_RE.search(text):
         return True, "first-person research-conduct voice about the authors' own work"
@@ -580,7 +696,7 @@ def _first_party_announcement(text: str) -> Tuple[bool, str]:
         if _cue_in_text(cue, low):
             return False, f"third-party attribution cue present ({cue!r})"
     for cue in _SECONDARY_REPORTING_CUES:
-        if _cue_in_text(cue, low):
+        if _secondary_cue_present(cue, text, low):
             return False, f"secondary-reporting cue present ({cue!r})"
     if _ANNOUNCEMENT_RE.search(text):
         return True, "first-person announcement voice about the publisher's own action"
@@ -614,7 +730,7 @@ def _own_domain_exemption(text: str, source_url: str = "") -> Tuple[bool, str]:
         if _cue_in_text(cue, low):
             return False, f"third-party attribution cue present ({cue!r})"
     for cue in _SECONDARY_REPORTING_CUES:
-        if _cue_in_text(cue, low):
+        if _secondary_cue_present(cue, text, low):
             return False, f"secondary-reporting cue present ({cue!r})"
     host = urlparse(source_url).netloc.lower()
     labels = host.split(".")
@@ -795,9 +911,24 @@ _RESERVED_ORG_LABELS = {
 # v1.8.8, Fix 2: the pipeline's other header form, "Source: <Org> —
 # <Title>" (the Nov 11 feeds' first line), names the publisher the
 # same way — a feed header is a feed header whichever label it wears.
+# v1.8.10 (RC10, run-25 gap 1 / run-24 gap 1): dotted publisher names
+# ("Z.ai") — the org token class now allows dots inside a token, and
+# a trailing dot is stripped when the org is read, so "Z.ai" parses
+# as the publisher instead of matching nothing. The header also
+# accepts the run-24 feed form "# Source N — PRIMARY: <Org>" (an
+# optional "# Source N — " prefix and a bare PRIMARY:/SECONDARY:/
+# TERTIARY: label with a colon separator), and the "# Source N —
+# <Org>" form with no label at all. The label/prefix stays required
+# — a bare line starting with a capitalized word is not a header.
 _HEADER_ORG_RE = re.compile(
-    r"^(?:(?:PRIMARY SOURCE|PRIMARY COMPANION|SECONDARY(?: SOURCE)?|TERTIARY(?: SOURCE)?|COVERAGE)\s*[\u2014\-]\s*|[Ss]ource:\s*)"
-    r"([A-Z][A-Za-z0-9_-]{1,30}(?: +[A-Z][a-z][A-Za-z0-9_-]{0,29}){0,3})",
+    r"^(?:"
+    r"#\s*Source\s*\d+\s*[—\-]\s*(?:(?:PRIMARY(?:\s+SOURCE|\s+COMPANION)?|SECONDARY(?:\s+SOURCE)?|TERTIARY(?:\s+SOURCE)?|COVERAGE)\s*[—\-:]\s*)?"
+    r"|"
+    r"(?:PRIMARY(?:\s+SOURCE|\s+COMPANION)?|SECONDARY(?:\s+SOURCE)?|TERTIARY(?:\s+SOURCE)?|COVERAGE)\s*[—\-:]\s*"
+    r"|"
+    r"[Ss]ource:\s*"
+    r")"
+    r"([A-Z][A-Za-z0-9_.-]{1,30}(?: +[A-Z][a-z][A-Za-z0-9_.-]{0,29}){0,3})",
     re.M,
 )
 
@@ -821,7 +952,10 @@ def _header_claimed_org(text: str) -> str:
     m = _HEADER_ORG_RE.search(text)
     if not m:
         return ""
-    org = m.group(1).lower()
+    # v1.8.10 (RC10, run-25 gap 1): a dotted org token may carry a
+    # trailing dot from sentence punctuation ("OpenAI.") — strip it
+    # per token so the org slug matches the domain label.
+    org = " ".join(tok.rstrip(".") for tok in m.group(1).split()).lower()
     if org in _RESERVED_ORG_LABELS or org.split()[0] in _RESERVED_ORG_LABELS:
         return ""
     return org
@@ -843,13 +977,15 @@ def _feed_declared_org(source_name: str) -> str:
     if name.lower() in ("unknown",):
         return ""
     m = re.match(
-        r"([A-Z][A-Za-z0-9_-]{1,30}(?: +[A-Z][a-z][A-Za-z0-9_-]{0,29}){0,3})"
+        r"([A-Z][A-Za-z0-9_.-]{1,30}(?: +[A-Z][a-z][A-Za-z0-9_.-]{0,29}){0,3})"
         r"\s*[—\-]\s*\S",
         name,
     )
     if not m:
         return ""
-    org = m.group(1).lower()
+    # v1.8.10 (RC10, run-25 gap 1): dotted publisher names ("Z.ai")
+    # and a trailing dot from punctuation.
+    org = " ".join(tok.rstrip(".") for tok in m.group(1).split()).lower()
     if org in _RESERVED_ORG_LABELS or org.split()[0] in _RESERVED_ORG_LABELS:
         return ""
     return org
@@ -1535,7 +1671,7 @@ def build_triage_summary(
 # A line that is a list/table row, not prose (v1.8.7, B2): a bullet or
 # numbered-list line, or any line carrying a pipe (markdown table row).
 _LIST_TABLE_LINE_RE = re.compile(
-    r"^\s*(?:[-*\u2022\u2013\u2014]\s|\d{1,3}[.)]\s|[A-Za-z][.)]\s)|\|",
+    r"^\s*(?:[-*\u2022\u2013—]\s|\d{1,3}[.)]\s|[A-Za-z][.)]\s)|\|",
 )
 
 
@@ -2091,7 +2227,11 @@ def analyze(
             "Candidate primary source with uncertain ownership — treat as "
             "a lead pending verification."
         )
-    if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and not genre_mismatch and not receipt:
+    # v1.8.10 (RC10, runs 23-24): the flag fires only when declared
+    # and inferred actually DISAGREE — the old condition never
+    # compared them, so "Declared source_type='secondary' contradicts
+    # inferred='secondary'" fired on agreement.
+    if st_confidence < 0.50 and declared_st not in ("auto", "unknown", "") and declared_st != inferred_st and not genre_mismatch and not receipt:
         flags.append(
             f"Declared source_type='{declared_st}' contradicts inferred='{inferred_st}'. "
             f"Custody is discounted for the contradiction; treat as a lead pending verification."
