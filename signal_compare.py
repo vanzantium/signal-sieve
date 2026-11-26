@@ -76,7 +76,13 @@ _ENTITY_KEY_MAP: List[Tuple[re.Pattern, str, str]] = [
     (re.compile(r"\bMMLU[-\s]?Pro\b",                        re.I), "mmlu-pro",    "MMLU-Pro"),
     (re.compile(r"\bMMLU\b",                                 re.I), "mmlu",        "MMLU"),
     (re.compile(r"\bMMMU\b",                                 re.I), "mmmu",        "MMMU"),
-    (re.compile(r"\bAIME\b",                                 re.I), "aime",        "AIME"),
+    (re.compile(r"\bAIME(?:\d{2})?\b",                      re.I), "aime",        "AIME"),
+    # v1.8.10 (RC10, run-25 gap 4): AA-LCR and KingBench join the map
+    # the same way HLE did \u2014 names that appear in the corpus with
+    # scores attached. AIME takes the optional two-digit edition
+    # suffix ("AIME25"), keyed as plain "aime" so editions align.
+    (re.compile(r"\bAA-LCR\b",                               re.I), "aa-lcr",      "AA-LCR"),
+    (re.compile(r"\bKingBench(?:\s+\d+)?\b",                  re.I), "kingbench",   "KingBench"),
     (re.compile(r"\bGSM8K\b",                                re.I), "gsm8k",       "GSM8K"),
     (re.compile(r"\bMATH(?:[-\s]?500)?\b",                   re.I), "math",        "MATH"),
     (re.compile(r"\bARC[-\s]?AGI\b",                         re.I), "arc-agi",     "ARC-AGI"),
@@ -128,7 +134,7 @@ _INLINE_ENTITY_RE = re.compile(
     r"WTI(?:\s+crude)?|Brent(?:\s+crude)?|Gold|VIX|DXY|"
     r"CPI|PPI|PCE|PMI|GDPx|GDP|"
     r"GPQA(?:\s+Diamond)?|SWE[-\s]?bench(?:\s+Verified)?|HumanEval(?:\+)?|"
-    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|HLE|"
+    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME(?:\d{2})?|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|HLE|AA-LCR|KingBench(?:\s+\d+)?|"
     r"(?:initial\s+)?jobless\s+claims?|retail\s+sales?)(?!\w)"
     r"[^.!?\n]{0,70}?"
     r"(?<![A-Za-z0-9@])([+-]?\$?\d[\d,\.]*"
@@ -142,13 +148,21 @@ _INLINE_ENTITY_RE = re.compile(
 # to benchmark names + a % value so prose percentages never match.
 _BENCHMARK_NAMES_RE = (
     r"GPQA(?:\s+Diamond)?|SWE[-\s]?bench(?:\s+Verified)?|HumanEval(?:\+)?|"
-    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|HLE|"
+    r"MMLU[-\s]?Pro|MMLU|MMMU|AIME(?:\d{2})?|GSM8K|MATH(?:[-\s]?500)?|ARC[-\s]?AGI|Humanity'?s\s+Last\s+Exam|HLE|AA-LCR|KingBench(?:\s+\d+)?|"
     r"GDPx"
 )
 _BENCHMARK_REVERSE_RE = re.compile(
     r"(\d+\.?\d*\s*%)[^.!?\n]{0,40}?\b(" + _BENCHMARK_NAMES_RE + r")\b",
     re.I,
 )
+
+# Score fractions (v1.8.10, RC10 run-25 gap 5): "33.2/60" — the
+# numerator is the score, the denominator is the scale. The fraction
+# pass mints the numerator under the benchmark name and records the
+# denominator; the denominator itself is never a claim.
+_FRACTION_RE = re.compile(r"(\d+\.?\d*)\s*/\s*(\d+\.?\d*)")
+_FRACTION_SCORE_VERB_RE = re.compile(
+    r"\b(?:scored|scoring|score of|achieved|reached)\b", re.I)
 
 # v1.8.8: benchmark names the CamelCase detector misses — "CVE
 # Rediscovery" is all-caps + one hump, "Terminal-Bench-Science" is
@@ -367,6 +381,84 @@ def _parse_table_rows(text: str) -> List[Dict]:
                     "variant":        variant,
                     "line":           line,
                 })
+    # v1.8.10b (RC10b, run-26 gap 5): pipe-delimited markdown tables.
+    # A plain pipe table — header row naming the models, data rows
+    # naming the benchmark in the first cell — is the same shape as
+    # the colon rows above, with columns instead of pairs. The
+    # CellCog table ("Benchmark | SWE-2.1 | ... | Claude Opus 5.5" /
+    # "Terminal-Bench 4.1 | 50.0 | ... | 65.8") was invisible to the
+    # Sieve: 0.129 extraction on that feed, and Terminal-Bench 24.2,
+    # FrontierCode 41.3, ProgramBench 44.0/17.0, SWE-Atlas 71.0, SWE
+    # Marathon 54.9 never aligned. One entry per cell; the model is
+    # the header cell's slug (via _model_slug, so "Claude Opus 5.5"
+    # is opus-5-5 and "Muse Wonder" is muse-wonder), the benchmark
+    # is the row label via _table_benchmark_name. A header's first
+    # cell must be a table label (benchmark/metric/test/eval, or
+    # empty) and at least two of its remaining cells model-like, and
+    # a data row must sit within 10 lines below a header, have the
+    # same cell count, resolve its first cell to a benchmark name,
+    # and have all-numeric remaining cells — so a prose line with
+    # pipes never parses as a table. A separator row (|---|---|) is
+    # skipped, not parsed.
+    _pipe_headers: List[Tuple[int, List[str]]] = []
+    for _li, _raw in enumerate(text.split("\n")):
+        if "|" not in _raw:
+            continue
+        _cells = [c.strip() for c in _raw.strip().strip("|").split("|")]
+        if len(_cells) < 3:
+            continue
+        if all(re.fullmatch(r"[:\- ]+", c or " ") for c in _cells):
+            continue
+        _first = _cells[0].lower()
+        if _first in ("benchmark", "metric", "test", "eval", "evaluation", ""):
+            _modelish = 0
+            for _h in _cells[1:]:
+                if _MODEL_TOKEN_RE.search(_h) or re.search(r"\d", _h) \
+                        or re.fullmatch(r"(?:[A-Z][a-z]+)(?:\s+[A-Z][a-z]+)+", _h):
+                    _modelish += 1
+            if _modelish >= 2:
+                _pipe_headers.append((_li, _cells))
+            continue
+        for _hli, _hCells in reversed(_pipe_headers):
+            if _li - _hli > 10 or _li - _hli < 1:
+                continue
+            if len(_cells) != len(_hCells):
+                continue
+            _label = _cells[0]
+            _name = _table_benchmark_name(_label)
+            if not _name:
+                continue
+            _mapped = _normalize_entity_key(_label)
+            _key = _mapped[0] if _mapped else ""
+            _version = _benchmark_version(_key, _label) if _key else ""
+            _variant = _benchmark_variant(_key, _label) if _key else ""
+            _vals: List[str] = []
+            _ok = True
+            for _c in _cells[1:]:
+                _m = re.fullmatch(r"(\d[\d,]*\.?\d*)\s*%?", _c)
+                if not _m:
+                    _ok = False
+                    break
+                _vals.append(_m.group(1))
+            if not _ok:
+                continue
+            for _hCell, _rawv in zip(_hCells[1:], _vals):
+                try:
+                    _v = float(_rawv.replace(",", ""))
+                except ValueError:
+                    continue
+                entries.append({
+                    "benchmark_key":  _key,
+                    "benchmark_name": _name,
+                    "model_slug":     _model_slug(_hCell),
+                    "model_display":  _hCell,
+                    "value":          _v,
+                    "raw":            _rawv,
+                    "version":        _version,
+                    "variant":        _variant,
+                    "line":           _raw.strip(),
+                })
+            break
     # v1.8.9 (run-20 gap 6): "vs" comparison rows — a bare line
     # "Benchmark: v1% vs v2% vs v3%." whose model order comes from a
     # preceding "(Model vs Model vs Model)" header ("Selected
@@ -1228,7 +1320,7 @@ def _unit_of(raw: str) -> str:
 # field on each value lets the caller see what was (not) established.
 _BENCHMARK_KEYS = frozenset({
     "gpqa", "swe-bench", "humaneval", "mmlu-pro", "mmlu", "mmmu", "aime",
-    "gsm8k", "math", "arc-agi", "hle", "gdpx",
+    "gsm8k", "math", "arc-agi", "hle", "gdpx", "aa-lcr", "kingbench",
 })
 _VERSION_RE = re.compile(r"\bv(\d+(?:\.\d+)?)\b", re.I)
 # A bare number followed by a count word is a count, not an unspecified
@@ -1366,12 +1458,22 @@ def _rescan_inline_score(text: str, m: "re.Match[str]", key: str, label: str, va
         model_tok = _model_token_before(text, num_start)
         if model_tok:
             subject = _model_slug(model_tok)
+        # v1.8.10a (RC10a items 1–3): the rescanned score carries the
+        # same identity as a directly-minted one — a denominator after
+        # "out of", a bare endpoint adjective, a threshold qualifier.
+        # ("KingBench 4 ... scored 33.2 out of 60" is minted here, via
+        # the version-number rescan, not by the inline pass itself.)
+        _out_m = re.match(r"\s+out\s+of\s+(\d+(?:\.\d+)?)",
+                          text[num_end:num_end + 15])
         _add(key, label, raw_val, text[m.start():num_end],
              unit_override="count" if count_after else "",
              version=_benchmark_version(key, text[m.start():num_end]),
              shot_count=_shot_count_in_window(text[m.start():num_end]),
              variant=variant,
-             subject=subject)
+             subject=subject,
+             denominator=_out_m.group(1) if _out_m else "",
+             endpoint=_bare_endpoint(text[max(0, num_start - 30):num_start]),
+             qualifier=_benchmark_qualifier(text, num_start))
         return
 
 
@@ -1409,13 +1511,21 @@ _MODEL_FAMILY_WORDS = frozenset({
     "fable", "mythos", "opus", "sonnet", "gemini", "astra", "carbon",
     "argon", "neon", "hydrogen",
     "gpt", "claude", "grok", "llama", "mistral", "qwen", "deepseek",
-    "inkling", "ernie",
+    "inkling", "ernie", "kimi",
 })
 _MODEL_TOKEN_RE = re.compile(
     r"\b((?:Claude\s+)?(?:Fable|Mythos|Opus|Sonnet|Gemini|Grok|Llama|Mistral|Qwen|DeepSeek|Inkling|ERNIE|Astra|Carbon|Argon|Neon|Hydrogen)"
     r"(?:\s+\d+(?:\.\d+)?(?:\s+(?:Astra|Carbon|Argon|Neon|Hydrogen|Cyber|Sol))?)?"
-    r"|GPT-?\d+(?:\.\d+)?(?:\s+(?:Astra|Carbon|Cyber|Sol))?)\b"
+    r"|GPT-?\d+(?:\.\d+)?(?:\s+(?:Astra|Carbon|Cyber|Sol))?"
+    r"|Kimi\s+K\d+(?:\.\d+)?)\b"
 )
+# v1.8.10b (RC10b, run-26 gap 3 follow-on): Kimi is a real model
+# family (Moonshot AI — Kimi K2, Kimi K3.1), and "Kimi K3.1" matched
+# neither the model-token regex nor the product regex, so the
+# sentence "Kimi K3.1 ... scores higher on Terminal-Bench 4.1 (59.7
+# against 50.0)" fell through to the bare family-word path and read
+# the 59.7 as Opus's. The K-number version ("K3.1") needs its own
+# alternative — the generic version pattern is digits-only.
 # A token that can OWN a version number: a model token, a CamelCase
 # benchmark name (FrontierCode, OSWorld, RoboDojo), or a hyphenated
 # benchmark name (CL-Bench, Terminal-Bench-Science). A single
@@ -1782,6 +1892,19 @@ def _windowed_index(key, label, text, index_start, value_end):
 _DEBUT_CLOSE = re.compile(
     r"\b(?:closed its first (?:day|session) at|(?:finished|ended) its first (?:day|session)[^.!?\n]{0,80}?, closing at)\s*"
     r"\$(\d+(?:\.\d{1,2})?)\s+(?:a|per) share\b", re.I)
+# IPO offer price (v1.8.10, RC10 run-23 gap 3): "<Org> priced its
+# initial public offering ... at $83.00 per share" — the offer price
+# is the close's natural pair (the +17% first-day story) and the
+# pricing pass only ever saw it as an unresolved tier. The issuer
+# group may swallow a leading sentence starter ("Today Anthropic")
+# — the loop strips those words before keying.
+_DEBUT_OFFER = re.compile(
+    r"\b([A-Z][A-Za-z0-9&.'-]{1,30}(?:\s+[A-Z][a-z][A-Za-z0-9&.'-]{0,29}){0,2})"
+    r"(?:,\s*(?:PBC|Inc\.?|Corp\.?|Ltd\.?))?\s+priced\s+(?:its|the)\s+"
+    r"(?:initial\s+public\s+)?offering\b[^.!?\n]{0,150}?\bat\s+"
+    r"\$(\d+(?:\.\d{1,2})?)\s+per share\b", re.I)
+_DEBUT_OFFER_STARTERS = ("today", "yesterday", "on", "this", "the", "in",
+                         "after", "following")
 _LISTING_NAME = re.compile(
     r"(?:^|[.!?]\s+)([A-Z][\w-]*(?: [A-Z][\w-]*){0,3})(?: (?:finished|ended) its first (?:day|session)|, [^.!?]{1,90}? made its (?:Nasdaq|NYSE) debut)")
 
@@ -1825,7 +1948,8 @@ def extract_numeric_claims(
 
     def _add(key: str, label: str, raw_val: str, context: str, unit_override: str = "",
              version: str = "", shot_count: Optional[int] = None, variant: str = "",
-             subject: str = "", era: str = "", effort: str = "") -> None:
+             subject: str = "", era: str = "", effort: str = "",
+             denominator: str = "", endpoint: str = "", qualifier: str = "") -> None:
         numeric = _parse_value(raw_val)
         if numeric is None:
             return
@@ -1855,11 +1979,20 @@ def extract_numeric_claims(
         # v1.8.8: the same per-task price at different thinking
         # levels (high vs medium) is a DIFFERENT claim too — the
         # dedup key carries effort.
-        dedup   = (key, numeric, variant, subject, era, effort)
+        # v1.8.10a (RC10a item 3): the same key and value stated as a
+        # threshold ("below 0.8") vs a point ("0.8") are DIFFERENT
+        # assertions too — the dedup key carries the qualifier, so a
+        # ceiling and a point never collapse into one claim.
+        dedup   = (key, numeric, variant, subject, era, effort, endpoint, qualifier)
         if dedup in seen:
             idx = seen[dedup]
             if claims[idx].get("shot_count") is None and shot_count is not None:
                 claims[idx]["shot_count"] = shot_count
+            # v1.8.10 (RC10, run-25 gap 5): the fraction pass runs after
+            # the inline pass, so a fraction claim (with a denominator)
+            # meets an already-minted numerator — keep the denominator.
+            if claims[idx].get("denominator") in (None, "") and denominator:
+                claims[idx]["denominator"] = denominator
             return
         seen[dedup] = len(claims)
         claims.append({
@@ -1874,6 +2007,9 @@ def extract_numeric_claims(
             "subject":       subject,
             "era":           era,
             "effort":        effort,
+            "denominator":   denominator,
+            "endpoint":      endpoint,
+            "qualifier":     qualifier,
             "context":       context[:120],
         })
 
@@ -1898,12 +2034,22 @@ def extract_numeric_claims(
         model_tok = _model_token_before(text, m.start(2))
         if model_tok:
             subject = _model_slug(model_tok)
+        # v1.8.10a (RC10a items 1–3): a colon line can state a fraction
+        # ("KingBench: 33.2 out of 60"), a bare endpoint ("GPQA
+        # baseline: 47.6") or a threshold ("GPQA: below 0.8") — the
+        # denominator, endpoint and qualifier are part of the claim's
+        # identity, not decoration.
+        _out_m = re.match(r"\s+out\s+of\s+(\d+(?:\.\d+)?)",
+                          text[m.end(2):m.end(2) + 15])
         _add(key, label, raw_val, m.group(0),
              unit_override="count" if count_after else "",
              version=_benchmark_version(key, m.group(0)),
              shot_count=_shot_count_for_match(text, m, 2),
              variant=_benchmark_variant(key, ematch.group(0), label_fragment[ematch.end():]),
-             subject=subject)
+             subject=subject,
+             denominator=_out_m.group(1) if _out_m else "",
+             endpoint=_bare_endpoint(label_fragment),
+             qualifier=_benchmark_qualifier(text, m.start(2)))
 
     # Pass 2 — inline patterns (catches prose and snapshot lines)
     for m in _INLINE_ENTITY_RE.finditer(text):
@@ -1931,6 +2077,19 @@ def extract_numeric_claims(
         if entity is None:
             continue
         key, label, ematch = entity
+        # v1.8.10 (RC10, run-25 gap 4): a benchmark name used as a
+        # descriptor of an earlier benchmark ("AIME25 math benchmark")
+        # is not the benchmark — the word right after it is
+        # "benchmark"/"test"/"evaluation" and another benchmark name
+        # already sits earlier in the line. Without this the same
+        # number mints twice, once under the real benchmark and once
+        # under the descriptor ("math").
+        if key in _BENCHMARK_KEYS:
+            _after_ent = text[m.end(1):m.end(1) + 15]
+            if re.match(r"\s+(?:benchmark|test|evaluation)\b", _after_ent, re.I):
+                _line_start = text.rfind("\n", 0, m.start()) + 1
+                if re.search(_BENCHMARK_NAMES_RE, text[_line_start:m.start(1)], re.I):
+                    continue
         key, label = _windowed_index(key, label, text, m.start(), m.end(2))
         # Variant identity: first qualifier after the base name, in the
         # entity match text + the span up to the value. ("SWE-bench Pro
@@ -1956,6 +2115,35 @@ def extract_numeric_claims(
             # — the number is the FOLLOWING benchmark's score; the
             # preceding entity must not claim it.
             continue
+        if key in _BENCHMARK_KEYS:
+            # v1.8.10 (RC10, run-25 gap 2): a range endpoint is not a
+            # benchmark score. "GPQA-Diamond and MMLU-Pro, average
+            # output length drops by 10-14%" used to mint "10" as a
+            # GPQA score and pool it against 47.6/47.58 — the false
+            # conflict. A value immediately followed by "-<digit>"
+            # (a hyphen range, with or without a %) is a range's low
+            # end, not a point score.
+            _after_val = text[m.end(2):m.end(2) + 15]
+            if re.match(r"\s*[-\u2013]\s*\d", _after_val):
+                continue
+        # v1.8.10 (RC10, run-25 gap 5): a benchmark "score" must
+        # read as a score. "KingBench 4 (7th overall...)" minted 7.0
+        # (a rank), "took 431 minutes" minted 431.0 (a duration),
+        # "took 1,128 steps" minted 1128.0 (a count), "Score (out of
+        # 60" minted 60.0 (a denominator). Skip the value when it is
+        # an ordinal, is immediately followed by a duration/count
+        # unit, or is preceded by "out of". "points" is deliberately
+        # not in the unit list — a score stated in points is a score.
+        if key in _BENCHMARK_KEYS:
+            _after_num = text[m.end(2):m.end(2) + 15]
+            _before_num = text[max(0, m.start(2) - 12):m.start(2)]
+            if re.match(r"(?:th|st|nd|rd)\b", _after_num):
+                continue
+            if re.match(r"\s+(?:minutes?|hours?|seconds?|days?|weeks?|steps?|tokens?|parameters?|layers?|questions?|tasks?|examples?|runs?)\b",
+                        _after_num, re.I):
+                continue
+            if re.search(r"\bout of\s*$", _before_num):
+                continue
         # Same bare-number count rule as the colon pass (Sieve gap
         # 2026-11-03: inline counts had no unit and "compared" with %).
         bare = _unit_of(raw_val) == ""
@@ -1965,16 +2153,57 @@ def extract_numeric_claims(
         model_tok = _model_token_before(text, m.start(2))
         if model_tok:
             subject = _model_slug(model_tok)
+        # v1.8.10 (RC10, run-25 gap 4): "from X to Y" pairs mint BOTH
+        # endpoints under the same benchmark key ("AIME25 from 19.17
+        # to 30.42", "GPQA-Diamond from 47.58 to 56.26") — the old
+        # pass minted only the first value, so baseline pairs never
+        # aligned. Only the word "to" counts; a hyphen range stays
+        # out (see the range-endpoint skip above). The endpoints are
+        # marked before/after so the compare partitions them into two
+        # pairs (baseline vs improved) instead of one four-value group
+        # whose spread reads as a conflict.
+        _to_m = None
+        if key in _BENCHMARK_KEYS:
+            _to_m = re.match(r"\s+to\s+([+-]?\$?\d[\d,\.]*(?:%|\s*bps)?)",
+                             text[m.end(2):m.end(2) + 20])
+        # v1.8.10a (RC10a items 1–3): the number after "out of" is the
+        # denominator, not a second claim ("scored 33.2 out of 60");
+        # a bare "baseline"/"improved" adjective marks the endpoint;
+        # a threshold word before the number is the qualifier. The
+        # from-to endpoint wins over the adjective: "GPQA improved
+        # from 47.6" is a before-endpoint, not an after-endpoint.
+        _out_m = re.match(r"\s+out\s+of\s+(\d+(?:\.\d+)?)",
+                          text[m.end(2):m.end(2) + 15])
         _add(key, label, raw_val, m.group(0),
              unit_override="count" if count_after else "",
              version=_benchmark_version(key, m.group(0)),
              shot_count=_shot_count_for_match(text, m, 2),
              variant=variant,
-             subject=subject)
+             subject=subject,
+             denominator=_out_m.group(1) if _out_m else "",
+             endpoint="before" if _to_m else _bare_endpoint(
+                 text[max(0, m.start(2) - 30):m.start(2)]),
+             qualifier=_benchmark_qualifier(text, m.start(2)))
+        if _to_m:
+            _add(key, label, _to_m.group(1), m.group(0),
+                 unit_override="count" if count_after else "",
+                 version=_benchmark_version(key, m.group(0)),
+                 shot_count=_shot_count_for_match(text, m, 2),
+                 variant=variant,
+                 subject=subject,
+                 endpoint="after")
 
     # Pass 3 — benchmark-reverse: "61.3% on GPQA" (score precedes the name)
     for m in _BENCHMARK_REVERSE_RE.finditer(text):
         raw_val = m.group(1).strip()
+        # v1.8.10 (RC10, run-25 gap 4): a relative delta is not a
+        # score — "10% more training compute raised AIME25 from
+        # 19.17..." used to mint aime:10.0, which then polluted the
+        # whole AIME group. A "%" followed by more/less/fewer/greater
+        # (a change, not a result) never mints here.
+        if re.match(r"\s*(?:more|less|fewer|greater|higher|lower|faster|slower|cheaper)\b",
+                    text[m.end(1):m.end(1) + 15], re.I):
+            continue
         if _is_version_number(text, m.start(1)):
             continue
         if _number_in_benchmark_parens(text, m.start(1)):
@@ -1990,11 +2219,64 @@ def extract_numeric_claims(
         model_tok = _model_token_before(text, m.start(1))
         if model_tok:
             subject = _model_slug(model_tok)
+        # v1.8.10a (RC10a items 1–3): bare endpoint adjectives and
+        # threshold qualifiers apply here too — and so does the "out of"
+        # denominator ("scored 33.2 out of 60 on KingBench 4" is minted
+        # here, entity after the number).
+        _out_m = re.match(r"\s+out\s+of\s+(\d+(?:\.\d+)?)",
+                          text[m.end(1):m.end(1) + 15])
         _add(key, label, raw_val, m.group(0),
              version=_benchmark_version(key, m.group(0)),
              shot_count=_shot_count_for_match(text, m, 1),
              variant=_benchmark_variant(key, ematch.group(0), "", text[m.end():m.end() + 20]),
-             subject=subject)
+             subject=subject,
+             denominator=_out_m.group(1) if _out_m else "",
+             endpoint=_bare_endpoint(text[max(0, m.start(1) - 30):m.start(1)]),
+             qualifier=_benchmark_qualifier(text, m.start(1)))
+
+    # Pass 3b — score fractions (v1.8.10, RC10 run-25 gap 5): "scored
+    # 33.2/60 on KingBench 4" — the numerator is the score, the
+    # denominator is recorded, never a claim of its own. Prose only:
+    # table rows ("| KingBench 4 | 33.2 / 60 |") stay out, so a
+    # partial-build figure in the same row cannot mint as a second
+    # score on the key. A fraction mints only with a score verb just
+    # before it or a benchmark name just after it, and only when the
+    # benchmark name resolves to a known key.
+    for m in _FRACTION_RE.finditer(text):
+        _line_start = text.rfind("\n", 0, m.start()) + 1
+        _line_end = text.find("\n", m.end())
+        _line_end = len(text) if _line_end == -1 else _line_end
+        _line = text[_line_start:_line_end]
+        if _line.lstrip().startswith("|"):
+            continue
+        _before = text[max(0, m.start() - 30):m.start()]
+        _after = text[m.end():m.end() + 40]
+        if not (_FRACTION_SCORE_VERB_RE.search(_before)
+                or re.search(r"\bon\s+(" + _BENCHMARK_NAMES_RE + r")\b", _after, re.I)):
+            continue
+        _ent = None
+        _am = re.search(r"\bon\s+(" + _BENCHMARK_NAMES_RE + r")\b", _after, re.I)
+        if _am:
+            _ent = _normalize_entity_key(_am.group(1))
+        if _ent is None:
+            _ent = _normalize_entity_key(_before)
+        if _ent is None:
+            continue
+        key, label, ematch = _ent
+        if key not in _BENCHMARK_KEYS:
+            continue
+        subject = ""
+        model_tok = _model_token_before(text, m.start(1))
+        if model_tok:
+            subject = _model_slug(model_tok)
+        _add(key, label, m.group(1), _line,
+             denominator=m.group(2),
+             version=_benchmark_version(key, _line),
+             subject=subject,
+             # v1.8.10a (RC10a items 2–3): a fraction can also carry a
+             # bare endpoint adjective or a threshold qualifier.
+             endpoint=_bare_endpoint(text[max(0, m.start(1) - 30):m.start(1)]),
+             qualifier=_benchmark_qualifier(text, m.start(1)))
 
     # Pass 4 — pricing rows: a $ amount is a pricing claim only when
     # pricing words sit within ~60 chars, so market prices never match.
@@ -2049,9 +2331,33 @@ def extract_numeric_claims(
         close_amounts.add(paragraph.start() + close.start(1))
         _add(f"share-close|{issuer.casefold()}|{ticker}|ipo-day-one", f"{issuer} ({ticker}) first-session close",
              close.group(1), close.group(), unit_override="$/share")
+    # IPO offer price (v1.8.10, RC10 run-23 gap 3): the offer price is
+    # minted the same way as the close, minus the ticker — the offer
+    # sentence's paragraph names the issuer but the ticker lives in a
+    # later paragraph, so the key is issuer-scoped, not ticker-scoped.
+    # Same discipline otherwise: exactly one offer in the paragraph,
+    # no forecast/conditional words, issuer stripped of a leading
+    # sentence starter ("Today Anthropic" -> "Anthropic").
+    offer_amounts = set()
+    for paragraph in re.finditer(r"[^\n]+", text):
+        body = paragraph.group()
+        offers = list(_DEBUT_OFFER.finditer(body))
+        if len(offers) != 1:
+            continue
+        if re.search(r"\b(?:if|forecast|expected|projected|denied|incorrectly|hypothetical|would|could)\b", body, re.I):
+            continue
+        offer = offers[0]
+        issuer = offer.group(1).strip()
+        while issuer.split(" ", 1)[0].lower().rstrip(",.") in _DEBUT_OFFER_STARTERS and " " in issuer:
+            issuer = issuer.split(" ", 1)[1]
+        if not issuer or issuer.lower() in ("unknown",):
+            continue
+        offer_amounts.add(paragraph.start() + offer.start(2))
+        _add(f"share-offer|{issuer.casefold()}|ipo-day-one", f"{issuer} IPO offer price",
+             offer.group(2), offer.group(0), unit_override="$/share")
     prev_amount: Dict = {}  # the previous $ amount's tier/era, for slash pairs
     for m in _DOLLAR_RE.finditer(text):
-        if m.start(1) in close_amounts:
+        if m.start(1) in close_amounts or m.start(1) in offer_amounts:
             continue
         window_start = max(0, m.start() - 60)
         window = text[window_start:m.end() + 60]
@@ -2368,8 +2674,14 @@ _GENERIC_SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 # InfoWorld header's "62%" minted as a bench=infoworld claim (run-17
 # gap 8). Only the label prefix is skipped; a body sentence that
 # happens to contain "Source:" mid-sentence is untouched.
+# v1.8.10 (RC10, run-24 gap 1): the "# Source N — ..." feed form
+# and the bare PRIMARY:/SECONDARY:/TERTIARY: label form are feed
+# headers too — the numeric and generic passes must not read numbers
+# out of them (the "# Source 1" in a run-24 header is not a claim).
 _GENERIC_FEED_HEADER_LINE_RE = re.compile(
-    r"^(?:Source|Published|Fetched|URL|Author|Length|Coverage)\s*:", re.I)
+    r"^(?:Source|Published|Fetched|URL|Author|Length|Coverage)\s*:"
+    r"|^#\s*Source\s*\d+\s*[—\-]"
+    r"|^(?:PRIMARY|SECONDARY|TERTIARY|COVERAGE)\s*[—\-:]", re.I)
 _GENERIC_CLAUSE_SPLIT_RE = re.compile(r"[,;]|\s+and\s+")
 _GENERIC_DIGIT_RE = re.compile(
     # One greedy digit run (commas allowed, must END on a digit):
@@ -2474,6 +2786,17 @@ _GENERIC_METRIC_CUES = [
     (re.compile(r"\bcandidates?\b", re.I), "candidates"),
     (re.compile(r"lines? of code|code ?base", re.I), "code"),
     (re.compile(r"\bcost\b|\bcredits?\b", re.I), "cost"),
+    # v1.8.10 (RC10, run-25 gap 6): scale families. "750B parameters",
+    # "28 layers", "128K context" are the model's size, not a score \u2014
+    # without a family they never mint at all (Dealroom coverage 0.0).
+    (re.compile(r"\bparameters?\b|\bparams?\b", re.I), "parameters"),
+    (re.compile(r"\blayers?\b", re.I), "layers"),
+    (re.compile(r"\bcontext(?:\s+window)?\b", re.I), "context"),
+    # v1.8.10 (RC10, run-24): perplexity. "MAI-2 Base at 0.819
+    # log-perplexity", "GPT-3.5 at ~0.99 log-perplexity" \u2014 a bare
+    # decimal under a perplexity cue is a measurement. NOT a
+    # count-noun family (its values ARE bare decimals).
+    (re.compile(r"\b(?:log[-\s]?)?perplexity\b|\blog[-\s]?loss\b|\bcross-entropy loss\b", re.I), "perplexity"),
 ]
 _GENERIC_FAMILY_LABELS = {
     "score": "score", "recall": "recall", "speed": "workflow speed",
@@ -2493,6 +2816,8 @@ _GENERIC_FAMILY_LABELS = {
     "facts": "facts", "tokens": "tokens", "blocks": "blocks",
     "agents": "agents", "sessions": "sessions", "retention": "retention",
     "size": "size", "duration": "duration",
+    "parameters": "parameters", "layers": "layers", "context": "context",
+    "perplexity": "perplexity",
 }
 # Count-noun families (v1.8.7): a non-integer bare decimal (0.838,
 # 61.82) is a measurement, never a count of these — the decimal guard
@@ -2503,7 +2828,7 @@ _GENERIC_COUNT_NOUN_FAMILIES = {
     "techniques", "proofs of concept", "samples", "exploits",
     "vulnerabilities", "patches", "grants", "candidates", "targets",
     "facts", "tokens", "blocks", "agents", "sessions", "breaking changes",
-    "code",
+    "code", "parameters", "layers", "context",
 }
 # A month-day date ("April 7", "November 6", "Nov. 9") is a date, never
 # a claim value (v1.8.7: the 7 in "April 7" must never become a
@@ -2538,11 +2863,192 @@ _GENERIC_DENOM_RE = re.compile(
 )
 _GENERIC_QUALIFIER_RE = re.compile(
     r"\b(about|approximately|around|roughly|nearly|almost|up to|more than"
-    r"|over|at least|just over|just under)\b|~",
+    r"|over|at least|just over|just under"
+    # v1.8.10 (RC10, run-24 gap 2): threshold words. "Below 0.8" used
+    # to capture NO qualifier, so a threshold read as a point value
+    # and aligned with one. "below/under/less than/fewer than/at
+    # most/no more than" are ceilings; "above" is a floor.
+    r"|below|under|less than|fewer than|at most|no more than|above)\b|~",
     re.I,
 )
+# Threshold qualifiers (ceilings + floors): a value stated as a bound
+# is not the same assertion as a point value, even inside tolerance.
+_GENERIC_THRESHOLD_QUALS = {
+    "below", "under", "less than", "fewer than", "at most",
+    "no more than", "up to", "above", "more than", "over", "at least",
+}
 _GENERIC_UPPER_BOUND_QUALS = {"up to", "at most", "no more than"}
 _GENERIC_APPROX_QUALS = {"about", "approximately", "~", "roughly", "nearly", "around", "almost"}
+# Ceiling vs floor split of the threshold qualifiers (v1.8.10a, RC10a
+# item 7): a point is compatible with a ceiling only at or below the
+# bound, and with a floor only at or above it.
+_CEILING_QUALS = {"below", "under", "less than", "fewer than", "at most",
+                  "no more than", "up to"}
+_FLOOR_QUALS = {"above", "more than", "over", "at least"}
+# Currency units that mark an explicitly-quoted price (v1.8.10a, RC10a
+# item 4): _unit_of mints "$" for $ amounts (and /bbl, /oz); no other
+# currency unit exists in this tree.
+_LABEL_CURRENCY_UNITS = frozenset({"$"})
+# Superlative labels that mark a "high"/"peak" value (v1.8.10, RC10;
+# hoisted to module level in v1.8.10a so the verdict loop's
+# superlative guard and the label-contradiction scan share one rule).
+_SUPERLATIVE_LABEL_RE = re.compile(
+    r"\b(?:intraday|day|session|all-time|record|52-week)\s+(?:high|peak)\b"
+    r"|\bhigh\s+of\b|\bpeak\s+of\b", re.I)
+# Day/session markers for temporal scoping (v1.8.10a, RC10a item 5):
+# a weekday or a relative day named in the claim's span.
+_SESSION_DAY_RE = re.compile(
+    r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+    r"|today|yesterday)\b", re.I)
+
+
+def _label_excess_tolerance(claim: Dict) -> float:
+    """Tolerance for the label-contradiction check on one labelled value.
+
+    v1.8.10a (RC10a item 4): an explicitly-quoted currency price carries
+    NO tolerance — a close above a stated intraday high is a
+    contradiction at any excess, not noise. Other values keep the
+    group's tolerance (0.15 below 20, 2% at/above 20)."""
+    v = abs(claim.get("numeric_value") or 0)
+    if (claim.get("unit") or "") in _LABEL_CURRENCY_UNITS:
+        return 0.0
+    return 0.15 if v < 20 else v * 0.02
+
+
+def _session_marker(span: str) -> str:
+    """The day/session a span names ("monday", "today", ...), or "".
+
+    v1.8.10a (RC10a item 5): the temporal identity of a price claim,
+    read from its own span text. Unstated means indistinguishable,
+    not a session of its own."""
+    m = _SESSION_DAY_RE.search(span or "")
+    return m.group(1).lower() if m else ""
+
+
+def _superlative_label_in_span(span: str, raw: str, value) -> Optional[str]:
+    """The superlative label ("intraday high", "peak of", ...) attached
+    to a value, read from the ~40 chars before the value in the claim's
+    own span — so a span naming two values attributes each label to
+    its own value. None when the value carries no superlative label."""
+    if not span:
+        return None
+    pos = span.rfind(str(raw) if raw else str(value))
+    if pos == -1:
+        pos = span.rfind(str(value))
+    if pos == -1:
+        return None
+    _m = _SUPERLATIVE_LABEL_RE.search(span[max(0, pos - 40):pos])
+    return _m.group(0) if _m else None
+
+
+def _benchmark_qualifier(text: str, num_start: int) -> str:
+    """The qualifier nearest before a benchmark score ("below", "up to",
+    "~"), from the ~30 chars before the number — the same rule the
+    generic path applies via _generic_qualifier, but scoped to the
+    current sentence so a qualifier from a previous sentence cannot
+    leak onto this number. v1.8.10a (RC10a item 3): benchmark-key
+    claims used to mint qualifier null, so "below 0.8" read as a point
+    value and aligned with one."""
+    window = text[max(0, num_start - 30):num_start]
+    cut = max(window.rfind("."), window.rfind("!"),
+              window.rfind("?"), window.rfind("\n"))
+    if cut != -1:
+        window = window[cut + 1:]
+    # v1.8.10b-first-party-rc10c (item 1): the same qualifier
+    # attachment rules as the generic path — a qualifier that
+    # governs another number, or an "over" that is temporal, must
+    # not become this claim's threshold qualifier.
+    return _qualifier_from_window(window, text, num_start)
+
+
+def _bare_endpoint(before_text: str) -> str:
+    """Endpoint implied by a bare adjective before a benchmark score.
+
+    v1.8.10a (RC10a item 2): "the baseline GPQA score was 47.6" is a
+    before-endpoint; "the improved GPQA score was 47.6" is an
+    after-endpoint. A bare score with neither adjective stays
+    unmarked — it is neither endpoint, so guessing would be a
+    fabrication (same rule as the from-to partition)."""
+    if re.search(r"\bbaseline\b", before_text, re.I):
+        return "before"
+    if re.search(r"\bimproved\b", before_text, re.I):
+        return "after"
+    return ""
+
+
+def _generic_fromto_endpoint(sentence: str, num_start: int, num_end: int) -> str:
+    """Endpoint of a number in a from-to pair ("from X to Y").
+
+    v1.8.10b-first-party-rc10c (item 1): the generic pass mints
+    from-to endpoints the way the benchmark inline pass does — the
+    from-value is "before", the to-value is "after" — so a pair is a
+    trajectory, never two point claims that conflict. Two shapes:
+    adjacent ("0.330 to 0.364", "from 47.6 to 56.3") and gapped
+    ("from 0.330 at baseline to 0.641", where words sit between the
+    from-value and "to"). A hyphen range ("10-14%") never reaches
+    here — the hyphen skip in _generic_numbers_in drops it first.
+    A number that is neither endpoint stays unmarked (""). The
+    gapped shapes check the span for a sentence boundary (". " / "!"
+    / "?" / newline) so a "from" in an earlier sentence never claims
+    this number — a decimal point ("0.330") is not a boundary."""
+    # After-endpoint first: this number completes a pair ("<digit> to
+    # <this>" adjacent, or "from <digit> ... to <this>" in the clause).
+    _before = sentence[max(0, num_start - 60):num_start]
+    if re.search(r"\d\s+to\s*$", _before):
+        return "after"
+    _froms = list(re.finditer(r"\bfrom\b", _before))
+    if _froms:
+        _span = _before[_froms[-1].start():]
+        if re.search(r"\bto\s*$", _span) \
+                and not re.search(r"[.!?]\s|\n", _span):
+            return "after"
+    # Before-endpoint: this number opens a pair ("<this> to <digit>"
+    # adjacent, or "from <this> ... to <digit>" in the clause).
+    _after = sentence[num_end:num_end + 60]
+    if re.match(r"\s+to\s+\d", _after):
+        return "before"
+    _before_from = sentence[max(0, num_start - 12):num_start]
+    if re.search(r"\bfrom\b\s*$", _before_from):
+        _tm = re.search(r"\bto\s+\d", _after)
+        if _tm and not re.search(r"[.!?]\s|\n", _after[:_tm.start()]):
+            return "before"
+    return ""
+
+
+def _superlative_excess(entries: List[Dict]) -> Optional[Tuple[Dict, Dict]]:
+    """A superlative-labelled claim exceeded by another claim in the
+    same group, or None.
+
+    v1.8.10a (RC10a item 4): the verdict-loop half of the
+    label-contradiction check. The excess must clear the labelled
+    claim's tolerance (zero for an explicitly-quoted currency price —
+    see _label_excess_tolerance), and the two claims' sessions must
+    not distinguish them: the same session marker, or unstated on
+    either side, means one session's high against its own close; two
+    different stated sessions may both be correct, and those stay out
+    of this guard (label_contradictions scopes them as candidates)."""
+    for _e in entries:
+        _c = _e["claim"]
+        _v = _c.get("numeric_value")
+        if _v is None:
+            continue
+        _span = _c.get("span", "") or _c.get("context", "")
+        if _superlative_label_in_span(_span, _c.get("raw_value", ""), _v) is None:
+            continue
+        _tol = _label_excess_tolerance(_c)
+        _sess = _session_marker(_span)
+        for _o in entries:
+            if _o is _e:
+                continue
+            _ov = _o["claim"].get("numeric_value")
+            if _ov is None or _ov - _v <= _tol:
+                continue
+            _osess = _session_marker(_o["claim"].get("span", "")
+                                     or _o["claim"].get("context", ""))
+            if _sess and _osess and _sess != _osess:
+                continue
+            return (_e, _o)
+    return None
 # Verb-driven families: on a near-tie the governing verb names the
 # count ("sampled 166 exploits" is a sample count). Derived families
 # never hand their metric down to a baseline (a percentage-point gap
@@ -2672,6 +3178,13 @@ def _generic_numbers_in(sentence: str) -> List[Dict]:
             continue
         after = sentence[end:end + 1]
         before = sentence[start - 1:start] if start > 0 else ""
+        # v1.8.10b (RC10b, run-26 gap 4): a digit immediately after "@"
+        # is a rank specifier ("pass@1", "recall@5", "top@3"), not a
+        # claim value — the "1" in "pass@1" is the k, and minting it
+        # pooled it with the "six" of "six-hour" as an ExploitGym
+        # task count.
+        if before == "@":
+            continue
         if after == "-" or after == ":" or before == ":":
             # v1.8.7: "30-day retention" is a retention claim, not a
             # hyphenated context modifier ("30-node", "200-turn") —
@@ -2681,12 +3194,33 @@ def _generic_numbers_in(sentence: str) -> List[Dict]:
                     r"-\s*days?\s+(?:data\s+)?retention\b",
                     sentence[end:end + 25], re.I):
                 pass
+            # v1.8.10 (RC10, run-25 gap 6): a hyphenated magnitude noun
+            # ("750-billion-parameter", "1M-token") is a claim about the
+            # model's size, not a hyphenated context modifier. The
+            # magnitude word after the hyphen is applied to the value
+            # below, at the suffix-multiplication step.
+            elif after == "-" and re.match(
+                    r"-\s*(?:billion|million|trillion|thousand)?\s*(?:tokens?|parameters?)\b",
+                    sentence[end:end + 30], re.I):
+                pass
             else:
                 continue
         # Range endpoint ("lines 0-98"): a number right after "-" that
         # follows a digit is the second half of a range, not a claim.
-        if start >= 2 and sentence[start - 1] == "-" and sentence[start - 2].isdigit():
+        if start >= 2 and sentence[start - 1] == "-" and (sentence[start - 2].isdigit() or sentence[start - 2] in "BMKT"):
             continue
+        # v1.8.10b-first-party-rc10c (item 1): the RC10 "X to Y" skip is
+        # REMOVED. It dropped both endpoints of every from-to pair in
+        # the generic pass ("GPQA improved from 47.6 to 56.3" minted
+        # nothing; "Sonnet 4.6 barely moved (0.330 to 0.364)" minted
+        # nothing), which silently dropped the Nov 9 128.0-sessions
+        # group, the Nov 7 166.0-exploits group, and the F3 temporal
+        # pair — all RC10 regressions (RC9 minted them). A from-to
+        # endpoint is a claim, not a point value: the number loop
+        # marks it before/after (see _generic_fromto_endpoint) so the
+        # compare treats it as a trajectory endpoint, never as a bare
+        # point. Only the hyphen range stays out (the rules above):
+        # "10-14%" is a range, "from 19.2 to 30.4" is a change.
         # v1.8.8 r2: a slash-date fragment ("2026/11/15" — the 11 and
         # the 15; a bare "11/15") is a date, never a claim value, just
         # as a hyphen date fragment is not (the range rule above
@@ -2695,6 +3229,13 @@ def _generic_numbers_in(sentence: str) -> List[Dict]:
         if start >= 2 and sentence[start - 1] == "/" and sentence[start - 2].isdigit():
             continue
         if re.match(r"/\d{2}\b", sentence[end:]):
+            continue
+        # v1.8.10 (RC10, run-25 gap 5): a spaced fraction denominator
+        # ("33.2 / 60") is not a claim — the 60 is the denominator
+        # of the 33.2 score, not a KingBench score of 60. Only when
+        # the numerator is a decimal (a score fraction); integer
+        # fractions ("3/4") and dates keep their existing handling.
+        if re.search(r"\d+\.\d+\s*/\s*$", sentence[max(0, start - 15):start]):
             continue
         # Attached context modifier ("30-node", "200 turns") or a
         # duration ("12 hours", "10 days") — context, not a claim.
@@ -2773,6 +3314,17 @@ def _generic_numbers_in(sentence: str) -> List[Dict]:
             value *= {"million": 1e6, "billion": 1e9, "trillion": 1e12,
                       "thousand": 1e3}[suffix.lower()]
             unit = "count"
+        elif not currency:
+            # v1.8.10 (RC10, run-25 gap 6): hyphenated magnitude
+            # ("750-billion-parameter") — the magnitude word sits
+            # after the hyphen, not as a suffix, so apply it here.
+            # This branch also owns the unit for the no-suffix,
+            # no-currency case (it precedes the currency/else arms).
+            _hm = re.match(r"-\s*(billion|million|trillion|thousand)\b", sentence[end:], re.I)
+            if _hm:
+                value *= {"million": 1e6, "billion": 1e9, "trillion": 1e12,
+                          "thousand": 1e3}[_hm.group(1).lower()]
+            unit = "count"
         elif currency:
             unit = currency
         else:
@@ -2797,21 +3349,24 @@ def _generic_numbers_in(sentence: str) -> List[Dict]:
         # glued percentage the mapped pass does not already cover
         # (run-17 gap 4: Chartography 89.0%, OSWorld 81.8%).
         if after.isalpha() and suffix != "%":
-            if currency and after in "BMK":
-                value *= {"B": 1e9, "M": 1e6, "K": 1e3}[after]
+            if currency and after in "BMKT":
+                value *= {"B": 1e9, "M": 1e6, "K": 1e3, "T": 1e12}[after]
                 end += 1
-            elif not currency and after in "BMK":
+            elif not currency and after in "BMKT":
                 # v1.8.7: a magnitude letter on a non-currency number
                 # followed by a count noun ("420M tokens", "2B
                 # parameters") is a magnitude, not a version fragment.
                 # The next word must be a count noun, not a preposition
                 # or verb ("420M in revenue" is not a count).
-                nxt = re.match(r"\s+([A-Za-z]+)", sentence[end + 1:])
+                # v1.8.10 (RC10, run-25 gap 6): "T" (trillion) joins
+                # B/M/K, and the next word may sit after a hyphen
+                # ("1M-token" — the word after "M" is "-token").
+                nxt = re.match(r"\s*-?\s*([A-Za-z]+)", sentence[end + 1:])
                 if nxt and nxt.group(1).lower() not in (
                         "per", "in", "on", "at", "for", "of", "and", "or",
                         "to", "is", "was", "are", "were", "with", "by",
                         "from", "as", "than"):
-                    value *= {"B": 1e9, "M": 1e6, "K": 1e3}[after]
+                    value *= {"B": 1e9, "M": 1e6, "K": 1e3, "T": 1e12}[after]
                     end += 1
                 else:
                     continue
@@ -2833,6 +3388,19 @@ def _generic_numbers_in(sentence: str) -> List[Dict]:
         if re.match(r"-(?:quarters?|thirds?|halves|half)\b", sentence[end:], re.I):
             continue
         if re.match(r"\s*(?:times|fold)\b", sentence[end:], re.I):
+            continue
+        # v1.8.10b (RC10b, run-26 gap 4): a word number immediately
+        # followed by a hyphen + a duration unit ("six-hour timeout")
+        # is a hyphenated modifier, not a count — the digit pass
+        # already skips "6-hour" this way, but the word-number loop
+        # had no hyphen check, so "six" minted and pooled with
+        # pass@1's "1" as an ExploitGym task count. The retention
+        # phrase is exempt, matching the digit pass ("thirty-day
+        # retention" is a retention claim, not a modifier).
+        if re.match(r"-\s*(?:hours?|minutes?|seconds?|days?|weeks?|months?|years?)\b",
+                    sentence[end:], re.I) \
+                and not re.match(r"-\s*days?\s+(?:data\s+)?retention\b",
+                                 sentence[end:], re.I):
             continue
         numbers.append({
             "start": start, "end": end, "value": float(value),
@@ -2903,8 +3471,34 @@ def _generic_subject(sentence: str, num: Dict, numbers: List[Dict]) -> Tuple[str
     # non-baseline token wins. If every token in the segment is a
     # baseline, fall through to the other subject sources below
     # instead of returning the baseline.
+    # v1.8.10 (RC10, run-23 gap 9): a name inside a comma-delimited
+    # appositive ("Anthropic, the maker of the Claude chatbot, made
+    # its Nasdaq debut...") is descriptive, not the sentence's subject
+    # — the company raising the money is. A token inside such a span
+    # never counts as the subject on any path below; the claim falls
+    # through to subject-less instead of misattributing the figure to
+    # the product. An appositive span is a comma pair whose inner text
+    # opens with an article or a descriptive lead ("the maker of",
+    # "best known for", "behind", "known for") — a comma-separated
+    # LIST of names ("Fable 5.2, Opus 5.5, and Mythos scored...") does
+    # not open that way and is untouched.
+    _appositives = []
+    for _cm in re.finditer(r",", seg_before):
+        _nxt = seg_before.find(",", _cm.start() + 1)
+        if _nxt == -1:
+            continue
+        _inner = seg_before[_cm.start() + 1:_nxt].strip()
+        if re.match(r"(?:the\s+|a\s+|an\s+|best known\b|maker of\b|creator of\b|behind\b|known for\b)",
+                    _inner, re.I):
+            _appositives.append((_cm.start(), _nxt))
+
+    def _in_appositive(pos: int) -> bool:
+        return any(a <= pos <= b for a, b in _appositives)
+
     model_before = list(_MODEL_TOKEN_RE.finditer(seg_before))
     for m in reversed(model_before):
+        if _in_appositive(m.start()):
+            continue
         if _model_token_is_baseline(seg_before, m.start(),
                                     seg_before[m.end():]):
             continue
@@ -2914,13 +3508,15 @@ def _generic_subject(sentence: str, num: Dict, numbers: List[Dict]) -> Tuple[str
         m for m in _GENERIC_PRODUCT_RE.finditer(seg_before)
         if _generic_product_base(m.group(1)) not in _GENERIC_PRODUCT_BASE_STOPLIST
         and _generic_subject_ok(m.group(1))
+        and not _in_appositive(m.start())
     ]
     if tokens_before:
         display = tokens_before[-1].group(1)
         return _slug(display), display
     # Bare capitalized model-family word ("Fable", "Opus", "Mythos").
     fam_before = [m for m in re.finditer(r"\b([A-Z][a-z]+)\b", seg_before)
-                  if m.group(1).lower() in _MODEL_FAMILY_WORDS]
+                  if m.group(1).lower() in _MODEL_FAMILY_WORDS
+                  and not _in_appositive(m.start())]
     if fam_before:
         display = fam_before[-1].group(1)
         return _slug(display), display
@@ -3189,6 +3785,14 @@ def _generic_metric(sentences: List[str], sent_idx: int, num: Dict,
             continue
         if is_percent and family == "sessions":
             continue
+        # v1.8.10 (RC10, run-25 gap 8): a "score" cue (score/scored/
+        # achieved/reached/performance) never claims a billion-scale
+        # magnitude — "the 750-billion-parameter model reaches
+        # performance comparable..." is a parameter count, not a score.
+        # Scores are measurements, not magnitudes; 1e6 is far above
+        # any real score (board scores run to the thousands).
+        if family == "score" and float(num["value"]) >= 1e6:
+            continue
         for m in rx.finditer(sentence):
             cues.append((m.start(), m.end(), family))
     if not cues:
@@ -3455,11 +4059,59 @@ def _generic_qualifier(sentence: str, num_start: int) -> str:
     an "up to" ceiling and an "about" approximation change what a
     value means when compared."""
     window = sentence[max(0, num_start - 30):num_start]
+    return _qualifier_from_window(window, sentence, num_start)
+
+
+# Number words that count as "another number" for the qualifier
+# attachment rule below ("more than five times the 166" — the "five"
+# is a number, so "more than" governs it, not the 166).
+_GENERIC_NUMBER_WORDS_SET = frozenset(
+    "one two three four five six seven eight nine ten eleven twelve "
+    "thirteen fourteen fifteen sixteen seventeen eighteen nineteen "
+    "twenty thirty forty fifty sixty seventy eighty ninety hundred "
+    "thousand million billion trillion".split())
+
+
+def _qualifier_from_window(window: str, sentence: str, num_start: int) -> str:
+    """Pick the qualifier that actually governs this number.
+
+    v1.8.10b-first-party-rc10c (item 1, F4/F5 root cause): the old
+    rule took the nearest qualifier word in the 30-char window
+    regardless of what it modified, and the RC10 threshold-vs-point
+    diversion then routed identical-value groups to clarification.
+    Two misattributions, both fixed here:
+
+    - A qualifier only attaches when no other number intervenes
+      between it and this number ("more than five times the 166" —
+      the "more than" governs "five times", not the 166, so the 166
+      is a point value, not a floor). Matches are scanned last to
+      first; the first with a number-free gap wins.
+    - "over" / "just over" before a count followed by a duration
+      noun is temporal, not a floor ("dreamed over 128 sessions"
+      means during 128 sessions, not more than 128). "over 90%"
+      and "over 100 vulnerabilities" stay floors — no duration
+      noun follows the number.
+    """
     found = list(_GENERIC_QUALIFIER_RE.finditer(window))
     if not found:
         return ""
-    q = found[-1].group(0).lower().strip()
-    return "approximately" if q == "~" else q
+    _num_word_re = (
+        r"\d|\b(?:" + "|".join(sorted(_GENERIC_NUMBER_WORDS_SET)) + r")\b")
+    for m in reversed(found):
+        _between = window[m.end():]
+        if re.search(_num_word_re, _between, re.I):
+            continue
+        q = m.group(0).lower().strip()
+        if q in ("over", "just over"):
+            _after = sentence[num_start:num_start + 40]
+            if re.search(
+                    r"^\s*[\d,]*\.?\d*\s+(?:[A-Za-z]+\s+){0,2}?"
+                    r"(?:sessions|days|weeks|hours|minutes|seconds|months|years|"
+                    r"runs|attempts|trials|iterations|rounds|questions|tasks|"
+                    r"examples)\b", _after, re.I):
+                continue
+        return "approximately" if q == "~" else q
+    return ""
 
 
 def _generic_benchmark(sentence: str, num_start: int = 0) -> str:
@@ -3514,6 +4166,23 @@ def _generic_benchmark(sentence: str, num_start: int = 0) -> str:
     # 2.0" never reads Terminal-Bench as the 76.2's benchmark
     # (v1.8.8 r2 pinned rule).
     after = sentence[num_start:num_start + 60].split(";")[0]
+    # (1a) A number inside a parenthetical must not attach to a
+    # benchmark named after the closing paren — the name belongs to
+    # the next pair, not to this number. "SWE-2.1 roughly doubles
+    # SWE-2 on Terminal-Bench 4.1 (24.2 to 50.0) and on FrontierCode
+    # 2.0 (24.1 to 41.3)": without this bound the 50.0 (and the
+    # 24.2) attached to FrontierCode via the "on FrontierCode"
+    # after the paren, although both are Terminal-Bench figures.
+    # The bound applies only when the number is inside an open
+    # paren and the closing paren is the next paren character —
+    # a paren that OPENS after the number is an aside ("50.0 (up
+    # from 24.2) on FrontierCode") and does not bound the scan.
+    _depth = sentence[:num_start].count("(") - sentence[:num_start].count(")")
+    if _depth > 0:
+        _close = after.find(")")
+        _open = after.find("(")
+        if _close != -1 and (_open == -1 or _close < _open):
+            after = after[:_close]
     for start, end, name in _name_spans(after):
         if start > 40:
             break
@@ -4196,6 +4865,22 @@ def extract_generic_quantitative_claims(
                     continue
             subject_slug, subject_display = _generic_subject(sentence, num, numbers)
             if not subject_slug:
+                # v1.8.10b (RC10b, run-26 gap 3 follow-on): a number
+                # that is itself a comparison baseline never takes
+                # the exactly-one subject. "59.7 against 50.0" — the
+                # 50.0 is the thing measured AGAINST, not the
+                # sentence's subject's figure (59.7 is Kimi's, 50.0
+                # is SWE-2.1's). Without this, adding Kimi to the
+                # model registry made the CellCog prose 50.0 a
+                # kimi-k3-1 claim, which poisoned the merge for the
+                # whole 50.0 figure (two stated groups matching, so
+                # the unstated prose 50.0 could attach to neither
+                # and the 50.0 alignment vanished). A baseline number
+                # stays unstated and the merge attaches it by value.
+                _num_before = sentence[max(0, num["start"] - 30):num["start"]]
+                _is_baseline_num = bool(re.search(
+                    r"\b(?:against|than|vs\.?|versus|compared\s+(?:with|to))\s*$",
+                    _num_before, re.I))
                 # v1.8.9 (run-20 gap 2a follow-on): a sentence naming
                 # exactly one model states that model's figures —
                 # "Gemini 4 Carbon, introductory: $2.00 in, $10.00
@@ -4205,6 +4890,21 @@ def extract_generic_quantitative_claims(
                 # so the 60 pooled bench-less with Neon's 55. Two
                 # named models stay ambiguous, as before.
                 _sent_models: Dict[str, str] = {}
+                # v1.8.10b (RC10b, run-26 gap 3): scope the
+                # exactly-one set to the number's own semicolon
+                # segment. A sentence can carry two independent
+                # clauses separated by ";" — "SWE-2.1 captures 27.3%
+                # of flags ...; Claude Opus 5.5 (34.5)" — and the
+                # whole-sentence set made the lone model token in the
+                # OTHER clause the subject of every number in the
+                # sentence. A model token outside the number's
+                # segment never counts; a number whose own segment
+                # names no model stays unstated instead of being
+                # misattributed.
+                _seg_start = sentence.rfind(";", 0, num["start"]) + 1
+                _seg_end = sentence.find(";", num["end"])
+                if _seg_end == -1:
+                    _seg_end = len(sentence)
                 # Worker B (v1.8.9 correction): a model token after
                 # the next number is skipped only when it is that
                 # later number's "for <Model>" owner ("refrained ...
@@ -4225,6 +4925,8 @@ def extract_generic_quantitative_claims(
                     [n for n in numbers if n["start"] > num["end"]],
                     key=lambda n: n["start"], default=None)
                 for _mm in _MODEL_TOKEN_RE.finditer(sentence):
+                    if _mm.start(1) < _seg_start or _mm.start(1) >= _seg_end:
+                        continue
                     # Worker B (v1.8.9 correction, Nov 7 48.5 — ported
                     # from repo-work; the RC3 port dropped it): a model
                     # token after the next number is that later
@@ -4261,7 +4963,16 @@ def extract_generic_quantitative_claims(
                     # "for" away ("compared to 94.49% for GPT-5.6
                     # Cyber") — that model is still the baseline.
                     _before = sentence[max(0, _mm.start() - 40):_mm.start()]
-                    if re.search(r"\b(?:than|vs\.?|against|versus|above|below|compared\s+(?:with|to))\s*$",
+                    # v1.8.10b (RC10b, run-26 gap 3): "trails" /
+                    # "lags (behind)" / "behind" are comparators too
+                    # — "SWE-2.1 trails Claude Opus 5.5 (65.8)" names
+                    # Opus as the baseline, not the subject, and the
+                    # whole-sentence set made the 50.0 Opus's. The
+                    # optional trailing capitalised word is the model
+                    # family that sits between the comparator and the
+                    # model token ("trails Claude Opus 5.5", "than
+                    # Claude Opus 5.5").
+                    if re.search(r"\b(?:than|vs\.?|against|versus|above|below|compared\s+(?:with|to)|trails?|lags?|behind)\b(?:\s+[A-Z][a-z]+)?\s*$",
                                  _before, re.I):
                         continue
                     if re.search(r"\b(?:than|vs\.?|against|versus|above|below|compared\s+(?:with|to))\b(?:[\d\s.,%]*\bfor\b)?\s*$",
@@ -4271,7 +4982,7 @@ def extract_generic_quantitative_claims(
                             sentence.rfind("(", 0, _mm.start()) > sentence.rfind(")", 0, _mm.start()):
                         continue
                     _sent_models[_model_slug(_mm.group(1))] = _mm.group(1)
-                if len(_sent_models) == 1:
+                if len(_sent_models) == 1 and not _is_baseline_num:
                     subject_slug = next(iter(_sent_models))
                     subject_display = _sent_models[subject_slug]
             # v1.8.7 pair-subject inheritance: the second member of a
@@ -4284,6 +4995,18 @@ def extract_generic_quantitative_claims(
                 between = sentence[prev_num["end"]:num["start"]]
                 if re.fullmatch(r"\s*(?:and|to|vs\.?|,)\s*", between):
                     subject_slug, subject_display = prev_subject
+            # v1.8.10b-first-party-rc10c (item 5): a count of a table's
+            # rows or columns belongs to the table, never to a model
+            # named in the sentence — "It still trails Claude Opus
+            # 5.5 on all five rows of Cognition's own table" used to
+            # mint a 5.0-rows claim FOR Opus 5.5 (exactly-one rule),
+            # and the wrong-entity claim shipped as a single-source
+            # headline. The figure still mints (the table does have
+            # five rows) but the subject abstains: unstated, not a
+            # model. A model's figure is never expressed as a count
+            # of rows, so clearing the subject here loses nothing.
+            if family in ("rows", "columns"):
+                subject_slug, subject_display = "", ""
             ctx_key, ctx_display = _generic_context_numbers(sentence, num)
             denominator = _generic_denominator(sentence, num["end"], numbers)
             if family == "cost" and not denominator and num.get("currency"):
@@ -4324,6 +5047,29 @@ def extract_generic_quantitative_claims(
                 clause_bench = _generic_benchmark_phrase(sentence[clause_a:clause_b])
                 if clause_bench and (not benchmark or clause_bench.startswith(benchmark)):
                     benchmark = clause_bench
+                elif not clause_bench:
+                    # v1.8.10b (RC10b, run-26 gap 3 follow-on): the
+                    # clause's own CamelCase benchmark wins the same
+                    # way the phrase-list one does. "SWE-2.1 achieves
+                    # 80% on ExploitBench and 27.3% flags captured
+                    # via intended exploits on ExploitGym." — the
+                    # 27.3% is an ExploitGym figure, but the
+                    # sentence-level resolver returned ExploitBench
+                    # (the nearest benchmark BEFORE the number)
+                    # because the "on ExploitGym" attachment sits
+                    # past its 40-char window. The clause names
+                    # exactly one CamelCase benchmark, ExploitGym,
+                    # and ExploitBench is not in the clause — so the
+                    # clause's name wins. A clause naming two
+                    # benchmarks stays ambiguous and keeps the
+                    # sentence-level assignment.
+                    _clause_camel = [m.group(0) for m in _GENERIC_CAMEL_RE.finditer(
+                        sentence[clause_a:clause_b])
+                        if m.group(0).lower() not in _GENERIC_BENCH_ORG_STOPLIST]
+                    if len(set(_clause_camel)) == 1 \
+                            and _clause_camel[0] != benchmark \
+                            and benchmark not in sentence[clause_a:clause_b]:
+                        benchmark = _clause_camel[0]
                 if not benchmark:
                     # The benchmark may sit in another clause of the
                     # same sentence ("... in its internal CVE
@@ -4508,6 +5254,14 @@ def extract_generic_quantitative_claims(
                               "fast-input", "fast-output"):
                     denom_key = re.sub(r"[^a-z0-9]+", "-", dlow).strip("-")
             role = _generic_role(num)
+            # v1.8.10b-first-party-rc10c (item 1): a from-to endpoint
+            # rides on the claim, the same way the benchmark inline
+            # pass marks one — "before" for the from-value, "after"
+            # for the to-value — so the compare knows the pair is a
+            # trajectory, not two point claims. A number in no pair
+            # stays unmarked ("").
+            endpoint = _generic_fromto_endpoint(
+                sentence, num["start"], num["end"])
             label = _GENERIC_FAMILY_LABELS.get(family, family)
             if benchmark:
                 label = f"{benchmark} {label}"
@@ -4538,6 +5292,7 @@ def extract_generic_quantitative_claims(
                 "denominator": denominator,
                 "rel_direction": rel_direction,
                 "qualifier": qualifier,
+                "endpoint": endpoint,
                 "time": year_m.group(0) if year_m else "",
                 "attribution": attribution,
                 "span": sentence.strip()[:200],
@@ -4570,6 +5325,14 @@ def extract_generic_quantitative_claims(
     # name and the model subject, so the headline numbers surface
     # instead of vanishing. Mapped benchmarks are handled by the
     # mapped table-row pass; this pass only covers the unmapped ones.
+    # v1.8.10b (RC10b, run-26 gap 5): a claim upgraded by one row
+    # entry must not be upgraded again by another entry with the
+    # same value — a pipe table repeats values in one row (SWE-Atlas
+    # QA: 73.4 twice, for Grok 4.7 and Muse Wonder), and the old
+    # value+span match let the second entry steal the first's
+    # upgrade, losing a model. An already-upgraded claim is skipped,
+    # so the second entry mints fresh with its own subject.
+    _upgraded_claim_ids = set()
     for row in table_rows:
         if row["benchmark_key"]:
             continue
@@ -4585,6 +5348,8 @@ def extract_generic_quantitative_claims(
         bench_slug = re.sub(r"[^a-z0-9]+", "-", bench.lower()).strip("-")
         upgraded = False
         for c in claims:
+            if id(c) in _upgraded_claim_ids:
+                continue
             # v1.8.8: the sentence-loop span keeps the leading list
             # bullet ("- CVE Rediscovery: ...") while _parse_table_rows
             # returns the line without it — compare with the bullet
@@ -4602,20 +5367,41 @@ def extract_generic_quantitative_claims(
                 # rule's first cue is the "CVE" in the row label)
                 # while the key now says score.
                 c["metric"] = "score"
+                # v1.8.10b (RC10b, run-26 gap 5): the role rides in
+                # the key, so the upgrade must use the same role the
+                # fresh-mint path below uses — and the same rule the
+                # sentence loop's _generic_role uses: a non-integer
+                # bare decimal is a measurement, an integer-valued
+                # bare decimal is a task count. The old hardcoded
+                # "percentage" relabelled bare pipe-table values
+                # (CellCog 50.0) and bare colon-row values (DeepSWE
+                # 75.7) as percentages, and the old dotted-means-
+                # measurement rule split 50.0 (task_count in prose)
+                # from 50.0 (measurement in the table) so the same
+                # figure never aligned.
+                _bare = not row["raw"].endswith("%")
+                _role = ("measurement"
+                         if "." in row["raw"] and float(row["value"]) != int(row["value"])
+                         else "task_count") if _bare else "percentage"
                 c["entity_key"] = (
-                    f"generic|percentage|score|bench={bench_slug}||{subject or 'unstated'}")
+                    f"generic|{_role}|score|bench={bench_slug}||{subject or 'unstated'}")
                 c["entity_label"] = f"{bench} score — {row['model_display']}"
+                _upgraded_claim_ids.add(id(c))
                 upgraded = True
                 break
         if upgraded:
             continue
         # v1.8.8 r2: a bare row value ("- DeepSWE v1.1: 75.7") is a
-        # measurement (bare decimal) or a task count (bare integer),
-        # not a percentage — the role rides in the key so it never
-        # lumps with a percentage claim of the same value.
+        # measurement (non-integer bare decimal) or a task count
+        # (bare integer, or an integer-valued bare decimal like
+        # 50.0 — the same rule _generic_role uses, so a table 50.0
+        # and a prose 50.0 share a key and align), not a percentage
+        # — the role rides in the key so it never lumps with a
+        # percentage claim of the same value.
         bare = not row["raw"].endswith("%")
-        role = ("measurement" if "." in row["raw"] else "task_count") \
-            if bare else "percentage"
+        role = ("measurement"
+                if "." in row["raw"] and float(row["value"]) != int(row["value"])
+                else "task_count") if bare else "percentage"
         label = f"{bench} score — {row['model_display']}"
         claims.append({
             "entity_key": f"generic|{role}|score|bench={bench_slug}||{subject or 'unstated'}",
@@ -4639,6 +5425,16 @@ def extract_generic_quantitative_claims(
             "attribution": doc_attribution,
             "span": row["line"][:200],
         })
+        # v1.8.10b-first-party-rc10c (item 7): a fresh-minted claim
+        # is owned by its row entry, exactly like an upgraded one.
+        # Without this, a row that repeats a value (SWE-Atlas QA:
+        # 73.4 for Grok 4.7 AND Muse Wonder) lost a subject — the
+        # first entry fresh-minted Grok's claim, and the second
+        # entry's upgrade scan found that just-minted claim (same
+        # value, same span) and overwrote its subject to Muse's, so
+        # extraction yielded only Muse's 73.4. Registering the mint
+        # makes the second entry mint its own claim instead.
+        _upgraded_claim_ids.add(id(claims[-1]))
     return claims
 
 
@@ -4665,6 +5461,10 @@ def _generic_unique_entry(key: str, label: str, doc_name: str, claim: Dict,
         "attribution":  claim.get("attribution", ""),
         "span":         claim.get("span", ""),
     }
+    if claim.get("denominator"):
+        entry["denominator"] = claim["denominator"]
+    if claim.get("endpoint"):
+        entry["endpoint"] = claim["endpoint"]
     if claim.get("effort"):
         entry["effort"] = claim["effort"]
     if claim.get("rank") is not None:
@@ -5103,11 +5903,15 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         {
           "doc_count":         int,
           "shared_claims":     [...],   # same entity in 2+ docs
+          "shared_claims_excluded": [...], # shared entries dropped: disowned by needs_source_clarification (v1.8.10)
+          "single_source_headlines": [...], # headline figures stated by exactly one doc (v1.8.10)
+          "label_contradictions": [...], # a superlative label contradicted by a higher value in the group (v1.8.10)
           "unique_claims":     [...],   # entity found in only one doc
           "conflicts":         [...],   # same entity, values outside tolerance
           "alignment":         [...],   # same entity, values within tolerance
           "unit_mismatches":   [...],   # same entity, different units
           "version_mismatches": [...],  # same benchmark, different versions
+          "denominator_mismatches": [...],  # same benchmark, different denominators (v1.8.10a)
           "evaluation_setting_mismatches": [...],  # same benchmark, different shot counts
           "variant_mismatches": [...],  # same benchmark, different variants (v1.8.5)
           "benchmark_mismatches": [...],  # same generic identity, different named benchmarks (v1.8.6)
@@ -5143,6 +5947,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             "alignment":         [],
             "unit_mismatches":   [],
             "version_mismatches": [],
+            "denominator_mismatches": [],
             "evaluation_setting_mismatches": [],
             "variant_mismatches": [],
             "benchmark_mismatches": [],
@@ -5256,6 +6061,19 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             return abs(a - b) <= 0.5
         ref = max(abs(a), abs(b)) or 1.0
         return abs(a - b) <= ref * 0.02
+
+    def _endpoint_compatible(a: str, b: str) -> bool:
+        # v1.8.10b-first-party-rc10c (item 1 follow-on): endpoint
+        # compatibility for the single-source corroboration arms. A
+        # plain point ("up from 36.1%") asserts the same value as
+        # the from-endpoint of a pair ("from 36.1% to 80%"), so it
+        # corroborates it — without this, item 1's newly-minted
+        # from-values were flagged single-source even when the same
+        # value was shared/aligned as a plain point in another doc
+        # (the same claim listed as both corroborated and lone).
+        # Before vs after stay incompatible: a baseline 47.6 and an
+        # improved 47.6 are different figures (RC10a rule).
+        return a == b or a == "" or b == ""
 
     for key in [k for k, es in entity_map.items()
                 if es and es[0]["claim"].get("claim_kind") == "generic_quantitative"
@@ -5474,6 +6292,9 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
     unit_mismatches: List[Dict] = []
     version_mismatches: List[Dict] = []
     evaluation_setting_mismatches: List[Dict] = []
+    # Denominator mismatches (v1.8.10a, RC10a item 1): one benchmark
+    # reported with different stated denominators — not comparable.
+    denominator_mismatches: List[Dict] = []
     presence_absence_mismatches: List[Dict] = []
     variant_mismatches: List[Dict] = []
     # Benchmark mismatches (v1.8.6, P2): one generic identity reported
@@ -5594,11 +6415,23 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         stated_variants = {e["claim"].get("variant", "")
                            for e in entries if e["claim"].get("variant")}
         split_variant = len(stated_variants) > 1
+        # v1.8.10 (RC10, run-25 gap 4): a "from X to Y" pair is two
+        # comparisons, not one — the baseline endpoints (19.2 vs
+        # 19.17) and the improved endpoints (30.4 vs 30.42) each
+        # align, but lumped as one four-value group their spread
+        # reads as a conflict. Split only when BOTH endpoints are
+        # stated in the group (a bare score with no "to" stays in the
+        # unmarked partition — it is neither endpoint, so guessing
+        # which one it is would be a fabrication).
+        stated_endpoints = {e["claim"].get("endpoint", "")
+                            for e in entries if e["claim"].get("endpoint")}
+        split_endpoint = {"before", "after"} <= stated_endpoints
         def _part_key(e):
             c = e["claim"]
             if key in _BENCHMARK_KEYS:
                 v = c.get("variant", "") if split_variant else ""
-                return (v, c.get("subject", ""), "")
+                ep = c.get("endpoint", "") if split_endpoint else ""
+                return (v, c.get("subject", ""), ep)
             if key.startswith("pricing"):
                 return (c.get("era", ""), c.get("subject", ""), c.get("effort", ""))
             if key.startswith("generic|"):
@@ -5771,7 +6604,8 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                   "unit": c["unit"], "raw": c["raw_value"],
                   "subject": c.get("subject", ""),
                   "context": c.get("span") or c.get("context", "")}
-            for f in ("era", "effort", "variant", "version", "qualifier", "time", "benchmark"):
+            for f in ("era", "effort", "variant", "version", "qualifier", "time", "benchmark",
+                      "denominator", "endpoint"):
                 if c.get(f):
                     vo[f] = c[f]
             if c.get("shot_count") is not None:
@@ -6097,6 +6931,14 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                   "version": e["claim"].get("version", ""),
                   "shot_count": e["claim"].get("shot_count"),
                   "variant": e["claim"].get("variant", "")}
+            # v1.8.10a (RC10a item 1): an aligned value carries its
+            # denominator and endpoint, so a reader can see what the
+            # values were compared AS — "33.2/60" and "33.2/100" must
+            # never print as the same bare 33.2.
+            if e["claim"].get("denominator"):
+                vo["denominator"] = e["claim"]["denominator"]
+            if e["claim"].get("endpoint"):
+                vo["endpoint"] = e["claim"]["endpoint"]
             if e["claim"].get("claim_kind") == "generic_quantitative":
                 vo.update({
                     "span": e["claim"].get("span", ""),
@@ -6206,6 +7048,31 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                     "Same benchmark reported in different versions across "
                     "sources — scores from different versions are not directly "
                     "comparable. Do not read as a conflict or an alignment."
+                ),
+            })
+            continue
+
+        # Denominator gate (v1.8.10a, RC10a item 1): the same benchmark
+        # reported with different STATED denominators is not comparable
+        # — 33.2/60 and 33.2/100 are different figures, not two readings
+        # of one. Only positive denominator disagreement fires: an
+        # unstated denominator still compares (provisionally), as with
+        # the version gate above. The denominator is part of the figure's
+        # identity (see the single-source figure key), so a group that
+        # mixes denominators never aligns or conflicts.
+        named_denominators = {e["claim"].get("denominator", "") for e in entries} - {""}
+        if key in _BENCHMARK_KEYS and len(named_denominators) > 1:
+            denominator_mismatches.append({
+                "entity_key":   key,
+                "entity_label": label,
+                "denominators": sorted(named_denominators),
+                "values":       val_objs,
+                "variant":      variant,
+                "note": (
+                    "Same benchmark reported with different denominators across "
+                    "sources (e.g. 33.2 out of 60 vs 33.2 out of 100) — scores "
+                    "on different scales are not directly comparable. Do not "
+                    "read as a conflict or an alignment."
                 ),
             })
             continue
@@ -6400,6 +7267,100 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
                     ident["effort"] = next(iter(efforts)) if len(efforts) == 1 else ""
             entry["identity"] = ident
 
+        # v1.8.10 (RC10, run-24 gap 2): a threshold and a point are
+        # not an alignment, even inside tolerance. "Below 0.8" (a fleet
+        # threshold) and "about 0.76" (one model's point) agree within
+        # 0.04 but assert different things — the threshold bounds a
+        # series, the point states one value. Route to clarification
+        # instead of alignment. Both sides thresholded CAN align (two
+        # ceilings agreeing); only the mixed case is diverted. A raw
+        # range string ("10-14%") is the same shape — a range endpoint
+        # never aligns with a point value.
+        # v1.8.10a (RC10a item 7): the diversion must not call every
+        # threshold-vs-point pair "compatible". A point of 0.76 IS
+        # compatible with a ceiling of 0.8; a point of 0.9 is NOT — it
+        # violates the ceiling. Both still route to clarification
+        # (Arch: routing both there is acceptable for now), but the
+        # note and the "compatible" flag now say which is which.
+        if not is_conflict:
+            _quals = [e["claim"].get("qualifier", "") for e in entries]
+            _raws = [e["claim"].get("raw_value", "") for e in entries]
+            _thr = [q in _GENERIC_THRESHOLD_QUALS for q in _quals]
+            _rng = [bool(re.search(r"\d\s*[-\u2013]\s*\d", r)) for r in _raws]
+            if (any(_thr) and not all(_thr)) or (any(_rng) and not all(_rng)):
+                _mixed = "threshold-vs-point" if any(_thr) and not all(_thr) else "range-vs-point"
+                _compatible = None
+                _note = (
+                    "One side states a threshold (or range) and the other a point value — "
+                    "the figures are compatible but do not assert the same figure, so they "
+                    "are not an alignment. Check each value's source span before forwarding."
+                )
+                if _mixed == "threshold-vs-point":
+                    _compatible = True
+                    for _te, _t in zip(entries, _thr):
+                        if not _t:
+                            continue
+                        _bound = _te["claim"]["numeric_value"]
+                        _ceiling = _te["claim"].get("qualifier", "") in _CEILING_QUALS
+                        for _pe, _p in zip(entries, _thr):
+                            if _p:
+                                continue
+                            _pv = _pe["claim"]["numeric_value"]
+                            if (_ceiling and _pv > _bound) or (not _ceiling and _pv < _bound):
+                                _compatible = False
+                    if _compatible is False:
+                        _note = (
+                            "One side states a threshold and the other a point value — "
+                            "and the point value VIOLATES the stated bound (it sits "
+                            "outside the ceiling/floor the threshold asserts), so the "
+                            "figures are NOT compatible and do not assert the same "
+                            "figure. Check each value's source span before forwarding."
+                        )
+                _clar = {
+                    "entity_key":   key,
+                    "entity_label": label,
+                    "spread":       round(spread, 5),
+                    "variant":      variant,
+                    "missing":      [_mixed],
+                    "values":       _identity_values(entries),
+                    "note":         _note,
+                }
+                if _compatible is not None:
+                    _clar["compatible"] = _compatible
+                needs_source_clarification.append(_clar)
+                continue
+
+        # v1.8.10a (RC10a item 4): a superlative-labelled value exceeded
+        # by another value in the same group is not an agreement — a
+        # close above the day's stated high contradicts the high. Only
+        # when the sessions do not distinguish the two claims (same
+        # session, or unstated on either side): different sessions may
+        # both be correct, and those are scoped as candidates in
+        # label_contradictions instead. The group is routed to
+        # clarification (never an alignment); the shared entry is
+        # dropped by the shared_claims_excluded gate below.
+        if not is_conflict:
+            _sup = _superlative_excess(entries)
+            if _sup is not None:
+                _le, _xe = _sup
+                needs_source_clarification.append({
+                    "entity_key":   key,
+                    "entity_label": label,
+                    "spread":       round(spread, 5),
+                    "variant":      variant,
+                    "missing":      ["label-contradiction"],
+                    "values":       _identity_values(entries),
+                    "note": (
+                        f"{_doc_name(_le['doc_idx'])} calls "
+                        f"{_le['claim']['numeric_value']} the day's high/peak, but "
+                        f"{_doc_name(_xe['doc_idx'])} reports "
+                        f"{_xe['claim']['numeric_value']} — a price higher than the "
+                        "stated high in the same session. Not an agreement: check "
+                        "the source spans before forwarding either figure."
+                    ),
+                })
+                continue
+
         if is_conflict:
             # v1.8.7: the "different trading sessions" note belongs to
             # MARKET entities only (WTI/Brent, S&P, Nasdaq, Treasury).
@@ -6419,6 +7380,457 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
             conflicts.append(entry)
         else:
             alignment.append(entry)
+
+    # ── Shared-claims integrity (v1.8.10, RC10 run-25 gap 3) ──────────
+    # A claim the verdict loop disowned (routed to
+    # needs_source_clarification for an incomplete identity, or by the
+    # v1.8.10a superlative guard for a labelled high exceeded in its
+    # own session) must not also appear in shared_claims. The shared
+    # entries are appended before the verdict loop runs, so the gate
+    # lives here: drop any shared entry whose key is in
+    # needs_source_clarification, and record the drop so the removal
+    # is auditable, not silent.
+    shared_claims_excluded: List[Dict] = []
+    _clarified_keys = {c["entity_key"] for c in needs_source_clarification}
+    if _clarified_keys:
+        _kept_shared = []
+        for _sc in shared_claims:
+            if _sc.get("entity_key") in _clarified_keys:
+                shared_claims_excluded.append(_sc)
+            else:
+                _kept_shared.append(_sc)
+        shared_claims = _kept_shared
+
+    # ── Single-source headlines (v1.8.10, RC10 run-25 gap 5 / run-24) ─
+    # A headline figure stated by exactly one document — a benchmark
+    # score, a fraction (denominator recorded), or a perplexity
+    # measurement — is flagged, not silently carried as corroborated.
+    # "Headline" is by metric identity, not by position in the doc:
+    # a benchmark score or a perplexity figure is the kind of number a
+    # draft leans on, so a lone one must be visible as lone.
+    # "Single-source" is tolerance-aware, not exact-value: 40.3 in one
+    # doc and 40.33 in another are the SAME figure at different
+    # precision, not two lone figures — so a value counts as
+    # single-source only when no other doc states the same key within
+    # tolerance. (An earlier exact-value version flagged every
+    # from-to endpoint as lone, which is the opposite of the truth.)
+    # The benchmark-field test is deliberately NOT here: a layers
+    # count in a KingBench-naming sentence is not a headline figure.
+    single_source_headlines: List[Dict] = []
+    _fig_docs: Dict = {}
+    _fig_claim: Dict = {}
+    _key_docs: Dict = {}
+    # v1.8.10a (RC10a items 1–3): a figure's identity is its key, value,
+    # denominator, endpoint AND qualifier. "33.2 out of 60" and "33.2
+    # out of 100" are different figures; a baseline 47.6 and an improved
+    # 47.6 are different figures; "below 0.8" and "exactly 0.8" are
+    # different assertions. A bare value (no denominator, no endpoint,
+    # no qualifier) keeps the old two-part identity.
+    for _di, _claims in enumerate(doc_claims):
+        for _c in _claims:
+            _fk = (_c.get("entity_key", ""), _c.get("numeric_value"),
+                   _c.get("denominator", "") or "",
+                   _c.get("endpoint", "") or "",
+                   _c.get("qualifier", "") or "")
+            _fig_docs.setdefault(_fk, set()).add(_di)
+            _fig_claim.setdefault(_fk, _c)
+            _key_docs.setdefault(_c.get("entity_key", ""), {}).setdefault(_di, []).append(_c)
+    _prefix_docs: Dict = {}
+    _bench_score_docs: Dict = {}
+    for _di, _claims in enumerate(doc_claims):
+        for _c in _claims:
+            _kp = _c.get("entity_key", "")
+            _kparts = _kp.split("|")
+            if len(_kparts) == 6 and _kp.startswith("generic|"):
+                _prefix_docs.setdefault("|".join(_kparts[:5]), {}).setdefault(_di, []).append(_c)
+            # v1.8.10b (RC10b, run-26 gap 6): role-tolerant bench=
+            # score index — a benchmark score's bench and subject,
+            # ignoring the role, so a bare 12.1 and a 12.1% for the
+            # same benchmark are recognised as the same figure.
+            if _c.get("metric") == "score" and "bench=" in _kp:
+                _bm = re.search(r"bench=([^;|]+)", _kp)
+                if _bm:
+                    _bench_score_docs.setdefault(_bm.group(1), {}).setdefault(_di, []).append(_c)
+    for (_fk, _docs) in sorted(_fig_docs.items(), key=lambda kv: str(kv[0])):
+        if len(_docs) != 1:
+            continue
+        _c = _fig_claim[_fk]
+        # v1.8.10b (RC10b, run-26 gap 6): two new headline arms. A
+        # percentage whose span or label names a rate ("44.8% broader
+        # flag-capture rate", "success rate") is the kind of number a
+        # draft leans on, exactly like a benchmark score — the old
+        # rule needed a denominator, a mapped benchmark key, or a
+        # perplexity metric, so the lone 44.8% rate was invisible.
+        # And a generic score whose key carries a bench= (an unmapped
+        # benchmark score from the generic fallback, including the
+        # pipe-table rows) is a headline figure too — the mapped
+        # _BENCHMARK_KEYS arm never covered it, so a lone table value
+        # was never flagged. One exclusion: a number that appears in
+        # its own span as the denominator of an "out of" phrase
+        # ("scored 33.2 out of 60") is the scale, not a score — the
+        # generic pass mints the 60 as its own claim, and flagging it
+        # as a "KingBench score 60.0" headline would misread the
+        # denominator as a result. The 33.2 itself is still flagged
+        # (it carries the denominator, first arm above).
+        _val_txt = (str(int(_fk[1])) if float(_fk[1]).is_integer()
+                    else str(_fk[1]))
+        _is_denominator = bool(re.search(
+            r"out of\s+" + re.escape(_val_txt) + r"(?![0-9.])",
+            _c.get("span", "") or "", re.I))
+        _headline = bool(_c.get("denominator")) \
+            or _fk[0] in _BENCHMARK_KEYS \
+            or _c.get("metric") == "perplexity" \
+            or (_c.get("unit") == "percent" and re.search(
+                r"\brate\b",
+                (_c.get("span", "") or "") + " " + (_c.get("entity_label", "") or ""),
+                re.I)) \
+            or ("bench=" in _fk[0] and _c.get("metric") == "score"
+                and not _is_denominator)
+        if not _headline:
+            continue
+        # Tolerance-aware: another doc stating the same figure within
+        # tolerance makes this figure multi-source, whatever the exact
+        # decimals say. Corroboration requires the SAME figure, not
+        # merely a nearby number — so the other claim must agree on
+        # denominator and endpoint, and on assertion type: a
+        # threshold-qualified value on the other side does not count
+        # (a ceiling, "below 0.8", is not the same figure as a point,
+        # 0.819, even when numerically close), and neither does a
+        # point value when THIS figure is threshold-qualified (a point
+        # cannot corroborate a ceiling — the qualifier symmetry Arch
+        # asked for). Two claims with the same value, denominator,
+        # endpoint and qualifier at different precision (40.3 vs 40.33)
+        # are still the same figure.
+        _multi = False
+        _focal_thr = _fk[4] in _GENERIC_THRESHOLD_QUALS
+        for _odi, _oclaims in _key_docs.get(_fk[0], {}).items():
+            if _odi in _docs:
+                continue
+            for _oc in _oclaims:
+                if _oc.get("qualifier", "") in _GENERIC_THRESHOLD_QUALS:
+                    continue
+                if _focal_thr:
+                    continue
+                if (_oc.get("denominator", "") or "") != _fk[2]:
+                    continue
+                if not _endpoint_compatible((_oc.get("endpoint", "") or ""), _fk[3]):
+                    continue
+                if _generic_close(_oc.get("numeric_value", 0), _fk[1]):
+                    _multi = True
+                    break
+            if _multi:
+                break
+        # Same-figure test for the two corroboration arms below. The
+        # merge matches VALUES exactly (a value stated by 2+ docs is
+        # its own aligned group; any other value splits out as a
+        # unique), so corroboration here must mean the same value at
+        # a different precision — NOT merely a nearby number.
+        # _generic_close is too loose for this: its +-0.15 absolute
+        # window for values under 20 let the OpenAI primary's 0.76
+        # log-perplexity threshold "corroborate" ExplainX's 0.819
+        # MAI-2 figure (7.7% apart, different figures the merge
+        # keeps apart), which silently dropped the run-24 MAI-2 0.819
+        # single-source headline. A 1% relative window covers
+        # rounding-precision restatements (40.3 vs 40.33; 4,200 vs
+        # 4,234) and excludes genuinely different figures.
+        def _same_figure(a: float, b: float) -> bool:
+            ref = max(abs(a), abs(b))
+            return abs(a - b) <= max(ref * 0.01, 0.001)
+
+        # v1.8.10b (RC10b, run-26 gaps 5/6): subject-tolerant
+        # corroboration for generic keys. The merge attaches an
+        # unstated-subject claim to the one stated group whose value
+        # matches — so a figure stated with a subject in one doc and
+        # without one in another IS the same figure, and the stated
+        # side is not single-source. Without this, the bench= arm
+        # above would flag the CellCog table's Terminal-Bench 24.2
+        # (subject swe-2) as single-source even though DevPlace and
+        # Unite.AI state the same 24.2 prose-unstated. An unstated
+        # claim corroborates only under the merge's own uniqueness
+        # rule: no competing stated subject states the same figure
+        # (same prefix, same value) anywhere else.
+        # The mirror case: an UNSTATED focal figure is corroborated
+        # when exactly one stated subject states the same figure —
+        # Unite.AI's unstated FrontierCode 41.3 is the CellCog
+        # table's swe-2-1 41.3, not a lone figure. Two matching
+        # stated subjects is ambiguous, and the flag stands.
+        if not _multi and _fk[0].startswith("generic|"):
+            _parts = _fk[0].split("|")
+            if len(_parts) == 6:
+                _prefix = "|".join(_parts[:5])
+                _fsubj = _parts[5]
+                _focal_thr2 = _focal_thr
+                for _odi, _oclaims in _prefix_docs.get(_prefix, {}).items():
+                    if _odi in _docs:
+                        continue
+                    for _oc in _oclaims:
+                        if _oc.get("qualifier", "") in _GENERIC_THRESHOLD_QUALS:
+                            continue
+                        if _focal_thr2:
+                            continue
+                        if (_oc.get("denominator", "") or "") != _fk[2]:
+                            continue
+                        if not _endpoint_compatible((_oc.get("endpoint", "") or ""), _fk[3]):
+                            continue
+                        if not _same_figure(_oc.get("numeric_value", 0), _fk[1]):
+                            continue
+                        _osubj = _oc.get("entity_key", "").split("|")
+                        if len(_osubj) != 6:
+                            continue
+                        _os = _osubj[5]
+                        if _fsubj != "unstated":
+                            # Stated focal: an unstated claim in
+                            # another doc corroborates, unless a
+                            # competing stated subject states the
+                            # same figure.
+                            if _os != "unstated":
+                                continue
+                            _competing = False
+                            # v1.8.10b-first-party-rc10c (item 4): the
+                            # competing-subject search includes the
+                            # focal doc's own table. The old skip
+                            # ("if _cdi in _docs: continue") made a
+                            # same-table competitor invisible, so one
+                            # unstated prose figure "corroborated"
+                            # BOTH Grok 73.4 and Muse 73.41 in the
+                            # CellCog table while the merge refused
+                            # to attach it to either (two matching
+                            # stated subjects) — the flag dropped
+                            # where the merge refused to attach. The
+                            # focal claim itself can never count as
+                            # its own competitor: its subject is
+                            # excluded by the check below.
+                            for _cdi, _cclaims in _prefix_docs.get(_prefix, {}).items():
+                                for _cc in _cclaims:
+                                    _csubj = _cc.get("entity_key", "").split("|")
+                                    if len(_csubj) == 6 \
+                                            and _csubj[5] not in ("unstated", _fsubj) \
+                                            and _same_figure(_cc.get("numeric_value", 0), _fk[1]):
+                                        _competing = True
+                            if not _competing:
+                                _multi = True
+                                break
+                        else:
+                            # Unstated focal: a stated claim in
+                            # another doc corroborates, but only
+                            # when exactly one stated subject
+                            # matches (the merge's uniqueness rule).
+                            if _os == "unstated":
+                                continue
+                            _match_subjects = set()
+                            # v1.8.10b-first-party-rc10c (item 4): the
+                            # match-subject search includes the focal
+                            # doc too — a same-table second subject
+                            # makes the unstated figure ambiguous
+                            # under the merge's own uniqueness rule,
+                            # so the flag must stand. The focal claim
+                            # itself is unstated and never counts.
+                            for _cdi, _cclaims in _prefix_docs.get(_prefix, {}).items():
+                                for _cc in _cclaims:
+                                    _csubj = _cc.get("entity_key", "").split("|")
+                                    if len(_csubj) == 6 and _csubj[5] != "unstated" \
+                                            and _same_figure(_cc.get("numeric_value", 0), _fk[1]):
+                                        _match_subjects.add(_csubj[5])
+                            if len(_match_subjects) == 1:
+                                _multi = True
+                                break
+                    if _multi:
+                        break
+        # v1.8.10b (RC10b, run-26 gap 6): role-tolerant corroboration
+        # for bench= scores. A bare 12.1 and a 12.1% for the same
+        # benchmark and subject are the same figure — the role split
+        # (measurement vs percentage) is about the % sign, not a
+        # different measurement — so CellCog's bare ExploitGym 12.1
+        # is corroborated by DevPlace's and Unite.AI's 12.1%, and
+        # must not be flagged single-source. The subject rules are
+        # the same as the arm above (same subject, or an unstated
+        # claim with no competing stated subject, or exactly one
+        # stated subject for an unstated focal figure); only the role
+        # is ignored.
+        if not _multi and _c.get("metric") == "score" and "bench=" in _fk[0]:
+            _fbm = re.search(r"bench=([^;|]+)", _fk[0])
+            _fparts = _fk[0].split("|")
+            if _fbm and len(_fparts) == 6:
+                _fbench = _fbm.group(1)
+                _fsubj = _fparts[5]
+                for _odi, _oclaims in _bench_score_docs.get(_fbench, {}).items():
+                    if _odi in _docs:
+                        continue
+                    for _oc in _oclaims:
+                        if _oc.get("qualifier", "") in _GENERIC_THRESHOLD_QUALS:
+                            continue
+                        if _focal_thr:
+                            continue
+                        if (_oc.get("denominator", "") or "") != _fk[2]:
+                            continue
+                        if not _endpoint_compatible((_oc.get("endpoint", "") or ""), _fk[3]):
+                            continue
+                        if not _same_figure(_oc.get("numeric_value", 0), _fk[1]):
+                            continue
+                        _osubj = _oc.get("entity_key", "").split("|")
+                        if len(_osubj) != 6:
+                            continue
+                        _os = _osubj[5]
+                        if _fsubj != "unstated":
+                            if _os == _fsubj:
+                                _multi = True
+                                break
+                            if _os != "unstated":
+                                continue
+                            _competing = False
+                            # v1.8.10b-first-party-rc10c (item 4): same
+                            # fix as the subject-tolerant arm above —
+                            # the competing-subject search includes the
+                            # focal doc's own table, so a same-table
+                            # competitor is visible and the flag stands
+                            # where the merge refuses to attach.
+                            for _cdi, _cclaims in _bench_score_docs.get(_fbench, {}).items():
+                                for _cc in _cclaims:
+                                    _csubj = _cc.get("entity_key", "").split("|")
+                                    if len(_csubj) == 6 \
+                                            and _csubj[5] not in ("unstated", _fsubj) \
+                                            and _same_figure(_cc.get("numeric_value", 0), _fk[1]):
+                                        _competing = True
+                            if not _competing:
+                                _multi = True
+                                break
+                        else:
+                            if _os == "unstated":
+                                # Both sides unstated: the same
+                                # figure stated twice without a
+                                # subject (CellCog's bare ExploitGym
+                                # 12.1 and DevPlace's 12.1%) — no
+                                # competing subject can confuse them.
+                                _multi = True
+                                break
+                            _match_subjects = set()
+                            # v1.8.10b-first-party-rc10c (item 4): same
+                            # fix as the subject-tolerant arm above —
+                            # the match-subject search includes the
+                            # focal doc, so a same-table second subject
+                            # keeps the flag standing.
+                            for _cdi, _cclaims in _bench_score_docs.get(_fbench, {}).items():
+                                for _cc in _cclaims:
+                                    _csubj = _cc.get("entity_key", "").split("|")
+                                    if len(_csubj) == 6 and _csubj[5] != "unstated" \
+                                            and _same_figure(_cc.get("numeric_value", 0), _fk[1]):
+                                        _match_subjects.add(_csubj[5])
+                            if len(_match_subjects) == 1:
+                                _multi = True
+                                break
+                    if _multi:
+                        break
+        if _multi:
+            continue
+        _ssh = {
+            "entity_key":   _fk[0],
+            "entity_label": _c.get("entity_label", ""),
+            "value":        _fk[1],
+            "unit":         _c.get("unit", ""),
+            "denominator":  _fk[2],
+            "found_in":     _doc_name(next(iter(_docs))),
+            "span":         (_c.get("span", "") or _c.get("context", ""))[:200],
+            "note": (
+                "Headline figure stated by exactly one document — do not present as "
+                "corroborated; verify against a second source before forwarding."
+            ),
+        }
+        if _fk[3]:
+            _ssh["endpoint"] = _fk[3]
+        if _fk[4]:
+            _ssh["qualifier"] = _fk[4]
+        single_source_headlines.append(_ssh)
+
+    # ── Label contradictions (v1.8.10, RC10 run-23 gap 2) ──────────────
+    # A superlative label ("intraday high", "intraday peak", "day
+    # high", "record high") attached to a value that another value in
+    # the same group exceeds is contradicted — the "high" cannot be
+    # lower than another observed price in the same series. Narrow by
+    # design: only superlative labels, only the same entity key, only
+    # when the excess is beyond the claim's tolerance. The label is
+    # read from the ~40 chars before the value in the claim's own
+    # span, so a span naming two values ("opened at $111.50, then
+    # climbed to an intraday peak of $114.99") attributes each label
+    # to its own value.
+    # v1.8.10a (RC10a items 4–5): two corrections. First, an
+    # explicitly-quoted currency price gets ZERO tolerance — 2% of a
+    # $100 price is $2, enough to hide a real contradiction (a $100.00
+    # intraday high against a $101.50 close IS a contradiction, not an
+    # agreement). Second, every entry is a CANDIDATE: a "high" from
+    # Monday and a higher price from Tuesday can both be correct, so
+    # the entry carries the sessions (and the unit and instrument) and
+    # a status — "confirmed" only when the sessions do not distinguish
+    # the claims (same session, or unstated on either side), otherwise
+    # "candidate". Until a session check proves otherwise, a label
+    # contradiction is a candidate inconsistency requiring inspection,
+    # not an established factual contradiction.
+    label_contradictions: List[Dict] = []
+    _label_groups: Dict = {}
+    for _di, _claims in enumerate(doc_claims):
+        for _c in _claims:
+            _label_groups.setdefault(_c.get("entity_key", ""), []).append((_di, _c))
+    for _lk, _lentries in sorted(_label_groups.items()):
+        _lvals = sorted({_c.get("numeric_value") for _, _c in _lentries
+                         if _c.get("numeric_value") is not None})
+        if len(_lvals) < 2:
+            continue
+        for _di, _c in _lentries:
+            _v = _c.get("numeric_value")
+            if _v is None:
+                continue
+            _span = _c.get("span", "") or _c.get("context", "")
+            if not _span:
+                continue
+            _label = _superlative_label_in_span(
+                _span, str(_c.get("raw_value", "") or _v), _v)
+            if _label is None:
+                continue
+            _tol = _label_excess_tolerance(_c)
+            for _hv in _lvals:
+                if _hv <= _v:
+                    continue
+                if _hv - _v <= _tol:
+                    continue
+                _hex = next((_d, _cc) for _d, _cc in _lentries
+                            if _cc.get("numeric_value") == _hv)
+                _hspan = _hex[1].get("span", "") or _hex[1].get("context", "")
+                _sess = _session_marker(_span)
+                _hsess = _session_marker(_hspan)
+                _same_session = (not _sess) or (not _hsess) or (_sess == _hsess)
+                _status = "confirmed" if _same_session else "candidate"
+                label_contradictions.append({
+                    "entity_key":   _lk,
+                    "entity_label": _c.get("entity_label", ""),
+                    "status":       _status,
+                    "unit":         _c.get("unit", ""),
+                    "instrument":   _c.get("subject", "") or _c.get("entity_label", ""),
+                    "superlative_value": {
+                        "source": _doc_name(_di), "value": _v,
+                        "label": _label,
+                        "session": _sess,
+                        "span": _span[:200],
+                    },
+                    "exceeding_value": {
+                        "source": _doc_name(_hex[0]), "value": _hv,
+                        "session": _hsess,
+                        "span": _hspan[:200],
+                    },
+                    "note": (
+                        f"{_doc_name(_di)} calls {_v} the day's high/peak, but "
+                        f"{_doc_name(_hex[0])} reports {_hv} — a price higher than the "
+                        "stated high."
+                        + (
+                            " Same session, so the 'high' label is contradicted; "
+                            "check the source spans before forwarding either figure."
+                            if _same_session else
+                            " Different sessions, so both may be correct — the "
+                            "'high' is only a candidate inconsistency, not an "
+                            "established contradiction; check the sessions and the "
+                            "source spans before forwarding either figure."
+                        )
+                    ),
+                })
+                break
 
     # ── Temporal double-count note (v1.8.9 correction, Fix 1) ──────────
     # The baseline endpoint of a temporal pair may ALSO be aligned
@@ -6572,6 +7984,7 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         | {c["entity_key"] for c in conflicts}
         | {m["entity_key"] for m in unit_mismatches}
         | {m["entity_key"] for m in version_mismatches}
+        | {m["entity_key"] for m in denominator_mismatches}
         | {m["entity_key"] for m in evaluation_setting_mismatches}
         | {m["entity_key"] for m in variant_mismatches}
         | {m["entity_key"] for m in benchmark_mismatches}
@@ -6690,6 +8103,13 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         triage_summary += (
             f" {n_version_mismatches} version mismatch(es): same benchmark in "
             "different versions across sources — not comparable, not a conflict."
+        )
+    n_denominator_mismatches = len(denominator_mismatches)
+    if n_denominator_mismatches > 0:
+        triage_summary += (
+            f" {n_denominator_mismatches} denominator mismatch(es): same benchmark "
+            "with different denominators across sources — not comparable, not "
+            "a conflict."
         )
     if n_setting_mismatches > 0:
         triage_summary += (
@@ -6814,11 +8234,15 @@ def compare_documents(analyzed_docs: List[Dict]) -> Dict:
         "statistical_documents": statistical_documents,
         "doc_count":         len(analyzed_docs),
         "shared_claims":     shared_claims,
+        "shared_claims_excluded": shared_claims_excluded,
+        "single_source_headlines": single_source_headlines,
+        "label_contradictions": label_contradictions,
         "unique_claims":     unique_claims,
         "conflicts":         conflicts,
         "alignment":         alignment,
         "unit_mismatches":   unit_mismatches,
         "version_mismatches": version_mismatches,
+        "denominator_mismatches": denominator_mismatches,
         "evaluation_setting_mismatches": evaluation_setting_mismatches,
         "variant_mismatches": variant_mismatches,
         "benchmark_mismatches": benchmark_mismatches,

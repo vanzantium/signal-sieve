@@ -1786,6 +1786,13 @@ def _():
 def _():
     # "up to 95% completion" is a ceiling: a plain 95% and a plain 90%
     # both sit under it, so neither is a conflict.
+    # RC10c item 6 — accepted semantics change, the ONE expectation
+    # change in this round, with its reason recorded here: a ceiling
+    # and a plain point value are compatible but do not assert the
+    # same figure, so the pair routes to clarification (missing
+    # "threshold-vs-point", compatible true) instead of aligning.
+    # The old expectation (ceiling 95 aligns with plain 95) is
+    # obsolete under the RC10 threshold-vs-point semantics.
     r = client.post("/api/v1/compare", json={
         "documents": [
             {"text": "The model reached up to 95% completion on the tasks.",
@@ -1795,10 +1802,15 @@ def _():
         ]
     })
     d = r.get_json()
+    clar = [c for c in d.get("needs_source_clarification", [])
+            if c["entity_key"] == "generic|percentage|completion|||unstated"]
+    assert clar and clar[0].get("compatible") is True \
+        and "threshold-vs-point" in clar[0].get("missing", []), \
+        f"expected ceiling 95 vs plain 95 in clarification (compatible), got {d.get('needs_source_clarification')}"
     aligned = {c["entity_key"]: [v["value"] for v in c.get("values", [])]
                for c in d.get("alignment", [])}
-    assert aligned.get("generic|percentage|completion|||unstated") == [95.0, 95.0], \
-        f"expected ceiling 95 aligned with plain 95, got {aligned}"
+    assert "generic|percentage|completion|||unstated" not in aligned, \
+        f"ceiling vs point must not align, got {aligned}"
     assert not d.get("conflicts")
     r = client.post("/api/v1/compare", json={
         "documents": [
@@ -3447,12 +3459,32 @@ def _():
     # 1 conflict / 42 uniques — the one conflict is the false Sonnet 4.6
     # memory pair. After the fix: aligned, 0 conflicts, same shared /
     # aligned / unique counts, and the pair surfaced as temporal.
+    # RC10c addendum (Taylor-authorized, 2026-11-25) — the SECOND and
+    # last expectation change in this round (F1 was the first), with
+    # its reason recorded here: the re-derived counts are 33 shared /
+    # 32 aligned / 43 unique, temporal 1, clarification 1. The
+    # 128.0-sessions group routes to clarification (missing
+    # "threshold-vs-point", compatible: true) because alfw.ai's
+    # "Building and maintaining the wiki required up to 128 dreaming
+    # sessions" is a genuine ceiling and the other eight 128.0 values
+    # are points — under the accepted threshold-vs-point semantics a
+    # ceiling + points clarify rather than align (RC9 aligned it only
+    # because RC9 predates the threshold diversion). The fourth 48.0
+    # (alfw.ai COVERAGE header "Wiki Scores 48%") does not mint —
+    # pre-existing RC10 feed-header hardening, not a regression.
     d = _packet_compare("2026-11-09", _NOV9_FEEDS)
     assert d.get("agreement_status") == "aligned", d.get("agreement_status")
     assert not d.get("conflicts"), f"Nov 9 must have 0 conflicts, got {d.get('conflicts')}"
-    assert len(d.get("shared_claims", [])) == 34, len(d.get("shared_claims", []))
-    assert len(d.get("alignment", [])) == 33, len(d.get("alignment", []))
-    assert len(d.get("unique_claims", [])) == 42, len(d.get("unique_claims", []))
+    assert len(d.get("shared_claims", [])) == 33, len(d.get("shared_claims", []))
+    assert len(d.get("alignment", [])) == 32, len(d.get("alignment", []))
+    assert len(d.get("unique_claims", [])) == 43, len(d.get("unique_claims", []))
+    clar = [c for c in d.get("needs_source_clarification", [])
+            if c["entity_key"] == "generic|task_count|sessions|||opus-5"]
+    assert len(d.get("needs_source_clarification", [])) == 1, \
+        f"Nov 9 must have exactly 1 clarification (the 128-sessions ceiling), got {d.get('needs_source_clarification')}"
+    assert clar and clar[0].get("compatible") is True \
+        and "threshold-vs-point" in clar[0].get("missing", []), \
+        f"128-sessions group must clarify as threshold-vs-point (compatible), got {d.get('needs_source_clarification')}"
     temporal = [t for t in d.get("temporal_comparisons", [])
                 if t["entity_key"] == "generic|measurement|memory|||sonnet-4-6"]
     assert len(temporal) == 1, f"Nov 9 temporal pair missing, got {d.get('temporal_comparisons')}"
@@ -3771,6 +3803,69 @@ def _():
     av = _aligned_values(d, "generic|task_count|score|bench=artificial-analysis||gemini-4-argon")
     assert len(av.get(50.0, [])) == 2, \
         f"Argon's 50 must align under gemini-4-argon, got {av}"
+
+
+# ── v1.8.10a (RC10a item 6): new comparison fields through the API ──────
+# POST /api/v1/compare returns shared_claims_excluded /
+# single_source_headlines / label_contradictions in JSON, and the capsule
+# carries all three sections with their values — the RC10 verification
+# found the JSON present but the capsule silent.
+
+@test("POST /api/v1/compare returns the three new comparison fields in JSON")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "KingBench 4: the model scored 33.2/60.",
+             "source_name": "Publisher", "source_type": "primary"},
+            {"text": "KingBench 4: the model scored 33.2/100.",
+             "source_name": "Secondary", "source_type": "secondary"},
+            {"text": "On Monday, Anthropic shares hit an intraday high "
+                     "of $111.50.",
+             "source_name": "Secondary-A", "source_type": "secondary"},
+            {"text": "On Tuesday, Anthropic shares hit an intraday high "
+                     "of $114.99.",
+             "source_name": "Secondary-B", "source_type": "secondary"},
+        ]
+    })
+    assert r.status_code == 200, r.get_data(as_text=True)
+    d = r.get_json()
+    # Denominator-split figures are single-source, not aligned.
+    heads = [h for h in d.get("single_source_headlines", [])
+             if h["entity_key"] == "kingbench"]
+    assert len(heads) == 2, f"expected 2 kingbench headlines, got {heads}"
+    assert sorted(h["denominator"] for h in heads) == ["100.", "60."]
+    assert d.get("denominator_mismatches"), \
+        "expected a denominator_mismatches entry for 33.2/60 vs 33.2/100"
+    # Cross-session price pair is a candidate label contradiction.
+    lcs = d.get("label_contradictions", [])
+    assert len(lcs) == 1, f"expected 1 label contradiction, got {lcs}"
+    assert lcs[0]["status"] == "candidate"
+    assert lcs[0]["superlative_value"]["session"] == "monday"
+    assert lcs[0]["exceeding_value"]["session"] == "tuesday"
+    assert "shared_claims_excluded" in d
+
+
+@test("POST /api/v1/compare capsule carries the three new-field sections")
+def _():
+    r = client.post("/api/v1/compare", json={
+        "documents": [
+            {"text": "KingBench 4: the model scored 33.2/60.",
+             "source_name": "Publisher", "source_type": "primary"},
+            {"text": "KingBench 4: the model scored 33.2/100.",
+             "source_name": "Secondary", "source_type": "secondary"},
+            {"text": "On Monday, Anthropic shares hit an intraday high "
+                     "of $111.50.",
+             "source_name": "Secondary-A", "source_type": "secondary"},
+            {"text": "On Tuesday, Anthropic shares hit an intraday high "
+                     "of $114.99.",
+             "source_name": "Secondary-B", "source_type": "secondary"},
+        ]
+    })
+    d = r.get_json()
+    cap = d.get("capsule", "")
+    for needle in ("SINGLE-SOURCE HEADLINES", "SHARED CLAIMS EXCLUDED",
+                   "LABEL CONTRADICTIONS", "33.2", "111.50", "114.99"):
+        assert needle in cap, f"capsule missing {needle!r}:\n{cap}"
 
 
 # ── runner ─────────────────────────────────────────────────────────────────────

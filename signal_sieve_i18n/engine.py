@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 from typing import Dict, Optional
 
 from .lexicons import AVAILABLE
@@ -149,6 +150,42 @@ def _verdict(scores: Dict[str, float], mode: str) -> str:
     return action
 
 
+# Feed metadata lines: the pipeline's own header, not the document.
+_METADATA_LINE_RE = re.compile(
+    r"^(?:Source|Published|Fetched|URL|Author|Length|Coverage)\s*:"
+    r"|^#\s*Source\s*\d+\s*[\u2014\-]"
+    r"|^(?:PRIMARY|SECONDARY|TERTIARY|COVERAGE)\s*[\u2014\-:]"
+    r"|^#{1,6}\s+",
+    re.I,
+)
+
+
+def _is_metadata_line(line: str) -> bool:
+    return bool(_METADATA_LINE_RE.match(line.strip()))
+
+
+# Reported speech: a blockquote, or a paragraph whose opening frame
+# attributes the claim to a named third party ("User qphe95 argues
+# ...", "According to X, ...", "One commenter writes ..."). The frame
+# must sit within the first 80 chars — a late attribution ("... as
+# User X argues") is the document's own sentence quoting a source,
+# not a paragraph of reported speech.
+_ATTRIBUTION_FRAME_RE = re.compile(
+    r"(?:^|:\s*)(?:User\s+\S+|One\s+\w+|A\s+\w+\s+commenter|"
+    r"Commenter\s+\S+|According to\s+\S+)"
+    r"\s+(?:argues?|says?|said|claims?|claimed|writes?|wrote|posts?|"
+    r"posted|notes?|noted|reports?|reported)\b",
+    re.I,
+)
+
+
+def _is_quoted_paragraph(line: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith(">"):
+        return True
+    return bool(_ATTRIBUTION_FRAME_RE.search(stripped[:80]))
+
+
 def analyze(text: str, language: Optional[str] = None,
             strong_custody: bool = False) -> Dict:
     route = _route(text, language)
@@ -194,7 +231,18 @@ def analyze(text: str, language: Optional[str] = None,
 
     worst = None
     capped = False
-    paragraphs = [paragraph for paragraph in text.splitlines() if paragraph.strip()]
+    # v1.8.10 (RC10, run-23 gap 7 / run-24 gap 7): the paragraph
+    # guardrail scores every non-empty line as a paragraph — including
+    # the pipeline's own feed header ("Source: ...") and a paragraph
+    # that only REPORTS a third party's words ("User qphe95 argues
+    # ..."). Neither is the document's own assertion, so neither may
+    # cap the document's verdict. Metadata lines, blockquotes, and
+    # attribution-frame paragraphs are skipped here; the document-level
+    # score still sees them.
+    paragraphs = [paragraph for paragraph in text.splitlines()
+                  if paragraph.strip()
+                  and not _is_metadata_line(paragraph)
+                  and not _is_quoted_paragraph(paragraph)]
     if len(paragraphs) > 1 and pack is not None:
         paragraph_results = []
         for paragraph in paragraphs:
